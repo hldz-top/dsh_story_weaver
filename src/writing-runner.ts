@@ -9,6 +9,7 @@ import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
 import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
+import { openCodeGoKey, stageAgentOptions, OPENCODE_GO_KEY_ENV } from './opencode-go.ts'
 import { proseView } from './prose-view.ts'
 import { aiToneHits } from './ai-tone.ts'
 import { buildResearchPrompt, validateResearchStageResult, RESEARCH_STAGE_OUTPUT_SCHEMA, researchStageTools, researchToolAuthorization } from './research-stage.ts'
@@ -31,6 +32,11 @@ export type StartWritingInput = Omit<BeginRunInput, 'executionLimits' | 'service
 export interface WritingRunnerOptions {
   /** Skip the required-settings gate. Plugin config only, default false; for smoke and unit tests. Not stored with runs. */
   readonly allowIncompleteSettings?: boolean
+  /**
+   * `opencode-go` pins every writing child to the Go subscription model and refuses to inherit another provider.
+   * `inherit` and omission keep the parent route. Not stored on the run.
+   */
+  readonly writingModel?: 'inherit' | 'opencode-go'
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -651,6 +657,14 @@ export class WritingRunner {
    * execution; then the stage fails with an explicit exhaustion message. Every other stage outcome (success, or any
    * other failure) settles in exactly one prepareAttempt/executeStage pass.
    */
+  /** Go selection is resolved before the child starts, so a missing key cannot inherit another provider. */
+  private writingModelConfig(): { readonly model?: { readonly provider: string; readonly model: string } } {
+    const model = stageAgentOptions(this.options.writingModel)
+    if (model === undefined) return {}
+    openCodeGoKey(process.env[OPENCODE_GO_KEY_ENV])
+    return { model }
+  }
+
   private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' = 'stored'): Promise<CapturedStage> {
     for (let retry = 0; ; retry++) {
       inv.actor.signal?.throwIfAborted()
@@ -670,7 +684,7 @@ export class WritingRunner {
             if (readView === 'prose') stopProse = this.service.serveProseTo(childSessionId)
             attempt = await this.runs.associateChild(inv.actor, inv.run.id, attempt.id, childSessionId)
           },
-        }, { ...inv.run.executionLimits, allowedTools }).finally(() => stopProse?.())
+        }, { ...inv.run.executionLimits, allowedTools, ...this.writingModelConfig() }).finally(() => stopProse?.())
         const text = JSON.stringify(result.structured)
         if (text === undefined) throw new Error('Native stage returned no serializable structured output')
         attempt = await this.runs.saveOutput(inv.actor, inv.run.id, attempt.id, text)

@@ -90,7 +90,7 @@ it('unloads the actual plugin only after its active native run saves stopped sta
   fixture.ctx.effect(() => fixture.ctx.web.registerFetchProvider({ id: 'unused-fetch', available: () => true, fetch: async request => ({ url: request.url, statusCode: 200, body: { kind: 'text', content: 'Unused offline response.' }, truncated: false }) }))
   await fixture.ctx.plugin(ToolWeb, { searchMaxQueries: 4, searchMaxResults: 8, searchTimeoutMs: 5000, fetchTimeoutMs: 5000, fetchMaxOutputChars: 10000 })
   await fixture.ctx.plugin(Present, new Present.Config())
-  const plugin = await fixture.ctx.plugin(Story, new Story.Config({ ...new Story.Config(), stageProvider: 'stage-spawn', allowIncompleteSettings: true }))
+  const plugin = await fixture.ctx.plugin(Story, new Story.Config({ ...new Story.Config(), stageProvider: 'stage-spawn', allowIncompleteSettings: true, writingModel: 'inherit' }))
   const runner = fixture.ctx.storyRunner
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
   const actor = { sessionId: fixture.parent.session.id, workspace: workspace.displayPath }

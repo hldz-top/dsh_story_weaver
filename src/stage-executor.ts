@@ -15,13 +15,14 @@ export interface StageRequest {
   readonly authorizeTool?: (execution: ToolExecution) => Promise<void>
 }
 
-/** Deployment-owned finite execution limits; the model route remains inherited. */
+/** Deployment-owned finite execution limits. `model` replaces the inherited route for this child only. */
 export interface StageExecutionConfig {
   readonly stageProvider: string
   readonly maxDelegationDepth: number
   readonly allowedTools: readonly string[]
   readonly maxStageRequests: number
   readonly stageTimeoutMs: number
+  readonly model?: { readonly provider: string; readonly model: string }
 }
 
 /** Validated native structured capture and the Session containing its evidence. */
@@ -167,6 +168,7 @@ export async function executeStage(ctx: Context, exec: ToolExecution, request: S
     const run = await ctx.subagents.start(config.stageProvider, {
       parent, label: request.attemptId, prompt: [{ type: 'text', text: request.prompt }], signal,
       outputSchema: request.outputSchema, toolFilter: { allow: [...config.allowedTools] }, maxDepth: config.maxDelegationDepth,
+      ...(config.model === undefined ? {} : { agentOptions: { provider: config.model.provider, model: config.model.model } }),
     })
     childId = run.id
     childAgent = run.localAgent

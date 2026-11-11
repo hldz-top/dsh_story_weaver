@@ -13,6 +13,7 @@ import { registerRunTools } from './run-tools.ts'
 import { StageDeliveries, registerStageDeliveryProjection } from './stage-deliveries.ts'
 import type { ResearchLimits } from './contracts.ts'
 import { onQuoteRepair } from './evidence-quote.ts'
+import { OPENCODE_GO_PROVIDER, OpenCodeGoAdapter } from './opencode-go.ts'
 
 export { openWritingService, WritingService } from './service.ts'
 export * from './contracts.ts'
@@ -41,6 +42,11 @@ export interface Config extends ResearchLimits, RunExecutionLimits {
   allowSettingsImport: boolean
   /** Body reviews on prompt version 5 turn AI-tone findings quoting the body into blocking issues. Frozen into each new run. Default true. */
   aiToneBlocking: boolean
+  /**
+   * Writing-stage model channel. `opencode-go` pins children to the Go subscription model and does not inherit
+   * another provider. `inherit` keeps the parent route. Default `opencode-go`.
+   */
+  writingModel: string
 }
 
 export const Config: z<Config> = z.object({
@@ -59,6 +65,7 @@ export const Config: z<Config> = z.object({
   allowIncompleteSettings: z.boolean().default(false),
   allowSettingsImport: z.boolean().default(false),
   aiToneBlocking: z.boolean().default(true),
+  writingModel: z.string().default('opencode-go'),
   maxResearchQuestions: z.number().default(12),
   maxResearchCalls: z.number().default(12),
   maxResearchSources: z.number().default(24),
@@ -67,7 +74,7 @@ export const Config: z<Config> = z.object({
 })
 
 export const name = 'dsh-story-weaver'
-export const inject = ['storageDomain', 'tools', 'fs', 'subagents', 'sessions', 'sessionPersistence', 'sessionProjections']
+export const inject = ['storageDomain', 'tools', 'fs', 'subagents', 'sessions', 'sessionPersistence', 'sessionProjections', 'llm']
 
 /**
  * Mount one writing service and its tools on the existing DSH capabilities.
@@ -90,6 +97,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.stageTimeoutMs > 2_147_483_647) throw new Error('stageTimeoutMs exceeds the supported timer range')
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
+  if (config.writingModel !== 'inherit' && config.writingModel !== 'opencode-go') throw new Error('writingModel must be inherit or opencode-go')
+  const writingModel = config.writingModel
   const executionLimits: RunExecutionLimits = { stageProvider: config.stageProvider, maxDelegationDepth: config.maxDelegationDepth,
     maxStageRequests: config.maxStageRequests, stageTimeoutMs: config.stageTimeoutMs, maxRepairAttempts: config.maxRepairAttempts,
     maxParallelStages: config.maxParallelStages, minChapterWords: config.minChapterWords, maxChapterWords: config.maxChapterWords,
@@ -120,7 +129,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
   registerStageDeliveryProjection(ctx)
-  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings })
+  ctx.effect(() => ctx.llm.registerAdapter([OPENCODE_GO_PROVIDER], new OpenCodeGoAdapter()))
+  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, writingModel })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)
   registerWritingTools(ctx, service, config.previewDirectory)
