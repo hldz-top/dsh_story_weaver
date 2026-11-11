@@ -83,11 +83,12 @@ The run store migrates plugin-owned version-1 novel-run records to version 2 wit
 
 ## Configuration
 
-[`Config` and plugin application](../../src/index.ts) own defaults and validation. The required host services are `storageDomain`, `tools`, `fs`, `subagents`, `sessions`, `sessionPersistence` and `sessionProjections`. The native `present` tool must be available in the actual calling Agent scope; start, revise and resume check availability before admitting work. Deployment must configure the verified in-process spawn provider and native web tools/providers used by research; a nonblank provider name alone does not verify its implementation.
+[`Config` and plugin application](../../src/index.ts) own defaults and validation. The required host services are `storageDomain`, `tools`, `fs`, `subagents`, `sessions`, `sessionPersistence`, `sessionProjections` and `llm`. The native `present` tool must be available in the actual calling Agent scope; start, revise and resume check availability before admitting work. Deployment must configure the verified in-process spawn provider and native web tools/providers used by research; a nonblank provider name alone does not verify its implementation.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `stageProvider` | `spawn` | Configured native in-process subagent provider; not an LLM model/provider override. |
+| `writingModel` | `opencode-go` | Pins each writing child to OpenCode Go `deepseek-v4.1-flash` at `https://opencode.ai/inference/go/openai/v1/chat/completions`. The key is `OPENCODE_API_KEY`. A missing or unusable key fails before the child starts and does not inherit another provider. `inherit` keeps the parent model route. |
 | `maxDelegationDepth` | `2` | Positive absolute native child depth cap. |
 | `maxStageRequests` | `96` | Positive model-dispatch allowance per native child, including retries. |
 | `stageTimeoutMs` | `600000` | Stage deadline in milliseconds, including startup and cleanup; cancellation still waits for owned work to settle. Maximum `2147483647`. |

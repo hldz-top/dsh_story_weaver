@@ -62,6 +62,7 @@ it('publishes the bounded native run defaults without overriding the model route
     minChapterWords: 3000, maxChapterWords: 5000 })
   expect(Object.hasOwn(config, 'provider')).toBe(false)
   expect(Object.hasOwn(config, 'model')).toBe(false)
+  expect(config.writingModel).toBe('opencode-go')
 })
 
 const positiveRunFields = ['maxDelegationDepth', 'maxStageRequests', 'stageTimeoutMs', 'maxParallelStages', 'maxRunAttempts'] as const
