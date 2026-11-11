@@ -73,4 +73,18 @@ A read-only reference of `hldz-top/story_weaver` master `0cac906317305609a0a0b57
 | Revision | `novel_chapter_revise_prompt.txt` (`52309421…`) polishes one draft and forbids plot changes. | Author `revisionInstructions` on settings and outlines must be applied without inventing a new plot. Body repair still preserves passages that no blocking issue names, except a host length repair. | Replacing `story_revise` with an expression-only polish pass. That tool revises the named upstream settings or outline, then stops. |
 | Continuity | `narrative_state_update_novel.txt` (`cafae566…`) emits a five-part Markdown ledger and writes “no change” explicitly. | Character state, timeline and obligations change only when the reviewed prose supports them. An obligation is fulfilled only when the prose performs it. | The Markdown ledger, `character_id` columns, and a foreshadowing ledger. Those fields are not in the continuity schema. |
 
-Version 6 was not rewritten against these templates. Further prompt edits wait until the V2 Python instructions at `0cac9063` are read. Until then this pull request does not establish that the current Story runtime and the DSH prompts match. Mocked tests still do not establish prose quality.
+## V2 runtime comparison at the same tip
+
+The runtime supplement for `0cac906317305609a0a0b579b1db62eaf266d0f0` contains 63 `writing_pipeline` sources, including the inline role prompts. Billing, lane, and storage modules were omitted from that pack and were not copied. The root `prompts/*.txt` files are not this runtime. `novel_review_prompt.txt` and `novel_approval_prompt.txt` remain non-contracts.
+
+Version 6 now borrows these runtime constraints, mapped onto the existing fields and the existing blocking set:
+
+| Runtime source | Borrowed into version 6 | Excluded |
+| --- | --- | --- |
+| `settings_graph.py` dimension/patcher plus `_SETTINGS_HUMAN_PROSE_CONTRACT` | Reader-facing `contentMarkdown`; no catalog codes, JSON names, or mechanical ratios; do not lock later plot to fixed chapter numbers. People still get one want, one limit, and one relationship. | Mandatory `g1`/`g4`/`e1` closure, `first_use_chapter = 1`, “first big payoff by chapter 3”, 0.5–2K dimension cap, and `positioning_pacing` as a blocker. |
+| `outline_graph.py` proposer | Writing guidance stays specific to this story and does not imitate a named author. Repair still follows the named host rejection. | A separate research-planner/executor/curator role set and its search budgets. |
+| `chapter_outline_graph.py` proposer and reviewer | `throughLine` is what the protagonist sets out to do and how the chapter ends. An obligation is required here only when the book outline assigns it; a later due date is a reminder. Thin guidance stays advisory. | Per-scene 1,500-word ceilings, `accepted=true` flags, C4 hollow-field blockers, and upstream ChangeRequest locators. |
+| `body_graph.py` proposer and reviewer | Continue from the previous scene and close so the next can pick up. Do not repeat an explanation, end on a narrator thesis, stack metaphors, or drift time. Those style hits stay advisory, with one cited rewrite. Through-line, knowledge, and timeline contradictions stay on the existing blocking categories. | Scene word ceilings, sentence-skeleton and AI-tone as new DSH categories, and the reviewer’s full 17-item checklist as gates. AI tone stays on the existing host detector. |
+| `body_lifecycle_graph.py` continuity roles and `review_contract.py` | Continuity still changes only what the reviewed prose supports. Acceptance stays “no unresolved blocking issue”, not a model approval flag. | Quote-length machinery, fingerprint stagnation, round-2 carry rules, and obligation/ending lifecycle agents. `story_revise` still edits one upstream settings or outline version and stops. |
+
+Mocked tests still do not establish prose quality.
