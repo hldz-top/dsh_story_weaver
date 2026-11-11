@@ -62,7 +62,11 @@ function readVersion(fixture: Awaited<ReturnType<typeof useWritingFixture>>, art
 }
 
 it.each(['a1', 'book-outline', 'chapter-outline'] as const)('revises %s without downstream writing, then applies an explicit chapter update', async target => {
-  const fixture = await useWritingFixture({ intervene: reviseFiction })
+  const stagePrompts: string[] = []
+  const fixture = await useWritingFixture({ intervene: reviseFiction, onChildRequest(_stage, request) {
+    const text = request.messages.flatMap(message => message.content.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n')
+    if (text.includes('You perform one novel-writing stage')) stagePrompts.push(text)
+  } })
   const nativeErrors: unknown[] = []
   fixture.ctx.on('agent/error', event => { nativeErrors.push(event.error) }, { global: true })
   const scope = { ...fixture.input, chapterCount: 1, throughChapter: 1 }
@@ -81,6 +85,14 @@ it.each(['a1', 'book-outline', 'chapter-outline'] as const)('revises %s without 
   const revised = completed(await fixture.run(exec => fixture.runner.revise(exec, revision)), nativeErrors)
   const revisedStages = [...fixture.stages.values()].filter(stage => !beforeChildren.has(stage.sessionId))
   expect(revisedStages.map(stage => stage.kind).sort()).toEqual(['research-planning', 'research', 'review', target === 'a1' ? 'settings' : target].sort())
+  const revising = stagePrompts.filter(prompt => prompt.includes(`revisionInstructions\\":\\"${revisedFact}`))
+  expect(revising.length).toBeGreaterThan(0)
+  for (const prompt of revising) {
+    expect(prompt).toContain('Do not expand the revision into a new plot')
+    expect(prompt).not.toContain('one present want')
+  }
+  if (target === 'a1') expect(revising.every(prompt => prompt.includes('Do not expand this classification into motives'))).toBe(true)
+  expect(stagePrompts.some(prompt => prompt.includes('"kind": "review"') && prompt.includes('one repair step'))).toBe(true)
   expect(revised.attempts.every(attempt => attempt.status === 'succeeded')).toBe(true)
   const impacted = fixture.service.getManuscript(fixture.actor, fixture.novel.id)
   const newBase = target === 'a1' ? fixture.service.getSettings(fixture.actor, fixture.novel.id).applied.find(dimension => dimension.dimensionCode === 'a1')
