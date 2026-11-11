@@ -19,7 +19,7 @@ function lastLine(text: string | null | undefined): Record<string, unknown> {
 }
 
 describe('prompt version 5', () => {
-  it('is the version new runs record', () => { expect(CURRENT_PROMPT_VERSION).toBe(5) })
+  it('is no longer the version new runs record', () => { expect(CURRENT_PROMPT_VERSION).toBe(6) })
 
   it('keeps every stage byte-identical to version 4 unless a body review has the switch on', () => {
     for (const kind of kinds) for (const reviewedKind of [undefined, ...kinds]) {
@@ -164,7 +164,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   it('repairs a body whose review quotes AI tone, telling the writer the exact spans, then applies the clean repair', { timeout: 120_000 }, async () => {
     const { fixture, bodyTasks, reviewPrompts } = await scripted({ prefix: attempt => attempt === 0 ? '说白了，雾港的灯不是灯而是路标。' : '雾港的灯为船指路。', quotes: review => review === 0 ? ['说白了'] : [] })
     const run = await write(fixture)
-    expect(run).toMatchObject({ status: 'completed', promptVersion: 5, executionLimits: { aiToneBlocking: true } })
+    expect(run).toMatchObject({ status: 'completed', promptVersion: 6, executionLimits: { aiToneBlocking: true } })
     expect(bodyTasks).toHaveLength(2)
     expect(lastLine(bodyTasks[1])).toEqual({ code: 'review-blocked', reason: 'ai-tone', spans: ['说白了'] })
     expect(reviewPrompts[0]).toContain(BLOCKING_PHRASE)
@@ -298,7 +298,7 @@ describe('aiToneBlocking off on version 5 behaves like version 4', () => {
   it('keeps AI tone advisory and the version-4 review sentence', { timeout: 120_000 }, async () => {
     const { fixture, bodyTasks, reviewPrompts } = await scripted({ prefix: () => '说白了，灯灭了。', quotes: () => ['说白了'] }, { executionLimits: { aiToneBlocking: false } })
     const run = await write(fixture)
-    expect(run).toMatchObject({ status: 'completed', promptVersion: 5, executionLimits: { aiToneBlocking: false } })
+    expect(run).toMatchObject({ status: 'completed', promptVersion: 6, executionLimits: { aiToneBlocking: false } })
     expect(bodyTasks).toHaveLength(1)
     expect(reviewPrompts[0]).toContain(ADVISORY_PHRASE)
     expect(reviewPrompts[0]).not.toContain(BLOCKING_PHRASE)
@@ -326,7 +326,7 @@ describe('resume rules', () => {
     expect(reviewPrompts[0]).toBe(reviewPrompts[0]!.replace(BLOCKING_PHRASE, ''))
   })
 
-  it('(2) refuses a version-5 run whose record lacks the field instead of treating it as off', async () => {
+  it('(2) refuses a current-version run whose record lacks the field instead of treating it as off', async () => {
     const fixture = await useWritingFixture()
     const stopped = await begin(fixture, fixture.runner.limits)
     expect(stopped.executionLimits.aiToneBlocking).toBe(true)
@@ -341,10 +341,10 @@ describe('resume rules', () => {
     expect(fixture.childRequests).toEqual([])
   })
 
-  it('(3) refuses a version-5 run whose recorded value differs from the current config, in the limit-mismatch style', async () => {
+  it('(3) refuses a current-version run whose recorded value differs from the current config, in the limit-mismatch style', async () => {
     const fixture = await useWritingFixture()
     const stopped = await begin(fixture, { ...fixture.runner.limits, aiToneBlocking: false })
-    expect(stopped).toMatchObject({ promptVersion: 5, executionLimits: { aiToneBlocking: false } })
+    expect(stopped).toMatchObject({ promptVersion: 6, executionLimits: { aiToneBlocking: false } })
     const outcome = await fixture.run(exec => fixture.runner.resume(exec, stopped.id, false))
     expect(outcome).toMatchObject({ status: 'rejected', reason: { code: 'run-limits', message: expect.stringContaining('Restore the captured writing and research limits before resuming') } })
     if (outcome.status !== 'rejected') throw new Error('Resume was not refused')

@@ -95,7 +95,7 @@ const attemptSchema = z.strictObject({
   failureKind: attemptFailureKindSchema.optional(),
   // Host evidence repairs and drops from admitting this attempt's output; absent when none (and on older records).
   evidenceEvents: z.array(evidenceEventSchema).max(MAX_EVIDENCE_EVENTS).optional(),
-  // Prompt version 5 body reviews only: set on a review whose body the host blocked for AI tone. The review artifact itself
+  // Prompt version 5 or later body reviews: set on a review whose body the host blocked for AI tone. The review artifact itself
   // stays as the reviewer wrote it (its AI-tone issues are advisory), so this marker is what shows the block before any
   // manual use of that body. Absent on every other attempt and on older records.
   aiToneBlock: aiToneBlockSchema.exactOptional(),
@@ -109,7 +109,7 @@ const runSchema = z.strictObject({
   startedBy: sessionIdSchema, lastResumedBy: sessionIdSchema,
   attempts: z.array(attemptSchema), error: z.string().nullable(),
   // Prompt text version fixed at creation so a resume rebuilds identical prompts; absent on runs created before versioning (= 1).
-  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(),
+  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(),
 })
 /** Detached progress metadata; raw stage outputs are read explicitly. */
 export type WritingRun = Omit<RunRecord, 'attempts'> & { readonly attempts: readonly WritingAttempt[] }

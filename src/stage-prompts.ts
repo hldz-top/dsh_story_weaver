@@ -7,11 +7,11 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * Prompt text version recorded on each new run. A run keeps the version it started with for its whole life, so a resume
  * rebuilds byte-identical prompts and output schemas for every stage key (RunStore.prepareAttempt rejects a changed
  * prompt under an existing key). Version 1 is the text before chapter-quality guardrails and stays frozen; runs stored
- * without a version are version 1.
+ * without a version are version 1. Version 6 appends writing-quality sentences for new runs only; versions 1–5 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 5
+export const CURRENT_PROMPT_VERSION: PromptVersion = 6
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity'
@@ -107,6 +107,48 @@ const aiToneWritingGuardrails: Partial<Record<StagePromptKind, readonly string[]
 }
 
 /**
+ * Version 6 writing-quality sentences. They reuse the existing output fields and the existing blocking set
+ * (missing required events, settings or persona contradictions, cross-chapter continuity conflicts, host-measured length).
+ * Thin motivation, wording and taste stay advisory. Versions 1–5 do not receive these sentences.
+ */
+const REVISION_SCOPE = 'When task.revisionInstructions is present, apply that author instruction and re-check the result against the accepted inputs. Do not expand the revision into a new plot or a new dimension.'
+const SETTINGS_PEOPLE = 'When this dimension defines people, give each person one present want, one limit they will not cross yet, and one relationship fact later stages must reuse. Ground those facts in the creative brief and accepted dependencies. Do not add a biography this dimension does not own.'
+const SETTINGS_CLASSIFICATION_BOUND = 'Stay inside the label, its grounds and the constraints later stages must honor. Do not expand this classification into motives, biographies or world facts.'
+const BOOK_MOTIVE = 'In each characterArcs.development, state the person’s starting want, the pressure that changes it, and where they stand at the ending. Each chapter.purpose names what the protagonist wants in that chapter and the concrete risk of its required events. Obligations are events later prose must perform, not themes.'
+const CHAPTER_MOTIVE = 'Each scene.action names who chooses, what they want in that moment, and the cost or revelation of the choice. throughLine is that chain of choices. Do not schedule an event that contradicts previous applied continuity or what a character can know. stateNotes may record only positions and physicality already fixed by settings or prior continuity.'
+const BODY_MOTIVE = 'Show the viewpoint character’s present want inside the choice: what they notice, what they do, and the cost already established by settings or prior applied continuity. Do not summarize the outline, announce the theme, or grant knowledge, tools or injuries those sources do not support.'
+const CONTINUITY_MOTIVE = 'For a character the reviewed prose actually changes, record location, knowledge, condition and relationships only as that prose supports them. Each timeline.event states what the prose shows, with a quote from the reviewed body. Leave a fact unchanged when the chapter does not touch it. Mark an obligation fulfilled only when the prose performs it, not when a character merely intends it.'
+const REVIEW_ACTION = 'Write each issue.message as one repair step: the location, the exact conflict or omission, and the smallest change that fixes it. A successful check.summary names the evidence that satisfied it. Do not request a full rewrite or a change to an accepted upstream source. Open a blocking category only for a missing required event, a settings or persona contradiction (including a spatial impossibility or a non-physical thing written as an object), a cross-chapter continuity conflict, or a chapter-length violation the host already measured in task.measuredWordCount or task.measuredLength. Anything else, including thin motivation, plain wording and taste, is category style and severity advisory.'
+const REVIEW_BY_KIND: Partial<Record<StagePromptKind, string>> = {
+  settings: 'Do not demand motives or world detail from a classification dimension. On a free-form character dimension, a goal that contradicts the brief or an accepted dependency is a blocking consistency issue; missing color is advisory style.',
+  'book-outline': 'An arc that states want, pressure and end state is complete. A thin but present arc is an advisory style note naming the character. A contradiction with accepted settings is a blocking consistency issue.',
+  'chapter-outline': 'A scene.action that names the choice, motive and cost is complete even if the wording is plain. Missing required obligations are blocking. A vague but present plan is an advisory style note naming the scene id to sharpen.',
+  body: 'A consistency issue quotes a choice that uses knowledge, a motive or a physical fact the accepted settings and prior continuity deny. A continuity issue quotes the prior applied fact and the sentence that breaks it. An obligations issue names the required event and shows the prose does not perform it. AI-tone issues stay category style and severity advisory, as the AI-tone instruction states.',
+  continuity: 'Block when a new fact or a fulfilled obligation is not supported by the reviewed body, or when the chapter drops or alters a fact it does not change. A plain summary is not a block.',
+}
+
+/** @param request - The stage being prompted. @returns Version-6 sentences for that stage, or none before version 6. */
+function qualityParagraphs(request: StagePromptRequest): readonly string[] {
+  if ((request.promptVersion ?? 1) < 6) return []
+  switch (request.kind) {
+    case 'settings':
+      return [request.settingsDimensionKind !== undefined && ENUM_SETTINGS_KINDS.has(request.settingsDimensionKind) ? SETTINGS_CLASSIFICATION_BOUND : SETTINGS_PEOPLE, REVISION_SCOPE]
+    case 'book-outline':
+      return [BOOK_MOTIVE, REVISION_SCOPE]
+    case 'chapter-outline':
+      return [CHAPTER_MOTIVE, REVISION_SCOPE]
+    case 'body':
+      return [BODY_MOTIVE]
+    case 'continuity':
+      return [CONTINUITY_MOTIVE]
+    case 'review': {
+      const specific = request.reviewedKind === undefined ? undefined : REVIEW_BY_KIND[request.reviewedKind]
+      return specific === undefined ? [REVIEW_ACTION] : [REVIEW_ACTION, specific]
+    }
+  }
+}
+
+/**
  * Version 2 chapter-quality guardrails, appended after the frozen version-1 instructions of their stage
  * (quality-plan.md v3 P2; qa-ch1-v2.md 四.1–四.4, 五, 六.4; qa-ch1-v2-style.md B1, B2, L8).
  */
@@ -190,6 +232,7 @@ export function buildStagePrompt(request: StagePromptRequest): string {
     ...((request.promptVersion ?? 1) >= 3 && (request.kind !== 'review' || request.reviewedKind === 'body')
       ? ((request.promptVersion ?? 1) >= 5 && request.aiToneBlocking === true && request.kind === 'review' ? aiToneBlockingGuardrails : aiToneGuardrails)[request.kind] ?? [] : []),
     ...((request.promptVersion ?? 1) >= 4 ? aiToneWritingGuardrails[request.kind] ?? [] : []),
+    ...qualityParagraphs(request),
   ]
   return [...instructions, 'TASK_DATA', JSON.stringify({
     novelId: request.novelId, kind: request.kind, inputs: request.inputs, task: request.task, requirements: request.requirements,
