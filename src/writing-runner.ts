@@ -38,6 +38,19 @@ interface ActiveRun { readonly controller: AbortController; readonly done: Promi
 /** Why a candidate is regenerated: a host length finding asks for every scene to be rescaled, a blocked review or unmet obligation for its documented defects to be repaired. */
 type RepairMode = 'length' | 'review'
 
+/** Review children use this deadline. Every other stage keeps the run's stageTimeoutMs. */
+export const REVIEW_STAGE_TIMEOUT_MS = 1_200_000
+
+/**
+ * How many settings dimensions in one dependency layer start together.
+ * @param limits - Limits stored on the run. A missing candidate count is 1.
+ * @returns The batch width, never above maxParallelStages and never below 1.
+ */
+export function settingsLayerWidth(limits: Pick<RunExecutionLimits, 'maxParallelStages' | 'settingsCandidateCount'>): number {
+  const candidates = limits.settingsCandidateCount ?? 1
+  return Math.min(limits.maxParallelStages, candidates)
+}
+
 /** Owns in-process execution; durable stores own versions and recovery receipts. */
 export class WritingRunner {
   private readonly active = new Map<RunId, ActiveRun>()
@@ -389,8 +402,9 @@ export class WritingRunner {
         }
       }
       for (const layer of plan.layers) {
-        for (let offset = 0; offset < layer.length; offset += inv.run.executionLimits.maxParallelStages) {
-          const results = await Promise.allSettled(layer.slice(offset, offset + inv.run.executionLimits.maxParallelStages).map(code => this.dimension(inv, code, round, feedback)))
+        const width = settingsLayerWidth(inv.run.executionLimits)
+        for (let offset = 0; offset < layer.length; offset += width) {
+          const results = await Promise.allSettled(layer.slice(offset, offset + width).map(code => this.dimension(inv, code, round, feedback)))
           const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason as unknown] : [])
           if (failures.length > 0) throw new AggregateError(failures, 'A settings layer could not complete')
         }
@@ -638,7 +652,9 @@ export class WritingRunner {
       ], ...(settingsDimensionKind === undefined ? {} : { settingsDimensionKind }), ...(settingsCollectionKinds === undefined ? {} : { settingsCollectionKinds }),
       ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}), promptVersion: promptVersionOf(inv.run),
       ...(kind === 'review' && reviewedKind === 'body' && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}) })
-    return this.capture(inv, key, prompt, allRefs, nativeStageOutputSchema(kind, promptVersionOf(inv.run)), ['story_read_artifact'], undefined, prose ? 'prose' : 'stored')
+    const review = kind === 'review'
+    return this.capture(inv, key, prompt, allRefs, nativeStageOutputSchema(kind, promptVersionOf(inv.run)), ['story_read_artifact'], undefined, prose ? 'prose' : 'stored',
+      review ? REVIEW_STAGE_TIMEOUT_MS : inv.run.executionLimits.stageTimeoutMs, review)
   }
 
   private proseChars(inv: Invocation, ref: ArtifactRef): number { return this.service.proseChars(inv.actor, { novelId: inv.run.novelId, artifactId: ref.id }) }
@@ -648,10 +664,12 @@ export class WritingRunner {
    * the exact same key and byte-identical prompt, never a successor key: prepareAttempt already permits replacing a
    * latest 'failed' attempt, so this keeps a later resume's replay deterministic (it recomputes the same key first and
    * finds the eventual success, no duplicate paid call). At most maxRepairAttempts automatic retries follow the first
-   * execution; then the stage fails with an explicit exhaustion message. Every other stage outcome (success, or any
-   * other failure) settles in exactly one prepareAttempt/executeStage pass.
+   * execution; then the stage fails with an explicit exhaustion message. A review whose child exceeds its execution
+   * deadline is recorded unknown and retryAuthorized once, then replaced under the same key. A second consecutive
+   * review timeout leaves retryAuthorized false and fails closed. Every other outcome settles in one pass.
    */
-  private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' = 'stored'): Promise<CapturedStage> {
+  private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' = 'stored', stageTimeoutMs = inv.run.executionLimits.stageTimeoutMs, authorizeReviewTimeout = false): Promise<CapturedStage> {
+    let reviewTimeoutRetries = 0
     for (let retry = 0; ; retry++) {
       inv.actor.signal?.throwIfAborted()
       if (this.service.getNovel(inv.actor, inv.run.novelId).brief.id !== inv.run.briefArtifactId) throw new WritingError('revision-conflict', 'Creative brief changed during writing')
@@ -670,7 +688,7 @@ export class WritingRunner {
             if (readView === 'prose') stopProse = this.service.serveProseTo(childSessionId)
             attempt = await this.runs.associateChild(inv.actor, inv.run.id, attempt.id, childSessionId)
           },
-        }, { ...inv.run.executionLimits, allowedTools }).finally(() => stopProse?.())
+        }, { ...inv.run.executionLimits, stageTimeoutMs, allowedTools }).finally(() => stopProse?.())
         const text = JSON.stringify(result.structured)
         if (text === undefined) throw new Error('Native stage returned no serializable structured output')
         attempt = await this.runs.saveOutput(inv.actor, inv.run.id, attempt.id, text)
@@ -684,11 +702,16 @@ export class WritingRunner {
         // A provider refusal or an output-length cut-off is also a completed model call with a known, unusable result.
         // It is recorded with its explicit classification and not retried: an identical request would meet the same limit or policy.
         const kind = cause instanceof StageExecutionError ? failureKind(cause.code) : undefined
+        const outcome = (retryable || toolScope || kind !== undefined || !published) ? 'failed' as const : 'unknown' as const
+        // A published review deadline is an unknown model outcome. Authorize one replacement; do not do that for a
+        // timeout that never published a child, or for any non-review stage.
+        const permitReviewTimeout = authorizeReviewTimeout && cause instanceof StageExecutionError && cause.code === 'stage-timeout' && outcome === 'unknown' && reviewTimeoutRetries < 1
         const latest = this.runs.get(withoutSignal(inv.actor), inv.run.id).attempts.find(item => item.id === attempt.id)
         if (latest?.status === 'prepared' || latest?.status === 'running') {
-          try { await this.runs.failAttempt(withoutSignal(inv.actor), inv.run.id, attempt.id, { outcome: retryable || toolScope || kind !== undefined || !published ? 'failed' : 'unknown', message: message(cause), ...(kind === undefined ? {} : { kind }) }) }
+          try { await this.runs.failAttempt(withoutSignal(inv.actor), inv.run.id, attempt.id, { outcome, message: message(cause), ...(kind === undefined ? {} : { kind }), ...(permitReviewTimeout ? { retryAuthorized: true } : {}) }) }
           catch (storageCause) { throw new AggregateError([cause, storageCause], 'Native stage failed and its outcome could not be recorded', { cause }) }
         }
+        if (permitReviewTimeout) { reviewTimeoutRetries += 1; continue }
         if (!retryable) throw cause
         if (retry < inv.run.executionLimits.maxRepairAttempts) continue
         const retries = inv.run.executionLimits.maxRepairAttempts

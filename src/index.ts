@@ -56,6 +56,11 @@ export const Config: z<Config> = z.object({
   stageTimeoutMs: z.number().default(600_000),
   maxRepairAttempts: z.number().default(2),
   maxParallelStages: z.number().default(3),
+  /**
+   * How many settings dimensions in one dependency layer may start together.
+   * The layer still will not exceed maxParallelStages. Default 1.
+   */
+  settingsCandidateCount: z.number().default(1),
   maxRunAttempts: z.number().default(512),
   minChapterWords: z.number().default(3000),
   maxChapterWords: z.number().default(5000),
@@ -89,8 +94,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     || directory.split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..' || segment.trim() !== segment)) {
     throw new Error('previewDirectory must be a normalized relative directory with nonempty path segments')
   }
+  const settingsCandidateCount = config.settingsCandidateCount ?? 1
   for (const [name, value] of Object.entries({ maxDelegationDepth: config.maxDelegationDepth, maxStageRequests: config.maxStageRequests,
-    stageTimeoutMs: config.stageTimeoutMs, maxParallelStages: config.maxParallelStages, maxRunAttempts: config.maxRunAttempts })) {
+    stageTimeoutMs: config.stageTimeoutMs, maxParallelStages: config.maxParallelStages, maxRunAttempts: config.maxRunAttempts,
+    settingsCandidateCount })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a finite positive integer`)
   }
   if (!Number.isSafeInteger(config.maxRepairAttempts) || config.maxRepairAttempts < 0) throw new Error('maxRepairAttempts must be a finite nonnegative integer')
@@ -102,7 +109,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   assertVerifiedDshHost(resolvedSubagentPackageVersion(), ctx.get('subagents'), ctx.get('agents'))
   const executionLimits: RunExecutionLimits = { stageProvider: config.stageProvider, maxDelegationDepth: config.maxDelegationDepth,
     maxStageRequests: config.maxStageRequests, stageTimeoutMs: config.stageTimeoutMs, maxRepairAttempts: config.maxRepairAttempts,
-    maxParallelStages: config.maxParallelStages, minChapterWords: config.minChapterWords, maxChapterWords: config.maxChapterWords,
+    maxParallelStages: config.maxParallelStages, settingsCandidateCount,
+    minChapterWords: config.minChapterWords, maxChapterWords: config.maxChapterWords,
     aiToneBlocking: config.aiToneBlocking }
   const researchLimits: ResearchLimits = {
     maxResearchQuestions: config.maxResearchQuestions,

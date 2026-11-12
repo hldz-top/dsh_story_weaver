@@ -29,7 +29,7 @@ class StageFixtureModel extends ScriptedModel {
  * @param options - Optional real host retry policy execution.
  * @returns The isolated capabilities and a sequential parent tool driver; concurrent drives reject.
  */
-export async function useStageFixture(reply: (request: GenerateOptions, index: number) => StreamChunk[], options: { retry?: boolean } = {}) {
+export async function useStageFixture(reply: (request: GenerateOptions, index: number) => StreamChunk[] | Promise<StreamChunk[]>, options: { retry?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-story-stage-'))
   const ctx = new Context()
   onTestFinished(async () => {

@@ -79,6 +79,8 @@ export interface WritingFixtureOptions {
   readonly injectFinish?: (stage: WritingFixtureStage) => FinishReason | undefined
   /** Like a model reading the tool error, resubmit the unmodified value after the native structured_output tool rejects an intervened one. Default: the child fails. */
   readonly correctNativeRejections?: boolean
+  /** Awaited before this child's next tool or structured reply. The model signal still aborts the wait. */
+  readonly pauseChild?: (stage: WritingFixtureStage) => Promise<void> | void
 }
 interface ChildState extends WritingFixtureStage {
   nativeRejections: number
@@ -247,7 +249,7 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   // Bound once the service and novel exist; children only run after that.
   let storedText: ((id: ArtifactId) => string) | undefined
   const maxReadChars = options.maxReadChars ?? 512
-  const fixture = await useStageFixture(request => {
+  const fixture = await useStageFixture(async request => {
     const sessionId = required(request.sessionId, 'native child Session ID')
     let state = stages.get(sessionId)
     if (state === undefined) {
@@ -258,6 +260,7 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
     state.requestCount += 1
     consume(state, request, options.correctNativeRejections === true, id => required(storedText, 'stored text lookup')(id))
     options.onChildRequest?.(state, request)
+    if (options.pauseChild !== undefined) await options.pauseChild(state)
     const emit = (name: string, args: object) => {
       const callId = `${name}-${state.requestCount}`
       state.pending = { callId, name }
@@ -302,7 +305,7 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   await fixture.ctx.plugin(ToolWeb, { searchMaxQueries: 4, searchMaxResults: 8, searchTimeoutMs: 5000, fetchTimeoutMs: 5000, fetchMaxOutputChars: 10000 })
   await fixture.ctx.plugin(Present, new Present.Config())
   await registerStageDeliveryProjection(fixture.ctx)
-  const executionLimits: RunExecutionLimits = { stageProvider: 'stage-spawn', maxDelegationDepth: 2, maxStageRequests: 100, stageTimeoutMs: 10_000, maxParallelStages: 2, maxRepairAttempts: 1, minChapterWords: 3000, maxChapterWords: 5000, ...options.executionLimits }
+  const executionLimits: RunExecutionLimits = { stageProvider: 'stage-spawn', maxDelegationDepth: 2, maxStageRequests: 100, stageTimeoutMs: 10_000, maxParallelStages: 2, settingsCandidateCount: 1, maxRepairAttempts: 1, minChapterWords: 3000, maxChapterWords: 5000, ...options.executionLimits }
   const service = await openWritingService(fixture.ctx.storageDomain, { maxArtifactBytes: 262_144, maxReadChars }, { maxResearchQuestions: 12, maxResearchCalls: 4, maxResearchSources: 8, maxEvidenceChars: 8192, maxResearchLogEvents: 2048 }, executionLimits)
   fixture.ctx.effect(() => () => service.close())
   const runs = await openRunStore(fixture.ctx.storageDomain, { maxAttempts: 256, maxOutputBytes: 262_144 })
