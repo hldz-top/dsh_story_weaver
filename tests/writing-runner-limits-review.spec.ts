@@ -90,7 +90,7 @@ it('unloads the actual plugin only after its active native run saves stopped sta
   fixture.ctx.effect(() => fixture.ctx.web.registerFetchProvider({ id: 'unused-fetch', available: () => true, fetch: async request => ({ url: request.url, statusCode: 200, body: { kind: 'text', content: 'Unused offline response.' }, truncated: false }) }))
   await fixture.ctx.plugin(ToolWeb, { searchMaxQueries: 4, searchMaxResults: 8, searchTimeoutMs: 5000, fetchTimeoutMs: 5000, fetchMaxOutputChars: 10000 })
   await fixture.ctx.plugin(Present, new Present.Config())
-  const plugin = await fixture.ctx.plugin(Story, new Story.Config({ ...new Story.Config(), stageProvider: 'stage-spawn', allowIncompleteSettings: true, writingModel: 'inherit' }))
+  const plugin = await fixture.ctx.plugin(Story, new Story.Config({ ...new Story.Config(), stageProvider: 'stage-spawn', allowIncompleteSettings: true }))
   const runner = fixture.ctx.storyRunner
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
   const actor = { sessionId: fixture.parent.session.id, workspace: workspace.displayPath }
@@ -99,6 +99,8 @@ it('unloads the actual plugin only after its active native run saves stopped sta
   fixture.ctx.on('llm/stream', async function* (request, next): AsyncIterable<StreamChunk> {
     if (request.sessionId !== fixture.parent.session.id) {
       if (request.signal === undefined) throw new Error('Native writing child has no cancellation signal')
+      expect(request.provider).toBe('stage-fixture')
+      expect(request.model).toBe('inherited-model')
       request.signal.throwIfAborted()
       entered.resolve()
       await once(request.signal, 'abort')
