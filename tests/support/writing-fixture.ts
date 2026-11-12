@@ -301,7 +301,7 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   fixture.ctx.effect(() => fixture.ctx.web.registerFetchProvider({ id: 'writing-fixture-fetch', available: () => true, fetch: async request => ({ url: request.url, statusCode: 200, body: { kind: 'text', content: 'Offline fixture reference.' }, truncated: false }) }))
   await fixture.ctx.plugin(ToolWeb, { searchMaxQueries: 4, searchMaxResults: 8, searchTimeoutMs: 5000, fetchTimeoutMs: 5000, fetchMaxOutputChars: 10000 })
   await fixture.ctx.plugin(Present, new Present.Config())
-  registerStageDeliveryProjection(fixture.ctx)
+  await registerStageDeliveryProjection(fixture.ctx)
   const executionLimits: RunExecutionLimits = { stageProvider: 'stage-spawn', maxDelegationDepth: 2, maxStageRequests: 100, stageTimeoutMs: 10_000, maxParallelStages: 2, maxRepairAttempts: 1, minChapterWords: 3000, maxChapterWords: 5000, ...options.executionLimits }
   const service = await openWritingService(fixture.ctx.storageDomain, { maxArtifactBytes: 262_144, maxReadChars }, { maxResearchQuestions: 12, maxResearchCalls: 4, maxResearchSources: 8, maxEvidenceChars: 8192, maxResearchLogEvents: 2048 }, executionLimits)
   fixture.ctx.effect(() => () => service.close())

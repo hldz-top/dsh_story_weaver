@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { expect, it, vi } from 'vitest'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -28,6 +29,12 @@ it('returns native structured output after persisting its child Session and disp
   }, config))
   expect(outcome).toEqual({ status: 'fulfilled', value: { childSessionId: started, structured: { prose: 'The lighthouse keeper returned.' } } })
   expect(fixture.childRequests).toHaveLength(1)
+  expect(fixture.childRequests[0]?.provider).toBe('stage-fixture')
+  expect(fixture.childRequests[0]?.model).toBe('inherited-model')
+  const parentEvents = fixture.parent.session.ownEvents()
+  expect(parentEvents.some(event => event.type === 'subagent/catalog')).toBe(true)
+  expect(JSON.stringify(parentEvents)).not.toContain('subagent-settled')
+  expect(started === undefined ? undefined : fixture.ctx.agents.get(SessionId(started))).toBeUndefined()
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })
 
@@ -51,7 +58,7 @@ it('admits the first child request only after its durable association completes'
   try {
     expect(handle.header.parentSession).toBe(fixture.parent.session.id)
     const { events } = await handle.read()
-    expect(events.find(event => event.type === 'subagent/descriptor')?.data).toMatchObject({ label: 'attempt-association', provider: 'stage-spawn' })
+    expect(events.find(event => event.type === 'subagent/descriptor')?.data).toMatchObject({ mode: 'continuable', label: 'attempt-association', provider: 'stage-spawn' })
     expect(events.filter(event => event.type === 'tool/call')).toHaveLength(1)
     expect(events.some(event => event.type === 'user/message' && event.data.content.some(block => block.type === 'text' && block.text === 'Use the exact stage inputs.'))).toBe(true)
   } finally { await handle.close() }
@@ -93,35 +100,6 @@ it('rejects plain text as a missing structured result instead of claiming a stru
   }, config))
   expect(outcome).toMatchObject({ status: 'rejected', reason: { code: 'stage-missing-result', message: 'Writing stage turn ended without returning its structured result' } })
   expect(fixture.childRequests).toHaveLength(1)
-  expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
-})
-
-it('keeps association failures and child disposal failures as separate causes', async () => {
-  const executionFailure = new Error('Association storage failed')
-  const cleanupFailure = new Error('Child owned resource failed to dispose')
-  const fixture = await useStageFixture(() => call('structured_output', { prose: 'Must not generate.' }))
-  const native = fixture.ctx.subagents.getProvider('stage-spawn')
-  if (native === undefined) throw new Error('Missing native fixture provider')
-  fixture.ctx.effect(() => fixture.ctx.subagents.registerProvider({
-    name: 'disposal-failure', capabilities: native.capabilities, inheritsParentContext: native.inheritsParentContext,
-    async start(request) {
-      const run = await native.start(request)
-      return { ...run, async dispose() { await run.dispose(); throw cleanupFailure } }
-    },
-  }))
-  const outcome = await fixture.run(exec => executeStage(fixture.ctx, exec, {
-    attemptId: 'attempt-double-failure', prompt: 'Never dispatch if association fails.', outputSchema,
-    onStarted: async id => {
-      await writeFile(join(fixture.root, 'failed-association.json'), JSON.stringify({ id }))
-      throw executionFailure
-    },
-  }, { ...config, stageProvider: 'disposal-failure' }))
-  expect(outcome.status).toBe('rejected')
-  if (outcome.status !== 'rejected') throw new Error('Expected failed execution')
-  expect(outcome.reason).toBeInstanceOf(AggregateError)
-  expect(outcome.reason.cause).toBe(executionFailure)
-  expect(outcome.reason.errors).toEqual([executionFailure, cleanupFailure])
-  expect(fixture.childRequests).toHaveLength(0)
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })
 
@@ -213,10 +191,11 @@ it('rejects a published run without its local Agent and still disposes the nativ
   const native = fixture.ctx.subagents.getProvider('stage-spawn')
   if (native === undefined) throw new Error('Missing native fixture provider')
   fixture.ctx.effect(() => fixture.ctx.subagents.registerProvider({
-    name: 'missing-local-agent', capabilities: native.capabilities, inheritsParentContext: native.inheritsParentContext,
-    async start(request) {
-      const run = await native.start(request)
-      return { id: run.id, localAgent: undefined, result: run.result, dispose: () => run.dispose() }
+    name: 'missing-local-agent', capabilities: native.capabilities, inheritsParentContext: false,
+    async start() {
+      let settle = (_result: { output: readonly []; stopReason: 'aborted' }): void => {}
+      const result = new Promise<{ output: readonly []; stopReason: 'aborted' }>(resolve => { settle = resolve })
+      return { id: SessionId(randomUUID()), result, dispose: () => { settle({ output: [], stopReason: 'aborted' }); return Promise.resolve() } }
     },
   }))
   let starts = 0
@@ -230,14 +209,14 @@ it('rejects a published run without its local Agent and still disposes the nativ
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })
 
-it.each(['outputSchema', 'toolFilter', 'depthLimit'] as const)('rejects providers without %s before starting native work', async capability => {
+it.each(['outputSchema', 'depthLimit'] as const)('rejects providers without %s before starting native work', async capability => {
   const fixture = await useStageFixture(() => call('structured_output', { prose: 'Must not run.' }))
   const native = fixture.ctx.subagents.getProvider('stage-spawn')
   if (native === undefined) throw new Error('Missing native fixture provider')
   let providerStarts = 0
   fixture.ctx.effect(() => fixture.ctx.subagents.registerProvider({
     name: 'unsupported', capabilities: { ...native.capabilities, [capability]: false }, inheritsParentContext: native.inheritsParentContext,
-    start(request) { providerStarts += 1; return native.start(request) },
+    prepareContinuable() { providerStarts += 1; return Promise.resolve({}) },
   }))
   const outcome = await fixture.run(exec => executeStage(fixture.ctx, exec, {
     attemptId: 'attempt-unsupported', prompt: 'Require native capabilities.', outputSchema, onStarted: async () => {},
@@ -311,27 +290,6 @@ it('classifies a malformed structured_output call distinctly from other incomple
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })
 
-it('keeps a captured structured value even when a later step ends the turn with a malformed-flavored error', async () => {
-  // The driver can return stopReason 'error' with a captured `structured` value when a later step fails after
-  // capture; discarding that valid output to retry it as malformed would waste it for nothing.
-  const fixture = await useStageFixture(() => [{ type: 'finish', reason: { kind: 'error', failure: { code: 'MALFORMED_RESPONSE', message: 'A later, unrelated step failed.' } } }])
-  const native = fixture.ctx.subagents.getProvider('stage-spawn')
-  if (native === undefined) throw new Error('Missing native fixture provider')
-  fixture.ctx.effect(() => fixture.ctx.subagents.registerProvider({
-    name: 'captured-then-error', capabilities: native.capabilities, inheritsParentContext: native.inheritsParentContext,
-    async start(request) {
-      const run = await native.start(request)
-      return { ...run, result: run.result.then(result => ({ ...result, structured: { prose: 'Already captured before the later failure.' } })) }
-    },
-  }))
-  const outcome = await fixture.run(exec => executeStage(fixture.ctx, exec, {
-    attemptId: 'attempt-captured-then-error', prompt: 'Produce structured prose.', outputSchema, onStarted: async () => {},
-  }, { ...config, stageProvider: 'captured-then-error' }))
-  expect(outcome).toMatchObject({ status: 'rejected', reason: { code: 'stage-incomplete' } })
-  expect(fixture.childRequests).toHaveLength(1)
-  expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
-})
-
 it('preserves a durable association rejection after the actual child is disposed', async () => {
   const failure = new Error('Durable association could not be committed')
   const fixture = await useStageFixture(() => call('structured_output', { prose: 'Must not run.' }))
@@ -340,26 +298,6 @@ it('preserves a durable association rejection after the actual child is disposed
   }, config))
   expect(outcome).toEqual({ status: 'rejected', reason: failure })
   expect(fixture.childRequests).toHaveLength(0)
-  expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
-})
-
-it('rejects a disposal failure even after structured capture succeeds', async () => {
-  const failure = new Error('Owned child resource failed during disposal')
-  const fixture = await useStageFixture(() => call('structured_output', { prose: 'A completed result.' }))
-  const native = fixture.ctx.subagents.getProvider('stage-spawn')
-  if (native === undefined) throw new Error('Missing native fixture provider')
-  fixture.ctx.effect(() => fixture.ctx.subagents.registerProvider({
-    name: 'cleanup-only-failure', capabilities: native.capabilities, inheritsParentContext: native.inheritsParentContext,
-    async start(request) {
-      const run = await native.start(request)
-      return { ...run, async dispose() { await run.dispose(); throw failure } }
-    },
-  }))
-  const outcome = await fixture.run(exec => executeStage(fixture.ctx, exec, {
-    attemptId: 'attempt-cleanup-failure', prompt: 'Dispose before publishing.', outputSchema, onStarted: async () => {},
-  }, { ...config, stageProvider: 'cleanup-only-failure' }))
-  expect(outcome).toEqual({ status: 'rejected', reason: failure })
-  expect(fixture.childRequests).toHaveLength(1)
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { executeRegisteredTool } from './support/tool-batch.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as JsonStorage from '@deepseek-ai/dsh-storage-json'
@@ -39,8 +39,8 @@ async function setup() {
   const harness = await mountAgentLoopTestHarness(ctx)
   const agent = await harness.create(SessionId(randomUUID()), { provider: 'fixture', model: 'deterministic' }, { cwd })
   const actor = { sessionId: agent.session.id, workspace: cwd }
-  const execute = (name: string, args: object, signal = new AbortController().signal) => ctx.tools.execute({
-    callId: ToolCallId(randomUUID()), name, arguments: args, agent, signal,
+  const execute = (name: string, args: object, signal = new AbortController().signal) => executeRegisteredTool(ctx, {
+    name, arguments: args, agent, signal,
   })
   const createNovel = async (brief = '守塔人找到了失踪日志。') => {
     const outcome = await execute('story_create_novel', { requestId: randomUUID(), title: '潮汐城', brief })

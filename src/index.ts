@@ -13,6 +13,7 @@ import { registerRunTools } from './run-tools.ts'
 import { StageDeliveries, registerStageDeliveryProjection } from './stage-deliveries.ts'
 import type { ResearchLimits } from './contracts.ts'
 import { onQuoteRepair } from './evidence-quote.ts'
+import { assertVerifiedDshHost, resolvedSubagentPackageVersion } from './host-contract.ts'
 
 export { openWritingService, WritingService } from './service.ts'
 export * from './contracts.ts'
@@ -98,6 +99,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
   if (config.writingModel === 'opencode-go') throw new Error('writingModel opencode-go is not provided by this plugin. OpenCode Go is a host subscription. Set writingModel to inherit so writing stages use the parent model and subscription.')
   if (config.writingModel !== 'inherit') throw new Error('writingModel must be inherit so writing stages use the configured parent model and subscription')
+  assertVerifiedDshHost(resolvedSubagentPackageVersion(), ctx.get('subagents'), ctx.get('agents'))
   const executionLimits: RunExecutionLimits = { stageProvider: config.stageProvider, maxDelegationDepth: config.maxDelegationDepth,
     maxStageRequests: config.maxStageRequests, stageTimeoutMs: config.stageTimeoutMs, maxRepairAttempts: config.maxRepairAttempts,
     maxParallelStages: config.maxParallelStages, minChapterWords: config.minChapterWords, maxChapterWords: config.maxChapterWords,
@@ -117,6 +119,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => stopQuoteLog)
   let runs: Awaited<ReturnType<typeof openRunStore>> | undefined
   let runner: WritingRunner | undefined
+  let deliveryProjection: Awaited<ReturnType<typeof registerStageDeliveryProjection>> | undefined
   ctx.effect(() => async () => {
     const failures: unknown[] = []
     for (const owner of [runner, runs, service]) {
@@ -124,10 +127,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       try { await owner.close() }
       catch (cause) { failures.push(cause) }
     }
+    try { await deliveryProjection?.dispose() }
+    catch (cause) { failures.push(cause) }
     if (failures.length > 0) throw new AggregateError(failures, 'Writing plugin shutdown could not complete')
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
-  registerStageDeliveryProjection(ctx)
+  deliveryProjection = await registerStageDeliveryProjection(ctx)
   runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)

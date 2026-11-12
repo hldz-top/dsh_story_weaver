@@ -11,6 +11,7 @@ import * as JsonStorage from '@deepseek-ai/dsh-storage-json'
 import * as DomainStorage from '@deepseek-ai/dsh-storage-domain'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as Present from '@deepseek-ai/dsh-tool-present'
+import { provideStageWorkingDirectory } from './support/working-directory.ts'
 import { expect, it, onTestFinished } from 'vitest'
 import { z } from 'zod'
 import { parseRequestId, SettingsIncompleteError, type Actor } from '../src/contracts.ts'
@@ -36,8 +37,9 @@ async function setup(model: ScriptedModel, runnerOptions: WritingRunnerOptions =
   await ctx.plugin(JsonStorage, { root: join(root, 'storage') })
   await ctx.plugin(DomainStorage, { backend: 'json' })
   await ctx.plugin(LocalFileSystem, { cwd: root })
+  provideStageWorkingDirectory(ctx, root)
   await ctx.plugin(Present, new Present.Config())
-  registerStageDeliveryProjection(ctx)
+  await registerStageDeliveryProjection(ctx)
   const service = await openWritingService(ctx.storageDomain, { maxArtifactBytes: 100_000, maxReadChars: 4 }, researchLimits, executionLimits)
   ctx.effect(() => () => service.close())
   const runs = await openRunStore(ctx.storageDomain, { maxAttempts: 8, maxOutputBytes: 100_000 })

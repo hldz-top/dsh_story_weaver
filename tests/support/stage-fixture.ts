@@ -8,13 +8,14 @@ import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage, type GenerateOptions, type ResolvedRetryPolicy, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as Retry from '@deepseek-ai/dsh-llm-retry'
 import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import { onTestFinished } from 'vitest'
 import { call, ScriptedModel, stop } from './model.ts'
+import { provideStageWorkingDirectory } from './working-directory.ts'
 
 class StageFixtureModel extends ScriptedModel {
   override providerRetryPolicy(): ResolvedRetryPolicy {
@@ -36,6 +37,7 @@ export async function useStageFixture(reply: (request: GenerateOptions, index: n
     await rm(root, { recursive: true, force: true })
   })
   await mountAgentLoopTestDependencies(ctx)
+  provideStageWorkingDirectory(ctx, root)
   await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'none' })
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(Spawn, { providerName: 'stage-spawn' })

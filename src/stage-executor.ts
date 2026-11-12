@@ -1,7 +1,9 @@
 /** Native DSH child execution for one durable writing-stage attempt. */
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { assertObjectJsonSchema, type ToolExecution } from '@deepseek-ai/dsh-tools'
+import type { SubagentActivation } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { LlmFailure, StreamChunk } from '@deepseek-ai/dsh-llm'
 
@@ -111,9 +113,9 @@ export async function executeStage(ctx: Context, exec: ToolExecution, request: S
   let turnCompleted = false
   // An output-token cut-off is recorded on the turn even when a plugin continued the turn afterwards.
   let truncated = false
-  // Native spawn publishes its descriptor before the first request, but may run before start() returns.
+  // The continuable descriptor is appended before subagent/start, which is itself before the prompt.
   const stopObserving = ctx.on('session/event', (session, event) => {
-    if (event.type === 'subagent/descriptor' && event.data.mode === 'one-shot'
+    if (event.type === 'subagent/descriptor' && event.data.mode === 'continuable'
       && event.data.label === request.attemptId && event.data.provider === config.stageProvider
       && session.header.parentSession === parent.session.id) childId = session.id
     else if (event.type === 'turn/end' && childId !== undefined && session.id === childId) {
@@ -163,18 +165,45 @@ export async function executeStage(ctx: Context, exec: ToolExecution, request: S
     }
     return next()
   }, { global: true, prepend: true })
+  let activation: SubagentActivation | undefined
+  let disposal: Promise<void> | undefined
+  const disposeActivation = (): Promise<void> => {
+    if (activation === undefined) return Promise.resolve()
+    disposal ??= activation.dispose().then(() => undefined)
+    return disposal
+  }
+  // After publication the startup signal no longer cancels the child. dispose() does.
+  const onCancel = () => { void disposeActivation() }
+  signal.addEventListener('abort', onCancel)
+  const stopChildCapture = ctx.on('subagent/start', info => {
+    if (!info.local || info.provider !== config.stageProvider || info.parentSessionId !== parent.session.id) return
+    const agent = ctx.get('agents')?.get(info.id)
+    if (agent === undefined || childAgent !== undefined) return
+    const matched = agent.session.ownEvents().some(event => event.type === 'subagent/descriptor' && event.data.mode === 'continuable'
+      && event.data.label === request.attemptId && event.data.provider === config.stageProvider)
+    if (!matched) return
+    childId = agent.id
+    childAgent = agent
+    agent.ctx.tools.restrict({ allow: [...config.allowedTools] })
+  }, { global: true })
   try {
-    const run = await ctx.subagents.start(config.stageProvider, {
-      parent, label: request.attemptId, prompt: [{ type: 'text', text: request.prompt }], signal,
-      outputSchema: request.outputSchema, toolFilter: { allow: [...config.allowedTools] }, maxDepth: config.maxDelegationDepth,
+    activation = await ctx.subagents.startActivation({
+      provider: config.stageProvider, label: request.attemptId, parent,
+      prompt: [{ type: 'text', text: request.prompt }], signal, delivery: 'caller',
+      outputSchema: request.outputSchema, maxDepth: config.maxDelegationDepth,
     })
-    childId = run.id
-    childAgent = run.localAgent
-    const pendingResult = Promise.allSettled([run.result])
+    if (childId === undefined) childId = activation.childId
+    if (childAgent === undefined) {
+      const [cleanup] = await Promise.allSettled([disposeActivation()])
+      const missing = new StageExecutionError('stage-provider', 'Writing stages require an in-process spawn provider')
+      if (cleanup.status === 'rejected') throw new AggregateError([missing, cleanup.reason], 'Writing stage execution and disposal failed', { cause: missing })
+      throw missing
+    }
+    const published = activation
+    const pendingResult = Promise.allSettled([published.result])
     const [execution] = await Promise.allSettled([(async (): Promise<StageResult> => {
       try {
-        if (run.localAgent === undefined) throw new StageExecutionError('stage-provider', 'Writing stages require an in-process spawn provider')
-        await request.onStarted(run.id)
+        await request.onStarted(published.childId)
         admission.resolve()
         const [result] = await pendingResult
         if (result.status === 'rejected') throw result.reason
@@ -201,7 +230,7 @@ export async function executeStage(ctx: Context, exec: ToolExecution, request: S
           }
           throw new StageExecutionError('stage-incomplete', `Writing stage ended without a complete structured result: ${result.value.stopReason}`)
         }
-        return { childSessionId: run.id, structured: result.value.structured }
+        return { childSessionId: published.childId, structured: result.value.structured }
       } catch (error) {
         controller.abort(error)
         throw error
@@ -209,7 +238,7 @@ export async function executeStage(ctx: Context, exec: ToolExecution, request: S
         admission.resolve()
       }
     })()])
-    const [cleanup] = await Promise.allSettled([Promise.resolve().then(() => run.dispose())])
+    const [cleanup] = await Promise.allSettled([disposeActivation()])
     if (execution.status === 'rejected') {
       if (cleanup.status === 'rejected') throw new AggregateError([execution.reason, cleanup.reason], 'Writing stage execution and disposal failed', { cause: execution.reason })
       throw execution.reason
@@ -218,8 +247,11 @@ export async function executeStage(ctx: Context, exec: ToolExecution, request: S
     signal.throwIfAborted()
     return execution.value
   } finally {
+    if (activation !== undefined && disposal === undefined) await disposeActivation().catch(() => undefined)
     clearTimeout(deadline)
     signal.removeEventListener('abort', onAbort)
+    signal.removeEventListener('abort', onCancel)
+    stopChildCapture()
     stopToolAdmission()
     stopAdmission()
     stopObserving()

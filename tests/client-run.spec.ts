@@ -1,4 +1,5 @@
 /** Live writing cards consume host projections while their owning Tool remains active. */
+import { PartialArguments } from '@deepseek-ai/dsh-util-values'
 import { isValidElement } from 'react'
 import { expect, test, vi } from 'vitest'
 import type { UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -32,12 +33,12 @@ function reader(value: unknown): UseProjection {
 }
 function fixture(value: unknown = projected): StoryRunProps & { openFile: ReturnType<typeof vi.fn<StoryRunProps['openFile']>> } {
   return { callId: 'write-call', toolName: 'story_write', phase: 'start',
-    block: { phase: 'start', callId: 'write-call', name: 'story_write', argsRaw: '{}', turn: 1, step: 1, time: 120, subCalls: [] },
+    block: { phase: 'start', callId: 'write-call', name: 'story_write', argsRaw: '{}', args: PartialArguments.fromText('{}'), turn: 1, step: 1, time: 120, subCalls: [] },
     cwd: '/workspace', useDisclosure: noopDisclosure, openFile: vi.fn<StoryRunProps['openFile']>(), inspect: vi.fn(),
     loadImage: async () => { throw new Error('Writing cards have no image attachments') }, t: translator(zh), useProjection: reader(value) }
 }
 function settled(status: 'completed' | 'failed' | 'stopped' | 'interrupted'): ToolResult {
-  return { kind: 'tool-result', seq: 30, time: 123, callId: 'write-call', call: { name: 'story_write', argsRaw: '{}' }, callTime: 120,
+  return { kind: 'tool-result', seq: 30, time: 123, callId: 'write-call', name: 'story_write', args: PartialArguments.fromText('{}'), call: { name: 'story_write', argsRaw: '{}' }, callTime: 120,
     content: [{ type: 'text', text: JSON.stringify({ id: runId, status, error: status === 'failed' ? 'Generation failed' : null }) }], isError: false, subCalls: [] }
 }
 function nodes(node: unknown): { type: unknown; props: Record<string, unknown> }[] {

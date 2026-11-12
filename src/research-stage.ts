@@ -124,8 +124,8 @@ async function verifyStartedPlan(ctx: Context, exec: ToolExecution, request: Res
     exec.signal.throwIfAborted()
     if (events.length > maxEvents) throw new WritingError('research-budget', 'Research child log exceeds the configured admission limit')
     const descriptors = events.filter(event => event.type === 'subagent/descriptor')
-    if (descriptors.length !== 1 || descriptors[0]?.data.mode !== 'one-shot') {
-      throw new WritingError('research-incomplete', 'Research child has no unambiguous native one-shot descriptor')
+    if (descriptors.length !== 1 || descriptors[0]?.data.mode !== 'continuable') {
+      throw new WritingError('research-incomplete', 'Research child has no unambiguous native continuable descriptor')
     }
     const calls = events.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call' && event.data.name === 'story_start_research' && event.seq < plan.startSeq)
     let receipts = 0
