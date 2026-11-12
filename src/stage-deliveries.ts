@@ -1,6 +1,7 @@
 /** Native file delivery and replayable projection of completed writing stages. */
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import type { ProjectionHandle } from '@deepseek-ai/dsh-session-projection'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
@@ -58,8 +59,8 @@ function deliveryEvent(event: SessionEvent) {
  * Register the pure built-in delivery-event fold and its complete Client value.
  * @param ctx - Plugin scope owning the Session projection registration.
  */
-export function registerStageDeliveryProjection(ctx: Context): void {
-  ctx.effect(() => ctx.sessionProjections.register({
+export function registerStageDeliveryProjection(ctx: Context): Promise<ProjectionHandle<StoryStageDeliveries>> {
+  return ctx.sessionProjections.register({
     key: projectionKey, stateSchema: projectionSchema, stateVersion: 1,
     init: (): StoryStageDeliveries => ({ version: 1, calls: [] }),
     apply(state, event): StoryStageDeliveries {
@@ -78,7 +79,7 @@ export function registerStageDeliveryProjection(ctx: Context): void {
         : state.calls.map(call => call === owner ? { callId: call.callId, deliveries: [...call.deliveries, entry] } : call) }
     },
     wire: { viewSchema: projectionSchema, view: state => state },
-  }))
+  })
 }
 
 function artifactDescription(service: WritingService, actor: Actor, artifact: Artifact): string {
@@ -139,19 +140,25 @@ export class StageDeliveries {
     if (agent === undefined) throw new Error('Stage delivery requires a Session')
     const session = agent.session
     exec.signal.throwIfAborted()
-    if (this.ctx.sessionProjections.stateOf(session, projectionKey) === undefined) throw new Error('Writing-stage delivery projection is unavailable')
+    if (this.ctx.sessionProjections.snapshot(session).values[projectionKey] === undefined) throw new Error('Writing-stage delivery projection is unavailable')
     const previous = session.ownEvents().map(deliveryEvent).find(entry => entry !== undefined && entry.identity.callId === identity.callId
       && entry.identity.runId === identity.runId && sameSource(entry.identity.source, identity.source))
     if (previous !== undefined) {
       if (previous.path !== path || previous.description !== description) throw new Error('Recorded writing-stage delivery differs from the exact preview')
     } else {
       if (this.ctx.tools.get('present', agent) === undefined) throw new Error('Writing requires the native present tool in this Agent scope')
-      const turn = this.ctx.sessionProjections.stateOf(session, 'turnBoundary')
-      if (turn === undefined || turn.openTurnStartSeq === null) throw new Error('Stage delivery requires an open turn')
+      const agents = this.ctx.get('agents')
+      if (agents === undefined) throw new Error('Stage delivery requires the host agents service')
+      const turn = agents.turnBoundaryOf(session)
+      if (turn.openTurnStartSeq === null) throw new Error('Stage delivery requires an open turn')
       const callId = invocationId(identity)
       const fromSeq = session.seq
-      const result = await this.ctx.tools.execute({ name: 'present', arguments: { files: [{ path, description }] }, callId,
-        rootCallId: exec.rootCallId, parent: exec.token, agent, signal: exec.signal })
+      const presented = await this.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: callId, name: 'present', arguments: JSON.stringify({ files: [{ path, description }] }) }],
+        agent, signal: exec.signal,
+      })
+      const result = presented.results.find(item => item.callId === callId)?.result
+      if (result === undefined) throw new Error('Native present returned without its batch result')
       if (result.isError) throw new Error(`Writing-stage presentation failed: ${result.error.message}`, { cause: result.error })
       const events = session.snapshotEvents(fromSeq).filter(event => event.type === 'deliverables/presented' && event.data.callId === callId)
       if (events.length !== 1) throw new Error('Native present returned without its exact committed delivery event')

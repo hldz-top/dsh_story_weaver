@@ -1,8 +1,7 @@
 /** Author settings import through the writing runner: run exclusion, resume refusal, pending review and the import-aware stop. */
-import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { executeRegisteredTool } from './support/tool-batch.ts'
 import { expect, it } from 'vitest'
 import { ImportRefusedError, parseRequestId, type ArtifactId } from '../src/contracts.ts'
 import { parseStoryArtifactPreview } from '../src/preview-result.ts'
@@ -211,7 +210,7 @@ it('keeps imported settings readable as a document', async () => {
   const stored = fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: imported.value.artifact.id })
   expect(StageOutputSchemas.settings.parse(JSON.parse(stored.text))).toMatchObject({ dimensionCode: 'a1', facts: [{ id: 'import-a1' }] })
   const preview = async (artifactId: ArtifactId) => {
-    const outcome = await fixture.ctx.tools.execute({ callId: ToolCallId(randomUUID()), name: 'story_preview', arguments: { novelId: fixture.novel.id, artifactId }, agent: fixture.parent, signal: new AbortController().signal })
+    const outcome = await executeRegisteredTool(fixture.ctx, { name: 'story_preview', arguments: { novelId: fixture.novel.id, artifactId }, agent: fixture.parent, signal: new AbortController().signal })
     if (outcome.isError) throw new Error(outcome.error.message)
     const path = parseStoryArtifactPreview(outcome.value)?.path
     if (path === undefined) throw new Error('Expected preview metadata')

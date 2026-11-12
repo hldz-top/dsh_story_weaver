@@ -29,7 +29,7 @@ async function setup(reply = () => stop()) {
   ctx.effect(() => () => service.close())
   const runs = await openRunStore(ctx.storageDomain, { maxAttempts: 40, maxOutputBytes: 200_000 })
   ctx.effect(() => () => runs.close())
-  registerStageDeliveryProjection(ctx)
+  await registerStageDeliveryProjection(ctx)
   const publisher = new StageDeliveries(ctx, service, runs, '.dsh-story')
   const workspace = await ctx.fs.resolve('.', { cwd: root })
   const actor = { sessionId: fixture.parent.session.id, workspace: workspace.displayPath }

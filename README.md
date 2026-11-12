@@ -17,7 +17,7 @@ kind: "package-bundle"
 
 ## 安装与卸载
 
-在满足 Node ≥ 22.19、DSH 0.2.x 及 pnpm（推荐 `11.7.0`）的环境中，通过 DSH CLI 安装：
+在满足 Node ≥ 22.19、DSH 0.2.2-rc.2 及 pnpm（推荐 `11.7.0`）的环境中，通过 DSH CLI 安装：
 
 ```sh
 dsh plugin --profile web add dsh-story-weaver

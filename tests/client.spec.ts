@@ -1,5 +1,6 @@
 /** Public preview result parsing and pure Tool-card actions. */
 import { isValidElement } from 'react'
+import { PartialArguments } from '@deepseek-ai/dsh-util-values'
 import { expect, test, vi } from 'vitest'
 import { StoryPreview, type StoryPreviewProps } from '../src/client/StoryPreview.tsx'
 import { en, zh } from '../src/client/locales.ts'
@@ -31,6 +32,8 @@ function settledResult(meta: unknown): ToolResult {
     seq: 5,
     time: 123,
     callId: 'preview-call',
+    name: 'story_preview',
+    args: PartialArguments.fromText('{"artifactId":"brief-r1"}'),
     call: { name: 'story_preview', argsRaw: '{"artifactId":"brief-r1"}' },
     callTime: 120,
     content: [{ type: 'text', text: JSON.stringify(preview) }],
@@ -126,6 +129,7 @@ test('running, failed and invalid-result cards keep inspection without a documen
     {
       block: {
         phase: 'start', callId: 'preview-call', name: 'story_preview', argsRaw: '{}',
+        args: PartialArguments.fromText('{}'),
         turn: 1, step: 1, time: 120, subCalls: [],
       },
       state: 'running',

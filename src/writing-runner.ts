@@ -711,7 +711,7 @@ export class WritingRunner {
     for (const sessionId of sessionIds) {
       const session = this.ctx.sessions.get(sessionId)
       if (session === undefined) continue
-      const projection = this.ctx.sessionProjections.stateOf(session, 'story-stage-deliveries')
+      const projection = this.ctx.sessionProjections.snapshot(session).values['story-stage-deliveries']
       if (projection === undefined) throw new Error('Writing-stage delivery projection is unavailable')
       for (const delivery of projection.calls.flatMap(call => call.deliveries)) {
         if (delivery.runId !== run.id || delivery.source.kind !== 'artifact') continue

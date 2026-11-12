@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { createUserMessage, ToolCallId, type ToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as JsonStorage from '@deepseek-ai/dsh-storage-json'
@@ -20,6 +20,7 @@ import { parseRunId } from '../src/run-store.ts'
 import { findingQuestionIdMessage, parseSelectedFindings, researchConclusions, researchQuestionIdMessage, researchQuestions } from '../src/research.ts'
 import { admitToolId, artifactIdParameter, attemptIdParameter, defineStoryTool, expectedAppliedIdParameter, idFormatMessage, novelIdParameter, parseToolNovelId, parseToolRunId, requestIdParameter, runIdParameter, type ToolIdParam } from '../src/tools.ts'
 import { mountPluginRuntime } from './support/plugin-runtime.ts'
+import { executeRegisteredTool } from './support/tool-batch.ts'
 import { call, ScriptedModel, stop } from './support/model.ts'
 import { testResearchLimits } from './support/storage.ts'
 
@@ -157,8 +158,8 @@ async function setup(model = new ScriptedModel(() => stop()), allowIncompleteSet
   await ctx.plugin(Story, new Story.Config({ ...new Story.Config(), maxArtifactBytes: 100_000, maxReadChars: 1024, previewDirectory: '.dsh-story', allowSettingsImport: true, allowIncompleteSettings }))
   const harness = await mountAgentLoopTestHarness(ctx)
   const agent = await harness.create(SessionId(randomUUID()), { provider: 'fixture', model: 'deterministic' }, { cwd })
-  const execute = (name: string, args: Record<string, unknown>) => ctx.tools.execute({
-    callId: ToolCallId(randomUUID()), name, arguments: args, agent, signal: new AbortController().signal,
+  const execute = (name: string, args: Record<string, unknown>) => executeRegisteredTool(ctx, {
+    name, arguments: args, agent, signal: new AbortController().signal,
   })
   const workspace = agent.session.header.cwd
   if (workspace === undefined) throw new Error('Session has no workspace')
@@ -457,8 +458,8 @@ it('rethrows a non-Zod error from id parsing or the tool handler unchanged', asy
     expect(error).not.toBeInstanceOf(WritingError)
   }
   const { ctx } = await setup()
-  const outcome = await ctx.tools.execute({
-    callId: ToolCallId(randomUUID()), name: 'story_get_novel', arguments: { novelId: `novel_${uuid}` }, signal: new AbortController().signal,
+  const outcome = await executeRegisteredTool(ctx, {
+    name: 'story_get_novel', arguments: { novelId: `novel_${uuid}` }, signal: new AbortController().signal,
   })
   expect(outcome.isError).toBe(true)
   if (!outcome.isError) throw new Error('expected a handler error')
