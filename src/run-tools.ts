@@ -36,7 +36,7 @@ const runSchema = {
       maxResearchSources: integer, maxEvidenceChars: integer, maxResearchLogEvents: integer,
     } }, { type: 'null' }] },
     executionLimits: { type: 'object', required: true, additionalProperties: false, properties: {
-      maxRepairAttempts: integer, maxParallelStages: integer, maxStageRequests: integer, stageTimeoutMs: integer,
+      maxRepairAttempts: integer, maxParallelStages: integer, settingsCandidateCount: { type: 'integer' }, maxStageRequests: integer, stageTimeoutMs: integer,
       maxDelegationDepth: integer, minChapterWords: integer, maxChapterWords: integer, stageProvider: text, aiToneBlocking: { type: 'boolean' },
     } },
     attempts: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {

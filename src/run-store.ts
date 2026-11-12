@@ -26,6 +26,9 @@ const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const limitsSchema = z.strictObject({ maxAttempts: positive, maxOutputBytes: positive })
 const executionLimitsSchema = z.strictObject({
   maxRepairAttempts: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), maxParallelStages: positive,
+  // How many settings dimensions in one dependency layer may start together. Absent on runs stored before the field
+  // existed; the runner then uses 1. A present value is still capped by maxParallelStages.
+  settingsCandidateCount: positive.exactOptional(),
   maxStageRequests: positive, stageTimeoutMs: positive.max(2_147_483_647), maxDelegationDepth: positive,
   minChapterWords: positive, maxChapterWords: positive, stageProvider: z.string().min(1).refine(value => value.trim().length > 0),
   // Prompt version 5 and later only: whether AI-tone findings in a body review block. Recorded on every such run (begin fills
@@ -291,17 +294,19 @@ export class RunStore {
     return structuredClone(output)
   }
 
-  /** @param actor - Workspace owner after native work settles. @param runId - Running request. @param attemptId - Exact active attempt. @param failure - Known failure or explicitly uncertain outcome; `kind` classifies a known refusal or length cut-off. @returns Persisted failure metadata without discarding prior attempts. */
-  async failAttempt(actor: Actor, runId: RunId, attemptId: AttemptId, failure: { outcome: 'failed' | 'unknown'; message: string; kind?: AttemptFailureKind }): Promise<WritingAttempt> {
+  /** @param actor - Workspace owner after native work settles. @param runId - Running request. @param attemptId - Exact active attempt. @param failure - Known failure or explicitly uncertain outcome; `kind` classifies a known refusal or length cut-off. `retryAuthorized` may be set only with `outcome: 'unknown'`. @returns Persisted failure metadata without discarding prior attempts. */
+  async failAttempt(actor: Actor, runId: RunId, attemptId: AttemptId, failure: { outcome: 'failed' | 'unknown'; message: string; kind?: AttemptFailureKind; retryAuthorized?: boolean }): Promise<WritingAttempt> {
     if (failure.message.trim().length === 0) fail('invalid-input', 'Failed or unknown attempts require a nonblank failure reason')
     if (failure.kind !== undefined && failure.outcome !== 'failed') fail('invalid-input', 'Only a known failed attempt can be classified as refused or truncated')
     if (failure.kind !== undefined && !attemptFailureKindSchema.safeParse(failure.kind).success) fail('invalid-input', 'Unknown attempt failure classification')
+    if (failure.retryAuthorized === true && failure.outcome !== 'unknown') fail('invalid-input', 'Retry permission belongs only to an unknown attempt')
+    const retryAuthorized = failure.outcome === 'unknown' && failure.retryAuthorized === true
     const run = await this.change(actor, runId, current => {
       this.requireRunning(current)
       return replaceAttempt(current, attemptId, attempt => {
-        if (attempt.status === failure.outcome && attempt.error === failure.message && attempt.failureKind === failure.kind) return attempt
+        if (attempt.status === failure.outcome && attempt.error === failure.message && attempt.failureKind === failure.kind && attempt.retryAuthorized === retryAuthorized) return attempt
         if (attempt.status !== 'prepared' && attempt.status !== 'running') fail('attempt-state', 'Terminal attempt outcomes cannot be rewritten')
-        return { ...attempt, status: failure.outcome, error: failure.message, retryAuthorized: false, ...(failure.kind === undefined ? {} : { failureKind: failure.kind }) }
+        return { ...attempt, status: failure.outcome, error: failure.message, retryAuthorized, ...(failure.kind === undefined ? {} : { failureKind: failure.kind }) }
       })
     })
     return attemptView(findAttempt(run, attemptId))

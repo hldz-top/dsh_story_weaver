@@ -87,14 +87,14 @@ it('keeps a host OpenCode Go registration and adds no plugin adapter', async () 
 it('publishes the bounded native run defaults without overriding the model route', () => {
   const config = new Story.Config()
   expect(config).toMatchObject({ stageProvider: 'spawn', maxDelegationDepth: 2, maxStageRequests: 96,
-    stageTimeoutMs: 600_000, maxRepairAttempts: 2, maxParallelStages: 3, maxRunAttempts: 512,
+    stageTimeoutMs: 600_000, maxRepairAttempts: 2, maxParallelStages: 3, settingsCandidateCount: 1, maxRunAttempts: 512,
     minChapterWords: 3000, maxChapterWords: 5000 })
   expect(Object.hasOwn(config, 'provider')).toBe(false)
   expect(Object.hasOwn(config, 'model')).toBe(false)
   expect(config.writingModel).toBe('inherit')
 })
 
-const positiveRunFields = ['maxDelegationDepth', 'maxStageRequests', 'stageTimeoutMs', 'maxParallelStages', 'maxRunAttempts'] as const
+const positiveRunFields = ['maxDelegationDepth', 'maxStageRequests', 'stageTimeoutMs', 'maxParallelStages', 'settingsCandidateCount', 'maxRunAttempts'] as const
 it.each(positiveRunFields.flatMap(field => [0, -1, 1.5, Number.POSITIVE_INFINITY, Number.NaN, Number.MAX_SAFE_INTEGER + 1].map(value => ({ field, value }))))(
   'rejects $field=$value before opening storage', async ({ field, value }) => {
     const ctx = new Context()
