@@ -1,25 +1,25 @@
 /**
  * Offline end-to-end proof for the unified output-validation repair loop.
  *
- * The fake stage provider runs the complete 55-stage pipeline of the live prompt (settings roots a4, a5 and e1, which plan
- * a1, a2, a3, a4, a5 and e1; one settings-collection review; the book outline; three chapters of outline, body,
- * continuity and a reviewed continuity snapshot, each with research where the stage uses it and review). One violation of every kind is injected into the first attempt of at least
- * one stage of every stage kind (tests/support/validation-injections.ts). With maxRepairAttempts 1 each is repaired by
- * exactly one replacement and the run completes; the validation-repair-zero-*.spec.ts files show that with
+ * The fake stage provider runs the live prompt (settings roots a4, a5 and e1 as one batch draft and one consistency
+ * review, then one book outline, then three chapters of outline, body, continuity and a reviewed continuity snapshot).
+ * One violation of every kind is injected into the first attempt of at least one stage of every injected stage kind
+ * (tests/support/validation-injections.ts). With maxRepairAttempts 1 each is repaired by exactly one replacement and
+ * the run completes; the validation-repair-zero-*.spec.ts files show that with
  * maxRepairAttempts 0 each fails the run with its specific message.
  */
 import { describe, expect, it } from 'vitest'
 import type { FinishReason } from '@deepseek-ai/dsh-llm'
 import { injections, isChapterStage, next, pipeline, PIPELINE_STAGES, stageKeys, type Injection } from './support/validation-injections.ts'
 
-describe('unified validation repair across the full 55-stage pipeline (offline fake provider)', () => {
+describe('unified validation repair across the settings-batch and chapter-snapshot pipeline (offline fake provider)', () => {
   it('repairs every injected violation, one per kind across every stage kind, with a single replacement each, and completes', async () => {
     const combined = injections.filter(item => item.solo !== true)
     const { fixture, run, fired } = await pipeline(1, combined)
     expect(run.error, JSON.stringify(run.attempts.filter(item => item.error !== null).map(({ key, error }) => ({ key, error })))).toBeNull()
     expect(run.status).toBe('completed')
     expect([...fired.keys()].sort()).toEqual(combined.map(item => item.id).sort())
-    expect(new Set(combined.map(item => item.stage))).toEqual(new Set(['research planning', 'research', 'settings candidate', 'settings review', 'full-settings review',
+    expect(new Set(combined.map(item => item.stage))).toEqual(new Set(['research planning', 'research', 'settings batch', 'settings consistency',
       'book outline', 'book outline review', 'chapter outline', 'chapter outline review', 'body', 'body review', 'continuity', 'continuity review']))
     const keys = run.attempts.map(attempt => attempt.key)
     const report: string[] = []
@@ -37,7 +37,7 @@ describe('unified validation repair across the full 55-stage pipeline (offline f
       if (replacement !== attempt!.key) replacements.add(replacement)
       report.push(`${injection.stage} | ${injection.violation} | ${attempt!.key} -> ${replacement}`)
     }
-    // The live prompt plans exactly 55 stages; replacements only add attempt indices (candidate/n, review/n, research repair/n) to those stages.
+    // Replacements only add attempt indices (draft/repair/n, candidate/n, review/n, research repair/n) to the live plan.
     const logical = new Set(stageKeys(run.attempts).map(key => key.replace(/\/repair\/\d+$/u, '').replace(/\/citations$/u, '').replace(/\/(candidate|review)\/\d+/gu, '/$1')))
     expect([...logical], JSON.stringify([...logical])).toHaveLength(PIPELINE_STAGES)
     expect(replacements.size).toBe(combined.filter(item => item.finish === undefined).length)
@@ -50,7 +50,7 @@ describe('unified validation repair across the full 55-stage pipeline (offline f
       const message = stage.task.validationError ?? null
       if (message !== null) expect(message.length).toBeGreaterThan(20)
     }
-    if (process.env.DSH_E2E_REPORT === '1') console.log(`repaired ${combined.length} injections; ${stageKeys(run.attempts).length} stage keys (49 + replacements)\n${report.join('\n')}`)
+    if (process.env.DSH_E2E_REPORT === '1') console.log(`repaired ${combined.length} injections; ${stageKeys(run.attempts).length} stage keys (${PIPELINE_STAGES} + replacements)\n${report.join('\n')}`)
   }, 600_000)
 
 
@@ -64,14 +64,15 @@ describe('unified validation repair across the full 55-stage pipeline (offline f
   }, 300_000)
 
   it('lets the native structured_output schema reject a missing field in-turn, before host admission and without a repair attempt', async () => {
-    const missing: Injection = { id: 'review-missing-field', stage: 'settings review', violation: 'native schema (missing issues)', chapter: 1,
-      match: stage => stage.kind === 'review' && [...stage.sources.values()].some(source => source.kind === 'settings-dimension'),
+    const missing: Injection = { id: 'review-missing-field', stage: 'settings consistency', violation: 'native schema (missing issues)', chapter: 1,
+      match: stage => stage.kind === 'settings' && stage.task?.batch === 'consistency',
       mutate: ({ issues: _issues, ...output }) => output, replacement: next, message: /./ }
     const { run, fired } = await pipeline(0, [missing], 1)
     expect(run.error).toBeNull()
     expect(run.status).toBe('completed')
     expect(fired.get(missing.id)!.nativeRejections).toBe(1)
     expect(run.attempts.some(item => item.key === 'settings/0/a1/candidate/1')).toBe(false)
+    expect(run.attempts.filter(item => item.key.startsWith('settings/collection/0/review/')).map(item => item.key)).toEqual(['settings/collection/0/review/0'])
   }, 300_000)
 
   it('keeps truncation (finish_reason length) fatal even with a repair budget', async () => {

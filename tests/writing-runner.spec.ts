@@ -186,12 +186,12 @@ it('fails the run once repeated malformed settings responses exhaust the repair 
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
   expect(outcome.value.error).toContain('could not be decoded (MALFORMED_RESPONSE)')
-  const settingsKey = 'settings/0/a1/candidate/0'
+  const settingsKey = 'settings/batch/a1/draft'
   const attempts = outcome.value.attempts.filter(item => item.key === settingsKey)
   expect(attempts).toHaveLength(2)
   expect(attempts.every(item => item.status === 'failed')).toBe(true)
   expect(attempts.every(item => item.error?.includes('could not be decoded (MALFORMED_RESPONSE)'))).toBe(true)
-  expect(outcome.value.attempts.some(item => item.key === 'settings/0/a1/candidate/1')).toBe(false)
+  expect(outcome.value.attempts.some(item => item.key === 'settings/batch/a1/draft/repair/1')).toBe(false)
 })
 
 it('fails the run on the first malformed settings response when the repair budget is zero', async () => {
@@ -202,7 +202,7 @@ it('fails the run on the first malformed settings response when the repair budge
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
-  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0')
+  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')
   expect(attempts).toHaveLength(1)
   expect(attempts[0]).toMatchObject({ status: 'failed' })
 })
@@ -216,20 +216,20 @@ it('does not repeat a same-key malformed retry on resume after a later unrelated
       return { kind: 'error', failure: { code: 'MALFORMED_RESPONSE', message: 'DeepSeek Messages stream: tool input is invalid JSON' } }
     }
     if (!reviewInjected && stage.kind === 'review' && stage.task?.reviewed !== undefined
-      && stage.sources.get(stage.task.reviewed.artifactId)?.kind === 'settings-dimension') {
+      && stage.sources.get(stage.task.reviewed.artifactId)?.kind === 'book-outline') {
       reviewInjected = true
       return { kind: 'error', failure: { code: 'UNKNOWN', message: 'Fixture-injected later stage failure.' } }
     }
     return undefined
   } })
-  const settingsKey = 'settings/0/a1/candidate/0'
+  const settingsKey = 'settings/batch/a1/draft'
   const first = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (first.status === 'rejected') throw first.reason
   expect(first.value.status).toBe('failed')
   const attemptsBefore = first.value.attempts.filter(item => item.key === settingsKey)
   expect(attemptsBefore.map(item => item.status)).toEqual(['failed', 'succeeded'])
   const settingsChildrenBefore = [...fixture.stages.values()].filter(stage => stage.kind === 'settings').length
-  expect(settingsChildrenBefore).toBe(2)
+  expect(settingsChildrenBefore).toBe(3)
   const requestsBefore = fixture.childRequests.length
   const resumed = await fixture.run(exec => fixture.runner.resume(exec, first.value.id, true))
   if (resumed.status === 'rejected') throw resumed.reason
@@ -259,7 +259,7 @@ it('stops cleanly when cancelled right after a malformed settings response is du
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('stopped')
-  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0')
+  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')
   expect(attempts).toHaveLength(1)
   expect(attempts[0]).toMatchObject({ status: 'failed' })
   expect(attempts[0]!.error).toContain('could not be decoded (MALFORMED_RESPONSE)')
@@ -275,7 +275,7 @@ it('still fails the run and records an unknown (not failed) attempt for a non-ma
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
-  const attempts = outcome.value.attempts.filter(item => /^settings\/0\/a1\/candidate\/\d+$/.test(item.key))
+  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')
   expect(attempts).toHaveLength(1)
   expect(attempts[0]).toMatchObject({ status: 'unknown' })
   expect(attempts[0]!.error).toContain('Writing stage ended without a complete structured result')
@@ -324,8 +324,8 @@ it('threads the host chapter-total range and settings kind-awareness correctly a
     }
     checked += 1
   }
-  // settings, its review, the collection review, book-outline/chapter-outline/body/continuity/snapshot and each of their reviews.
-  expect(checked).toBe(13)
+  // settings draft, consistency review, book-outline/chapter-outline/body/continuity/snapshot and each manuscript review.
+  expect(checked).toBe(12)
   // The counting rule and the not-a-defect sentence reach the body and its review. The aim reaches only the body.
   expect(seen).toEqual({ counting: 2, aim: 1, notDefect: 1 })
 })
@@ -360,23 +360,22 @@ it('tells every real logged research-planning and research child that a catalog-
 it('regenerates an over-bound classification settings candidate and carries its validation error into the repair prompt', async () => {
   let expanded = false
   const fixture = await useWritingFixture({ intervene(stage, output) {
-    if (stage.kind !== 'settings' || expanded) return output
+    if (stage.task?.batch !== 'draft' || expanded) return output
     expanded = true
-    const settings = StageOutputSchemas.settings.parse(output)
-    return { ...settings, facts: Array.from({ length: 11 }, (_, index) => ({ id: `${settings.facts[0]!.id}-${index}`, statement: settings.facts[0]!.statement })) }
+    const batch = output as { dimensions: { code: string; body: string }[] }
+    return { ...batch, dimensions: batch.dimensions.map(item => item.code === 'a1' ? { ...item, body: '雾'.repeat(2501) } : item) }
   } })
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
-  const attempts = outcome.value.attempts.filter(item => /^settings\/0\/a1\/candidate\/\d+$/.test(item.key))
+  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft' || item.key === 'settings/batch/a1/draft/repair/1')
   expect(attempts).toHaveLength(2)
-  // The native call itself succeeded (syntactically valid JSON); saveSettingsCandidate's scope check rejects the content afterward.
   expect(attempts[0]).toMatchObject({ status: 'succeeded' })
   const original = fixture.runs.readOutput(fixture.actor, outcome.value.id, attempts[0]!.id)
-  expect(StageOutputSchemas.settings.parse(JSON.parse(original.text)).facts).toHaveLength(11)
+  expect(JSON.parse(original.text).dimensions[0].body).toHaveLength(2501)
   const repairedChild = [...fixture.stages.values()].find(candidateStage => candidateStage.kind === 'settings' && candidateStage.task?.validationError != null)
-  expect(repairedChild?.task?.validationError).toContain('A classification dimension allows at most 10 facts')
+  expect(repairedChild?.task?.validationError).toContain('A classification dimension allows at most 2500 characters of contentMarkdown')
 })
 
 it('repairs a settings review whose quote adds words to its source by rewriting only that citation, not the whole review', async () => {
@@ -399,8 +398,8 @@ it('repairs a settings review whose quote adds words to its source by rewriting 
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
-  const a1Reviews = outcome.value.attempts.filter(item => item.key.startsWith('settings/0/a1/candidate/0/review/'))
-  expect(a1Reviews.map(item => [item.key, item.status])).toEqual([['settings/0/a1/candidate/0/review/0', 'succeeded'], ['settings/0/a1/candidate/0/review/1/citations', 'succeeded']])
+  const a1Reviews = outcome.value.attempts.filter(item => item.key.startsWith('book-outline/book/candidate/0/review/'))
+  expect(a1Reviews.map(item => [item.key, item.status])).toEqual([['book-outline/book/candidate/0/review/0', 'succeeded'], ['book-outline/book/candidate/0/review/1/citations', 'succeeded']])
   // No second whole review was requested: only the citation repair child ran, and it was given exactly the rejected item.
   expect([...fixture.stages.values()].filter(stage => stage.kind === 'review' && stage.task?.validationError != null)).toEqual([])
   const repairStage = [...fixture.stages.values()].find(stage => stage.kind === 'review-citation-repair')!
@@ -409,8 +408,8 @@ it('repairs a settings review whose quote adds words to its source by rewriting 
   expect(prompt).toContain('进一步确认')
   expect(prompt).toMatch(/Evidence quote does not occur in its declared source artifact_[0-9a-f-]+: \\"进一步确认/)
   // The admitted review is the prior value with only checks[0].evidence replaced.
-  const a1 = fixture.service.getSettings(fixture.actor, fixture.input.novelId).history.find(item => item.dimensionCode === 'a1' && item.review !== null)!
-  const saved = StageOutputSchemas.review.parse(JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.input.novelId, artifactId: a1.review!.id }).text))
+  const book = fixture.service.getManuscript(fixture.actor, fixture.input.novelId).history.find(item => item.target.kind === 'book-outline' && item.review !== null)!
+  const saved = StageOutputSchemas.review.parse(JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.input.novelId, artifactId: book.review!.id }).text))
   const reviewStage = [...fixture.stages.values()].find(stage => stage.kind === 'review' && stage.task?.paragraphs !== undefined)!
   expect(saved.checks.slice(1).map(check => check.summary)).toEqual(original!.checks.slice(1).map(check => check.summary))
   expect(saved.checks[1]!.evidence[0]!.quote).toBe(reviewStage.task!.paragraphs![0]!.text)
@@ -464,8 +463,8 @@ it('drops an unresolvable citation from an item that keeps other valid evidence 
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('completed')
-  const first = outcome.value.attempts.find(item => item.key === 'settings/0/a1/candidate/0/review/0')!
-  expect(outcome.value.attempts.some(item => item.key.startsWith('settings/0/a1/candidate/0/review/1'))).toBe(false)
+  const first = outcome.value.attempts.find(item => item.key === 'book-outline/book/candidate/0/review/0')!
+  expect(outcome.value.attempts.some(item => item.key.startsWith('book-outline/book/candidate/0/review/1'))).toBe(false)
   expect(first.evidenceEvents).toEqual([expect.objectContaining({ kind: 'dropped', location: 'checks[0]', declared: expect.objectContaining({ quote: '这句话从未出现在任何输入中。' }), admitted: [],
     reason: expect.stringMatching(/^Evidence quote does not occur in its declared source/) })])
   // Durable, not just logged: the stored run carries it.
@@ -486,8 +485,8 @@ it('repairs a research planning decision that exceeds the question limit and giv
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
-  const planning = outcome.value.attempts.filter(item => item.key.startsWith('settings/0/a1/research/planning'))
-  expect(planning.map(item => [item.key, item.status])).toEqual([['settings/0/a1/research/planning', 'succeeded'], ['settings/0/a1/research/planning/1', 'succeeded']])
+  const planning = outcome.value.attempts.filter(item => item.key.startsWith('book-outline/book/research/planning'))
+  expect(planning.map(item => [item.key, item.status])).toEqual([['book-outline/book/research/planning', 'succeeded'], ['book-outline/book/research/planning/1', 'succeeded']])
   const repairStage = [...fixture.stages.values()].filter(stage => stage.kind === 'research-planning')[1]!
   const prompt = await loggedPrompt(fixture, repairStage.sessionId)
   expect(prompt).toContain('The host rejected the previous planning decision for this exact target: Research questions exceed the configured limits: 13 questions, at most 12 per plan counting internal, creative and external questions together')
@@ -503,14 +502,14 @@ it('fails with the specific planning overrun once the repair budget is exhausted
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
   expect(outcome.value.error).toContain('Research planning repair limit was exhausted: Research questions exceed the configured limits: 13 questions, at most 12 per plan')
-  expect(outcome.value.attempts.filter(item => item.key.includes('/research/planning')).map(item => item.key)).toEqual(['settings/0/a1/research/planning'])
+  expect(outcome.value.attempts.filter(item => item.key.includes('/research/planning')).map(item => item.key)).toEqual(['book-outline/book/research/planning'])
 })
 
-it('retries a malformed settings-dimension review response under the same review key and completes the run', async () => {
+it('retries a malformed book-outline review response under the same review key and completes the run', async () => {
   let injected = false
   const fixture = await useWritingFixture({ injectFinish(stage) {
     if (injected || stage.kind !== 'review' || stage.task?.reviewed === undefined
-      || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'settings-dimension') return undefined
+      || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'book-outline') return undefined
     injected = true
     return { kind: 'error', failure: { code: 'MALFORMED_RESPONSE', message: 'DeepSeek Messages stream: tool input is invalid JSON' } }
   } })
@@ -518,7 +517,7 @@ it('retries a malformed settings-dimension review response under the same review
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
-  const reviewKey = 'settings/0/a1/candidate/0/review/0'
+  const reviewKey = 'book-outline/book/candidate/0/review/0'
   const attempts = outcome.value.attempts.filter(item => item.key === reviewKey)
   expect(attempts).toHaveLength(2)
   expect(attempts[0]).toMatchObject({ status: 'failed', output: null })
@@ -533,7 +532,7 @@ it('resumes past an exhausted same-key malformed settings failure without retryU
     malformedLeft -= 1
     return { kind: 'error', failure: { code: 'MALFORMED_RESPONSE', message: 'DeepSeek Messages stream: tool input is invalid JSON' } }
   } })
-  const settingsKey = 'settings/0/a1/candidate/0'
+  const settingsKey = 'settings/batch/a1/draft'
   const first = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (first.status === 'rejected') throw first.reason
   expect(first.value.status).toBe('failed')
@@ -549,7 +548,7 @@ it('resumes past an exhausted same-key malformed settings failure without retryU
   const afterAttempts = resumed.value.attempts.filter(item => item.key === settingsKey)
   expect(afterAttempts).toHaveLength(3)
   expect(afterAttempts[2]).toMatchObject({ status: 'succeeded' })
-  expect([...fixture.stages.values()].filter(stage => stage.kind === 'settings')).toHaveLength(3)
+  expect([...fixture.stages.values()].filter(stage => stage.kind === 'settings')).toHaveLength(4)
 })
 
 it('bounds each resume to exactly one more maxRepairAttempts-sized round of same-key malformed retries, not unlimited replay', async () => {
@@ -557,7 +556,7 @@ it('bounds each resume to exactly one more maxRepairAttempts-sized round of same
     if (stage.kind !== 'settings') return undefined
     return { kind: 'error', failure: { code: 'MALFORMED_RESPONSE', message: 'DeepSeek Messages stream: tool input is invalid JSON' } }
   } })
-  const settingsKey = 'settings/0/a1/candidate/0'
+  const settingsKey = 'settings/batch/a1/draft'
   const first = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (first.status === 'rejected') throw first.reason
   expect(first.value.status).toBe('failed')
@@ -575,14 +574,14 @@ it('replays a rejected over-bound settings candidate deterministically on resume
   let reviewInjected = false
   const fixture = await useWritingFixture({
     intervene(stage, output) {
-      if (stage.kind !== 'settings' || expanded) return output
+      if (stage.task?.batch !== 'draft' || expanded) return output
       expanded = true
-      const settings = StageOutputSchemas.settings.parse(output)
-      return { ...settings, contentMarkdown: 'x'.repeat(2501) }
+      const batch = output as { dimensions: { code: string; body: string }[] }
+      return { ...batch, dimensions: batch.dimensions.map(item => ({ ...item, body: 'x'.repeat(2501) })) }
     },
     injectFinish(stage) {
       if (!reviewInjected && stage.kind === 'review' && stage.task?.reviewed !== undefined
-        && stage.sources.get(stage.task.reviewed.artifactId)?.kind === 'settings-dimension') {
+        && stage.sources.get(stage.task.reviewed.artifactId)?.kind === 'book-outline') {
         reviewInjected = true
         return { kind: 'error', failure: { code: 'UNKNOWN', message: 'Fixture-injected later stage failure.' } }
       }
@@ -593,14 +592,14 @@ it('replays a rejected over-bound settings candidate deterministically on resume
   if (first.status === 'rejected') throw first.reason
   expect(first.value.status).toBe('failed')
   const settingsChildrenBefore = [...fixture.stages.values()].filter(stage => stage.kind === 'settings').length
-  const before = first.value.attempts.filter(item => /^settings\/0\/a1\/candidate\/\d+$/.test(item.key))
+  const before = first.value.attempts.filter(item => item.key === 'settings/batch/a1/draft' || item.key === 'settings/batch/a1/draft/repair/1')
   expect(before).toHaveLength(2)
   // Both native captures succeeded (syntactically valid JSON); saveSettingsCandidate's scope check rejected candidate/0's content, advancing to a fresh key.
   expect(before.every(item => item.status === 'succeeded')).toBe(true)
   const resumed = await fixture.run(exec => fixture.runner.resume(exec, first.value.id, true))
   if (resumed.status === 'rejected') throw resumed.reason
   expect(resumed.value.status).toBe('completed')
-  const after = resumed.value.attempts.filter(item => /^settings\/0\/a1\/candidate\/\d+$/.test(item.key))
+  const after = resumed.value.attempts.filter(item => item.key === 'settings/batch/a1/draft' || item.key === 'settings/batch/a1/draft/repair/1')
   expect(after).toEqual(before)
   expect([...fixture.stages.values()].filter(stage => stage.kind === 'settings')).toHaveLength(settingsChildrenBefore)
 })
@@ -641,7 +640,7 @@ it.each([
   expect(repairRequirements.some(item => item.includes('Preserve unaffected facts and passages'))).toBe(false)
 })
 
-it.each(['settings-dimension', 'book-outline', 'body'] as const)('keeps the review repair line, and for generated stages the review message, when a %s review blocks', async reviewedKind => {
+it.each(['book-outline', 'body'] as const)('keeps the review repair line, and for generated stages the review message, when a %s review blocks', async reviewedKind => {
   let blocked = false
   const fixture = await useWritingFixture({ intervene(stage, output) {
     if (blocked || stage.kind !== 'review' || stage.task?.reviewed === undefined || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== reviewedKind) return output
@@ -652,14 +651,13 @@ it.each(['settings-dimension', 'book-outline', 'body'] as const)('keeps the revi
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('completed')
-  const generatedKind = reviewedKind === 'settings-dimension' ? 'settings' : reviewedKind
-  const generated = [...fixture.stages.entries()].filter(([, stage]) => stage.kind === generatedKind)
+  const generated = [...fixture.stages.entries()].filter(([, stage]) => stage.kind === reviewedKind)
   expect(generated).toHaveLength(2)
   const [repairId, repair] = generated[1]!
   const requirements = loggedRequirements(await loggedPrompt(fixture, repairId))
   expect(requirements).toContain(reviewRepairLine)
   expect(requirements).not.toContain(lengthRepairLine)
-  if (generatedKind !== 'settings') expect(repair.task?.validationError).toBe('Resolve the blocking issues in the exact supplied review.')
+  expect(repair.task?.validationError).toBe('Resolve the blocking issues in the exact supplied review.')
 })
 
 it('keeps the unmet-obligation message and the review repair line for a continuity repair', async () => {
@@ -720,13 +718,17 @@ it('fails a writing run clearly when a stage child could see a subagent dispatch
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
   expect(outcome.value.error).toContain('can see tools outside its allow list (subagent)')
-  const planning = outcome.value.attempts.filter(item => item.key.endsWith('/research/planning'))
-  expect(planning).toHaveLength(1)
-  expect(planning[0]).toMatchObject({ status: 'succeeded' })
-  const research = outcome.value.attempts.filter(item => item.key.endsWith('/research') && !item.key.includes('/planning'))
-  expect(research).toHaveLength(1)
-  expect(research[0]).toMatchObject({ status: 'failed', output: null })
-  expect(fixture.childRequests.every(request => request.purpose === 'story-writing-stage')).toBe(true)
+  // The settings draft is direct text generation, so a leaked child tool does not reach it.
+  const draft = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')
+  expect(draft).toEqual([expect.objectContaining({ status: 'succeeded' })])
+  // The consistency review stays on a subagent and fails closed before that child sends a model request.
+  const review = outcome.value.attempts.filter(item => item.key === 'settings/collection/0/review/0')
+  expect(review).toEqual([expect.objectContaining({ status: 'failed', output: null })])
+  expect(outcome.value.attempts).toHaveLength(2)
+  expect(outcome.value.attempts.some(item => item.key.includes('/research'))).toBe(false)
+  expect(fixture.childRequests.map(request => ({ purpose: request.purpose, sessionId: request.sessionId }))).toEqual([
+    { purpose: 'story-writing-stage', sessionId: draft[0]!.childSessionId },
+  ])
   expect(dispatched).toEqual([])
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })
@@ -759,19 +761,19 @@ it('fails the run clearly once review turns without a structured result exhaust 
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
-  expect(outcome.value.error).toContain('Writing stage turn ended without returning its structured result; stage settings/0/a1/candidate/0/review/0 failed after 2 automatic retries')
-  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0/review/0')
+  expect(outcome.value.error).toContain('Writing stage turn ended without returning its structured result; stage book-outline/book/candidate/0/review/0 failed after 2 automatic retries')
+  const attempts = outcome.value.attempts.filter(item => item.key === 'book-outline/book/candidate/0/review/0')
   expect(attempts).toHaveLength(3)
   expect(attempts.every(item => item.status === 'failed' && item.output === null)).toBe(true)
-  expect(outcome.value.attempts.some(item => item.key === 'settings/0/a1/candidate/0/review/1')).toBe(false)
+  expect(outcome.value.attempts.some(item => item.key === 'book-outline/book/candidate/0/review/1')).toBe(false)
   expect(outcome.value.attempts.every(item => item.status !== 'unknown')).toBe(true)
-  expect(fixture.service.getSettings(fixture.actor, fixture.novel.id).applied).toEqual([])
+  expect(fixture.service.getSettings(fixture.actor, fixture.novel.id).applied.map(item => item.dimensionCode)).toEqual(['a1'])
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
   // The failure is a known outcome, so an explicit resume needs no permission to resend an uncertain call.
   const resumed = await fixture.run(exec => fixture.runner.resume(exec, outcome.value.id, false))
   if (resumed.status === 'rejected') throw resumed.reason
   expect(resumed.value.status).toBe('failed')
-  expect(resumed.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0/review/0')).toHaveLength(6)
+  expect(resumed.value.attempts.filter(item => item.key === 'book-outline/book/candidate/0/review/0')).toHaveLength(6)
 })
 
 it('does not retry a missing structured result when the repair budget is zero', async () => {
@@ -782,7 +784,7 @@ it('does not retry a missing structured result when the repair budget is zero', 
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
   expect(outcome.value.error).toContain('failed after 0 automatic retries')
-  expect(outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0')).toEqual([expect.objectContaining({ status: 'failed' })])
+  expect(outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')).toEqual([expect.objectContaining({ status: 'failed' })])
 })
 
 it('fails the run with an explicit truncated attempt when a chapter body is cut off at the output-token limit', async () => {
@@ -814,7 +816,7 @@ it('records a provider refusal as an explicit refused attempt instead of retryin
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
   expect(outcome.value.error).toContain('Writing stage was refused (MALFORMED_RESPONSE: DeepSeek Messages stream: unsupported stop reason refusal)')
-  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0')
+  const attempts = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')
   expect(attempts).toEqual([expect.objectContaining({ status: 'failed', output: null, failureKind: 'refused' })])
   expect(attempts[0]!.error).not.toContain('could not be decoded')
   expect(fixture.service.getSettings(fixture.actor, fixture.novel.id).history).toEqual([])

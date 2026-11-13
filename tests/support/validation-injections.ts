@@ -1,10 +1,11 @@
 /**
  * Shared injections and driver for the offline end-to-end proof for the unified output-validation repair loop.
  *
- * The fake stage provider runs the complete 55-stage pipeline of the live prompt (settings roots a4, a5 and e1, which plan
- * a1, a2, a3, a4, a5 and e1; one settings-collection review; the book outline; three chapters of outline, body and
- * continuity, each with research and review, plus a reviewed continuity snapshot after each applied chapter). One violation of every kind is injected into the first attempt of at least
- * one stage of every stage kind. With maxRepairAttempts 1 each is repaired by exactly one replacement and the run
+ * The fake stage provider runs the live prompt: settings roots a4, a5 and e1 (closure a1–a5 and e1) as one batch draft
+ * and one consistency review, then one book outline, then three chapters. Outlines are written before bodies. Each
+ * chapter has research and review for its outline, body and continuity, plus a reviewed continuity snapshot after the
+ * body is applied. One violation of every kind is injected into the first attempt of at least one stage of every stage
+ * kind that the injections name. With maxRepairAttempts 1 each is repaired by exactly one replacement and the run
  * completes; with maxRepairAttempts 0 each fails the run with its specific message.
  */
 import { expect, it } from 'vitest'
@@ -15,7 +16,7 @@ import { useWritingFixture, type WritingFixtureStage } from './writing-fixture.t
 export type Output = Record<string, any>
 export interface Injection {
   readonly id: string
-  /** Stage kind as counted in the 55-stage plan. */
+  /** Stage kind as counted in the live plan. */
   readonly stage: string
   readonly violation: string
   /** Highest chapter the run must reach for this stage to execute (0 = before any chapter). */
@@ -35,19 +36,22 @@ export interface Injection {
 }
 
 export const LIVE_ROOTS = ['a4', 'a5', 'e1']
-export const PIPELINE_STAGES = 55
+/** Logical stage keys after stripping planning captures and repair indices: one settings draft, one consistency review, book-outline research/candidate/review, and for each of three chapters outline, body and continuity research/candidate/review plus a snapshot candidate and review. */
+export const PIPELINE_STAGES = 38
 
 const planningTarget = (stage: WritingFixtureStage): Record<string, unknown> | undefined => stage.data.kind === 'research-planning' ? stage.data.outputTarget : undefined
-const researchPurpose = (stage: WritingFixtureStage): string => stage.data.kind === 'research' ? stage.data.purpose : ''
 const reviewed = (stage: WritingFixtureStage) => stage.kind === 'review' && stage.task?.reviewed !== undefined ? stage.sources.get(stage.task.reviewed.artifactId) : undefined
 const reviewedJson = (stage: WritingFixtureStage): Output => JSON.parse(reviewed(stage)!.stored ?? reviewed(stage)!.text)
 const isPlanning = (stage: WritingFixtureStage, target: string) => {
   const value = planningTarget(stage)
   return value !== undefined && (value.kind === 'settings' ? value.dimensionCode === target : value.kind === target)
 }
-const isResearch = (stage: WritingFixtureStage, code: string) => researchPurpose(stage).startsWith(`Establish the evidence needed for settings dimension ${code}:`)
-export const isSettings = (stage: WritingFixtureStage, code: string) => stage.kind === 'settings' && stage.task?.dimensionCode === code
-const isDimensionReview = (stage: WritingFixtureStage, code: string) => reviewed(stage)?.kind === 'settings-dimension' && reviewedJson(stage).dimensionCode === code
+const isManuscriptResearch = (stage: WritingFixtureStage, kind: string, chapter?: number) => {
+  if (stage.data.kind !== 'research' || !stage.data.purpose.startsWith('Resolve evidence needed for')) return false
+  return stage.data.purpose.includes(`"kind":"${kind}"`) && (chapter === undefined || stage.data.purpose.includes(`"chapterNumber":${chapter}`))
+}
+const isBatch = (stage: WritingFixtureStage, batch: 'draft' | 'consistency' | 'repair') => stage.kind === 'settings' && stage.task?.batch === batch
+export const isSettings = (stage: WritingFixtureStage, code: string) => stage.kind === 'settings' && (stage.task?.dimensionCode === code || stage.task?.codes?.includes(code) === true)
 const isReviewOf = (stage: WritingFixtureStage, kind: string, chapter?: number) => reviewed(stage)?.kind === kind && (chapter === undefined || reviewedJson(stage).chapterNumber === chapter)
 export const isChapterStage = (stage: WritingFixtureStage, kind: string, chapter: number) => stage.kind === kind && stage.task?.chapterNumber === chapter
 const misquote = (output: Output) => ({ ...output, checks: output.checks.map((check: Output, index: number) => {
@@ -65,54 +69,60 @@ const planningNext = (key: string) => `${key}/1`
 const researchNext = (key: string) => `${key}/repair/1`
 const creative = (id: string) => ({ id, kind: 'creative', question: `虚构设定问题 ${id}`, reason: 'A deliberate fictional choice grounded in the brief.' })
 
+const batchRepair = (key: string) => key.includes('/repair/') ? key : `${key}/repair/1`
+const QUOTE = '本书是一部发生在虚构雾港的悬疑冒险小说。'
 export const injections: readonly Injection[] = [
-  // Research planning (local decision capture)
-  { id: 'planning-question-count', stage: 'research planning', violation: 'over-limit question count (13 > 12)', chapter: 0, match: stage => isPlanning(stage, 'e1'),
+  // Research planning now starts at the book outline; settings no longer spend a planning child.
+  { id: 'planning-question-count', stage: 'research planning', violation: 'over-limit question count (13 > 12)', chapter: 0, match: stage => isPlanning(stage, 'chapter-outline'),
     mutate: output => ({ ...output, questions: Array.from({ length: 13 }, (_, index) => creative(`q${index + 1}`)) }), replacement: planningNext,
     message: /Research planning repair limit was exhausted: Research questions exceed the configured limits: 13 questions, at most 12 per plan/ },
-  { id: 'planning-schema', stage: 'research planning', violation: 'schema beyond native JSON Schema (blank reason)', chapter: 0, match: stage => isPlanning(stage, 'a2'),
+  { id: 'planning-schema', stage: 'research planning', violation: 'schema beyond native JSON Schema (blank reason)', chapter: 0, match: stage => isPlanning(stage, 'body'),
     mutate: output => ({ ...output, questions: output.questions.map((question: Output) => ({ ...question, reason: '   ' })) }), replacement: planningNext,
     message: /Research planning decision does not match its output schema: questions\.0\.reason: / },
-  { id: 'planning-scope', stage: 'research planning', violation: 'cross-reference (mode vs external questions)', chapter: 0, match: stage => isPlanning(stage, 'a3'),
+  { id: 'planning-scope', stage: 'research planning', violation: 'cross-reference (mode vs external questions)', chapter: 0, match: stage => isPlanning(stage, 'continuity'),
     mutate: output => ({ ...output, mode: 'external-required' }), replacement: planningNext,
     message: /Research scope must identify one required output decision and missing fact for every external question: mode is external-required but there are 0 external questions/ },
   { id: 'planning-duplicate-id', stage: 'research planning', violation: 'duplicate question id', chapter: 0, match: stage => isPlanning(stage, 'book-outline'),
     mutate: output => ({ ...output, questions: [creative('dup'), creative('dup')] }), replacement: planningNext,
     message: /Research question ids must be unique: "dup" appears more than once/ },
-  // Research stage (native child)
-  { id: 'research-schema', stage: 'research', violation: 'schema (malformed planId)', chapter: 0, match: stage => isResearch(stage, 'a4'),
+  // Research stage (native child) for manuscript targets. Settings use host official retrieval, not a research child.
+  { id: 'research-schema', stage: 'research', violation: 'schema (malformed planId)', chapter: 0, match: stage => isManuscriptResearch(stage, 'book-outline'),
     mutate: () => ({ planId: 'not-a-plan' }), replacement: researchNext, message: /Research stage repair limit was exhausted: Research stage output does not match its output schema: planId: / },
-  { id: 'research-unknown-plan', stage: 'research', violation: 'cross-reference (invented planId)', chapter: 0, match: stage => isResearch(stage, 'a5'),
+  { id: 'research-unknown-plan', stage: 'research', violation: 'cross-reference (invented planId)', chapter: 1, match: stage => isManuscriptResearch(stage, 'chapter-outline', 1),
     mutate: () => ({ planId: 'artifact_00000000-0000-4000-8000-000000000001' }), replacement: researchNext,
     message: /Research stage output names no research plan of this novel: artifact_00000000-0000-4000-8000-000000000001/ },
-  // Settings dimension candidates
-  { id: 'settings-schema', stage: 'settings candidate', violation: 'schema beyond native JSON Schema (blank contentMarkdown)', chapter: 0, match: stage => isSettings(stage, 'a1'),
-    mutate: output => ({ ...output, contentMarkdown: ' \n ' }), replacement: next, message: /Settings repair limit was exhausted for a1: Settings dimension output does not match its output schema: contentMarkdown: / },
-  { id: 'settings-fact-count', stage: 'settings candidate', violation: 'over-limit fact count (11 > 10)', chapter: 0, match: stage => isSettings(stage, 'a2'),
-    mutate: output => ({ ...output, facts: Array.from({ length: 11 }, (_, index) => ({ id: `fact-${index + 1}`, statement: `雾港设定 ${index + 1}` })) }), replacement: next,
-    message: /A classification dimension allows at most 10 facts; this candidate has 11/ },
-  { id: 'settings-content-length', stage: 'settings candidate', violation: 'over-limit contentMarkdown (2501 > 2500)', chapter: 0, match: stage => isSettings(stage, 'a3'),
-    mutate: output => ({ ...output, contentMarkdown: '雾'.repeat(2501) }), replacement: next,
+  // Settings batch draft. Only one of these can ride the combined run; the rest are solo because they share the draft stage.
+  { id: 'settings-schema', stage: 'settings batch', violation: 'blank dimension body', chapter: 0, match: stage => isBatch(stage, 'draft'),
+    mutate: output => ({ ...output, dimensions: output.dimensions.map((item: Output, index: number) => index === 0 ? { ...item, body: ' \n ' } : item) }), replacement: batchRepair,
+    message: /Settings batch repair limit was exhausted: Settings batch body for .+ must not be blank/ },
+  { id: 'settings-fact-count', stage: 'settings batch', violation: 'duplicate dimension code', chapter: 0, match: stage => isBatch(stage, 'draft'), solo: true,
+    mutate: output => ({ ...output, dimensions: [output.dimensions[0], output.dimensions[0]] }), replacement: batchRepair,
+    message: /Settings batch repair limit was exhausted: Settings batch repeats dimension / },
+  { id: 'settings-content-length', stage: 'settings batch', violation: 'over-limit contentMarkdown (2501 > 2500)', chapter: 0, match: stage => isBatch(stage, 'draft'), solo: true,
+    mutate: output => ({ ...output, dimensions: output.dimensions.map((item: Output) => item.code === 'a1' ? { ...item, body: '雾'.repeat(2501) } : item) }), replacement: batchRepair,
     message: /A classification dimension allows at most 2500 characters of contentMarkdown; this candidate has 2501/ },
-  { id: 'settings-dimension-code', stage: 'settings candidate', violation: 'cross-reference (wrong dimensionCode)', chapter: 0, match: stage => isSettings(stage, 'a5'),
-    mutate: output => ({ ...output, dimensionCode: 'a4' }), replacement: next, message: /Settings dimension differs from the requested dimension: got "a4", expected "a5"/ },
-  { id: 'settings-input-refs', stage: 'settings candidate', violation: 'cross-reference (missing inputRef)', chapter: 0, match: stage => isSettings(stage, 'e1'),
-    mutate: output => ({ ...output, inputRefs: output.inputRefs.slice(1) }), replacement: next,
-    message: /Stage input references do not match the requested versions: missing "artifact_[^"]+"; unexpected none/ },
-  // Settings dimension reviews
-  { id: 'settings-review-misquote', stage: 'settings review', violation: 'misquote (invented lead-in)', chapter: 0, match: stage => isDimensionReview(stage, 'a1'),
-    mutate: misquote, replacement: citationNext, message: /Review output repair limit was exhausted: Evidence quote does not occur in its declared source artifact_\S+: "进一步确认/ },
-  { id: 'settings-review-missing-check', stage: 'settings review', violation: 'missing required check', chapter: 0, match: stage => isDimensionReview(stage, 'a4'),
-    mutate: dropCheck('consistency'), replacement: next, message: /Review is missing a required check: consistency \(required: completeness, consistency\)/ },
-  { id: 'settings-review-style-severity', stage: 'settings review', violation: 'severity rule (blocking style issue)', chapter: 0, match: stage => isDimensionReview(stage, 'e1'),
-    mutate: output => ({ ...output, issues: [{ id: 'style-1', severity: 'blocking', category: 'style', location: 'contentMarkdown', message: '语气可以更紧凑。', evidence: output.checks[0].evidence }] }), replacement: next,
-    message: /Style suggestions must remain advisory: issue "style-1" is blocking/ },
-  { id: 'settings-review-blocking', stage: 'settings review', violation: 'business: blocking consistency issue (candidate rewrite)', chapter: 0, match: stage => isDimensionReview(stage, 'a5'),
-    mutate: output => ({ ...output, issues: [{ id: 'block-1', severity: 'blocking', category: 'consistency', location: 'facts', message: '时空设定与依赖维度冲突。', evidence: output.checks[0].evidence }] }),
-    replacement: key => next(key.replace(/\/review\/0$/u, '')), message: /Settings repair limit was exhausted for a5/, solo: true },
-  // Full-settings (collection) review
-  { id: 'collection-review-misquote', stage: 'full-settings review', violation: 'misquote (invented lead-in)', chapter: 0, match: stage => isReviewOf(stage, 'settings'),
-    mutate: misquote, replacement: citationNext, message: /Review output repair limit was exhausted: Evidence quote does not occur in its declared source/ },
+  { id: 'settings-dimension-code', stage: 'settings batch', violation: 'unrequested dimension code', chapter: 0, match: stage => isBatch(stage, 'draft'), solo: true,
+    mutate: output => ({ ...output, dimensions: output.dimensions.map((item: Output, index: number) => index === 0 ? { ...item, code: 'z9' } : item) }), replacement: batchRepair,
+    message: /Settings batch repair limit was exhausted: Settings batch names an unrequested dimension z9/ },
+  { id: 'settings-input-refs', stage: 'settings batch', violation: 'missing requested dimension', chapter: 0, match: stage => isBatch(stage, 'draft'), solo: true,
+    mutate: output => ({ ...output, dimensions: output.dimensions.slice(1) }), replacement: batchRepair,
+    message: /Settings batch repair limit was exhausted: Settings batch is missing / },
+  // Cross-dimension consistency review. One rides the combined run; the others are solo on the same stage.
+  { id: 'settings-review-misquote', stage: 'settings consistency', violation: 'quote that does not occur in the dimension', chapter: 0, match: stage => isBatch(stage, 'consistency'),
+    mutate: () => ({ issues: [{ dimension: 'a1', kind: 'conflict', quote: '进一步确认这句话不在正文里' }] }), replacement: next,
+    message: /Settings consistency repair limit was exhausted: Consistency quote does not occur in a1/ },
+  { id: 'settings-review-missing-check', stage: 'settings consistency', violation: 'quote the native schema accepts but the dimension body does not contain', chapter: 0, match: stage => isBatch(stage, 'consistency'), solo: true,
+    mutate: () => ({ issues: [{ dimension: 'a1', kind: 'gap', quote: '这段引文不在维度正文里' }] }), replacement: next,
+    message: /Settings consistency repair limit was exhausted: Consistency quote does not occur in a1/ },
+  { id: 'settings-review-style-severity', stage: 'settings consistency', violation: 'dimension outside the batch', chapter: 0, match: stage => isBatch(stage, 'consistency'), solo: true,
+    mutate: () => ({ issues: [{ dimension: 'z9', kind: 'gap', quote: QUOTE }] }), replacement: next,
+    message: /Settings consistency repair limit was exhausted: Consistency issue names a dimension outside this batch: z9/ },
+  { id: 'settings-review-blocking', stage: 'settings consistency', violation: 'business: blocking conflict with no repair budget', chapter: 0, match: stage => isBatch(stage, 'consistency'),
+    mutate: () => ({ issues: [{ dimension: 'a5', kind: 'conflict', quote: QUOTE }] }),
+    replacement: key => key, message: /Settings repair limit was exhausted for a5/, solo: true },
+  { id: 'collection-review-misquote', stage: 'settings consistency', violation: 'quote that does not occur in the named dimension', chapter: 0, match: stage => isBatch(stage, 'consistency'), solo: true,
+    mutate: () => ({ issues: [{ dimension: 'e1', kind: 'gap', quote: '并不存在的缺口' }] }), replacement: next,
+    message: /Settings consistency repair limit was exhausted: Consistency quote does not occur in e1/ },
   // Book outline
   { id: 'book-chapter-count', stage: 'book outline', violation: 'count (2 of 3 chapters)', chapter: 0, match: stage => stage.kind === 'book-outline',
     mutate: output => ({ ...output, chapters: output.chapters.slice(0, 2) }), replacement: next,
@@ -194,7 +204,7 @@ export async function pipeline(maxRepairAttempts: number, selected: readonly Inj
   return { fixture, run: outcome.value, fired }
 }
 
-/** Stage keys counted by the live 55-stage plan: every research, candidate and review key, without local planning captures. */
+/** Stage keys counted by the live plan: every research, candidate and review key, without local planning captures. */
 export function stageKeys(attempts: readonly { key: string }[]): string[] {
   return [...new Set(attempts.map(attempt => attempt.key))].filter(key => !/\/planning(\/\d+)?$/u.test(key))
 }

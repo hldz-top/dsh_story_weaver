@@ -19,15 +19,12 @@ it('replays the complete blocked collection and retains its internal review afte
   let deliveredBeforeRepair: boolean | undefined
   const fixture = await useWritingFixture({ maxReadChars: 8192,
     intervene(stage, output) {
-      if (blockedCollection || stage.kind !== 'review' || stage.task?.reviewed === undefined
-        || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'settings') return output
+      if (blockedCollection || stage.task?.batch !== 'consistency') return output
       blockedCollection = true
-      const review = output as { checks: { evidence: unknown[] }[] }
-      return { ...review, issues: [{ id: 'collection-conflict', category: 'consistency', severity: 'blocking', location: 'Selected dimensions',
-        message: 'Repair the selected dimension before accepting this collection.', evidence: review.checks[0]!.evidence }] }
+      return { issues: [{ dimension: 'a1', kind: 'conflict', quote: '本书是一部发生在虚构雾港的悬疑冒险小说。' }] }
     },
-    onChildRequest(stage) {
-      if (!resuming || stage.kind !== 'review' || deliveredBeforeRepair !== undefined) return
+    onChildRequest() {
+      if (!resuming || deliveredBeforeRepair !== undefined) return
       const projection = fixture.ctx.sessionProjections.snapshot(fixture.parent.session).values['story-stage-deliveries']
       deliveredBeforeRepair = projection?.calls.find(call => call.callId === 'stage-fixture-2')?.deliveries.some(delivery =>
         delivery.source.kind === 'artifact' && delivery.source.artifactId === retainedCollectionId) === true
@@ -73,8 +70,7 @@ it('replays rejected review admission after a native repair interruption without
   let interruptedRepair = false
   let rawPresentationRequested = false
   const fixture = await useWritingFixture({ maxReadChars: 8192, intervene(stage, output) {
-    if (stage.kind !== 'review' || stage.task?.reviewed === undefined
-      || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'settings') return output
+    if (stage.task?.batch !== 'consistency') return output
     if (malformedCollection) {
       if (!interruptedRepair && typeof stage.task.validationError === 'string') {
         interruptedRepair = true
@@ -83,10 +79,7 @@ it('replays rejected review admission after a native repair interruption without
       return output
     }
     malformedCollection = true
-    const review = output as { reviewed: { artifactId: string; sha256: string }; checks: { evidence: unknown[] }[] }
-    return { ...review, reviewed: { ...review.reviewed, sha256: '0'.repeat(64) },
-      issues: [{ id: 'unadmitted-collection-conflict', category: 'consistency', severity: 'blocking', location: 'Selected dimensions',
-        message: 'This invalid review cannot authorize collection repair.', evidence: review.checks[0]!.evidence }] }
+    return { issues: [{ dimension: 'a1', kind: 'conflict', quote: '这句话从未出现。' }] }
   } })
   const presentArgs = z.object({ files: z.array(z.object({ path: z.string(), description: z.string().optional() })) })
   fixture.ctx.on('tools/pre-execute', async (exec, next) => {
@@ -109,7 +102,7 @@ it('replays rejected review admission after a native repair interruption without
   if (firstReview === undefined) throw new Error('The raw review attempt was not retained')
   expect(firstReview.status).toBe('succeeded')
   const raw = fixture.runs.readOutput(fixture.actor, failed.id, firstReview.id)
-  expect((JSON.parse(raw.text) as { reviewed: { sha256: string } }).reviewed.sha256).toBe('0'.repeat(64))
+  expect(JSON.parse(raw.text).issues[0].quote).toBe('这句话从未出现。')
   const requestsAtFailure = fixture.childRequests.length
   const completed = fulfilled(await fixture.run(exec => fixture.runner.resume(exec, failed.id, true)))
   expect(completed.error).toBeNull()

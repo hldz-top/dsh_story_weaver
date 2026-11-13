@@ -30,8 +30,8 @@ const writingModelChoiceSchema = z.union([
 ])
 const executionLimitsSchema = z.strictObject({
   maxRepairAttempts: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), maxParallelStages: positive,
-  // How many candidates one settings dimension generates on its first pass. Absent on runs stored before the field
-  // existed; those runs generate one. Layer width stays maxParallelStages and does not read this value.
+  // Comparison drafts on a new settings batch, and first-pass candidates on a resumed per-dimension run.
+  // Absent on runs stored before the field existed; those runs use 1. Layer width stays maxParallelStages.
   settingsCandidateCount: positive.exactOptional(),
   maxStageRequests: positive, stageTimeoutMs: positive.max(2_147_483_647), maxDelegationDepth: positive,
   minChapterWords: positive, maxChapterWords: positive, stageProvider: z.string().min(1).refine(value => value.trim().length > 0),

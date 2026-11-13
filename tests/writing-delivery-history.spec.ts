@@ -46,17 +46,18 @@ it('retains saved research after failed native capture and reuses its history wi
   expect(failed.status).toBe('failed')
   expect(failed.error).toContain('Writing stage ended without a complete structured result')
   const plans = fixture.service.listResearch(fixture.actor, fixture.novel.id)
-  expect(plans).toHaveLength(1)
-  expect(plans[0]!.result).not.toBeNull()
-  const expected = [plans[0]!.plan.id, plans[0]!.result!.id].sort()
+  expect(plans.length).toBeGreaterThanOrEqual(1)
+  expect(plans.every(plan => plan.result !== null)).toBe(true)
+  const expected = plans.flatMap(plan => [plan.plan.id, plan.result!.id]).sort()
   const originals = expected.map(artifactId => fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId }))
-  expect(fixture.ctx.sessionProjections.snapshot(fixture.parent.session).values['story-stage-deliveries']!.calls).toEqual([])
-  expect(fixture.parent.session.ownEvents().filter(event => event.type === 'deliverables/presented')).toEqual([])
+  const presented = fixture.ctx.sessionProjections.snapshot(fixture.parent.session).values['story-stage-deliveries']!.calls.flatMap(call => call.deliveries)
+  expect(presented.length).toBeGreaterThan(0)
+  expect(presented.every(delivery => delivery.description.startsWith('Settings collection'))).toBe(true)
   breakResearch = false
   let retainedBeforeRetry = false
   observeRetry = () => {
     retainedBeforeRetry = expected.every(id => fixture.service.listResearch(fixture.actor, fixture.novel.id).some(plan => plan.plan.id === id || plan.result?.id === id))
-    expect(fixture.ctx.sessionProjections.snapshot(fixture.parent.session).values['story-stage-deliveries']!.calls).toEqual([])
+    expect(fixture.ctx.sessionProjections.snapshot(fixture.parent.session).values['story-stage-deliveries']!.calls.flatMap(call => call.deliveries).every(delivery => delivery.description.startsWith('Settings collection'))).toBe(true)
   }
   const resumed = fulfilled(await fixture.run(exec => fixture.runner.resume(exec, failed.id, true)))
   expect(resumed.status, resumed.error ?? '').toBe('completed')
@@ -114,8 +115,8 @@ it('keeps cancellation authoritative when the stopped research child already sav
   cancel = () => { fixture.parent.cancel({ kind: 'user' }) }
   const stopped = fulfilled(await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 })))
   expect(stopped.status).toBe('stopped')
-  expect(fixture.service.listResearch(fixture.actor, fixture.novel.id)[0]!.result).not.toBeNull()
-  expect(fixture.ctx.sessionProjections.snapshot(fixture.parent.session).values['story-stage-deliveries']!.calls).toEqual([])
+  expect(fixture.service.listResearch(fixture.actor, fixture.novel.id).some(plan => plan.result !== null)).toBe(true)
+  expect(fixture.ctx.sessionProjections.snapshot(fixture.parent.session).values['story-stage-deliveries']!.calls.flatMap(call => call.deliveries).every(delivery => delivery.description.startsWith('Settings collection'))).toBe(true)
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })
 

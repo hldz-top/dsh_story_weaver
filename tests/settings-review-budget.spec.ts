@@ -11,6 +11,22 @@ function dimensionOf(stage: WritingFixtureStage): string | undefined {
   return undefined
 }
 
+/** A succeeded settings/0/ attempt makes resume keep the per-dimension path. */
+async function seedPerDimensionRun(fixture: Awaited<ReturnType<typeof useWritingFixture>>, roots: readonly string[]) {
+  const run = await fixture.runs.begin(fixture.actor, {
+    ...fixture.input, settingsRoots: [...roots], chapterCount: 1, throughChapter: 1, revision: null,
+    executionLimits: fixture.runner.limits, serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits },
+  })
+  const attempt = await fixture.runs.prepareAttempt(fixture.actor, run.id, {
+    key: 'settings/0/seed', prompt: 'Already-started per-dimension settings path.',
+    inputRefs: [{ artifactId: fixture.novel.brief.id, sha256: fixture.novel.brief.sha256 }],
+    outputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  })
+  await fixture.runs.associateChild(fixture.actor, run.id, attempt.id, fixture.parent.session.id)
+  await fixture.runs.saveOutput(fixture.actor, run.id, attempt.id, '{}')
+  return run.id
+}
+
 async function until(ready: () => boolean): Promise<void> {
   const start = Date.now()
   while (!ready()) {
@@ -46,12 +62,38 @@ it('keeps one candidate per dimension and sizes the layer by maxParallelStages a
   expect(gradedStageOf('body/1/candidate/1')).toBe('body')
   expect(gradedStageOf('body/1/candidate/0/review/0')).toBe('review')
   expect(gradedStageOf('body/1/candidate/0/review/1/citations')).toBe('repair')
+  expect(gradedStageOf('settings/batch/a1/draft')).toBe('candidate')
+  expect(gradedStageOf('settings/batch/a1-a2-a3/draft')).toBe('candidate')
+  expect(gradedStageOf('settings/batch/a1/draft/candidate/1')).toBe('candidate')
+  expect(gradedStageOf('settings/batch/a1/draft/repair/1')).toBe('repair')
+  expect(gradedStageOf('settings/collection/0/review/0')).toBe('review')
+  expect(gradedStageOf('settings/repair/a1')).toBe('repair')
   expect(stageDeadlineMs('body/1/candidate/0', OTHER_STAGE_TIMEOUT_MS)).toBe(BODY_STAGE_TIMEOUT_MS)
   expect(stageDeadlineMs('book-outline/book/research', OTHER_STAGE_TIMEOUT_MS)).toBe(OTHER_STAGE_TIMEOUT_MS)
   expect(stageDeadlineMs('settings/0/a1/candidate/1', OTHER_STAGE_TIMEOUT_MS)).toBe(REPAIR_STAGE_TIMEOUT_MS)
+  expect(stageDeadlineMs('settings/batch/a1/draft', OTHER_STAGE_TIMEOUT_MS)).toBe(CANDIDATE_STAGE_TIMEOUT_MS)
+  expect(stageDeadlineMs('settings/collection/0/review/0', OTHER_STAGE_TIMEOUT_MS)).toBe(REVIEW_STAGE_TIMEOUT_MS)
+  expect(stageDeadlineMs('settings/repair/a1', OTHER_STAGE_TIMEOUT_MS)).toBe(REPAIR_STAGE_TIMEOUT_MS)
 })
 
-it('starts every dimension in a layer up to maxParallelStages when the candidate count stays 1', async () => {
+it('drafts a dependency layer in one batch and keeps width at maxParallelStages', async () => {
+  const fixture = await useWritingFixture()
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a2', 'a3'], chapterCount: 1, throughChapter: 1 }))
+  if (outcome.status === 'rejected') throw outcome.reason
+  expect(outcome.value.status).toBe('completed')
+  expect(fixture.runner.limits.settingsCandidateCount).toBe(1)
+  expect(fixture.runner.limits.maxParallelStages).toBe(2)
+  expect(dimensionWidth(fixture.runner.limits)).toBe(2)
+  expect(outcome.value.executionLimits.settingsCandidateCount).toBe(1)
+  expect(outcome.value.executionLimits.maxParallelStages).toBe(2)
+  const drafts = [...fixture.stages.values()].filter(stage => stage.task?.batch === 'draft')
+  expect(drafts).toHaveLength(1)
+  expect(drafts[0]?.task?.codes).toEqual(['a1', 'a2', 'a3'])
+  expect(outcome.value.attempts.filter(item => item.key.startsWith('settings/batch/')).map(item => item.key)).toEqual(['settings/batch/a1-a2-a3/draft'])
+  expect(outcome.value.attempts.some(item => /^settings\/\d+\//.test(item.key))).toBe(false)
+}, 120_000)
+
+it('keeps per-dimension fallback width at maxParallelStages when the candidate count is 1', async () => {
   let release = () => {}
   let heldA2 = false
   const fixture = await useWritingFixture({
@@ -61,7 +103,8 @@ it('starts every dimension in a layer up to maxParallelStages when the candidate
       return new Promise<void>(resolve => { release = resolve })
     },
   })
-  const pending = fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a2', 'a3'], chapterCount: 1, throughChapter: 1 }))
+  const runId = await seedPerDimensionRun(fixture, ['a2', 'a3'])
+  const pending = fixture.run(exec => fixture.runner.resume(exec, runId, false))
   try {
     await until(() => heldA2)
     await until(() => [...fixture.stages.values()].some(stage => dimensionOf(stage) === 'a3'))
@@ -78,7 +121,7 @@ it('starts every dimension in a layer up to maxParallelStages when the candidate
   expect(outcome.value.attempts.some(item => item.key.includes('/candidate/0/n/'))).toBe(false)
 }, 120_000)
 
-it('does not widen a layer when settingsCandidateCount is larger than maxParallelStages', async () => {
+it('does not widen a per-dimension fallback layer when settingsCandidateCount is larger than maxParallelStages', async () => {
   let release = () => {}
   let heldA2 = false
   const fixture = await useWritingFixture({
@@ -89,7 +132,8 @@ it('does not widen a layer when settingsCandidateCount is larger than maxParalle
       return new Promise<void>(resolve => { release = resolve })
     },
   })
-  const pending = fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a2', 'a3'], chapterCount: 1, throughChapter: 1 }))
+  const runId = await seedPerDimensionRun(fixture, ['a2', 'a3'])
+  const pending = fixture.run(exec => fixture.runner.resume(exec, runId, false))
   try {
     await until(() => heldA2)
     await new Promise(resolve => { setTimeout(resolve, 50) })
@@ -150,10 +194,10 @@ it('authorizes exactly one review execution timeout and can succeed on that retr
     const outcome = await pending
     if (outcome.status === 'rejected') throw outcome.reason
     expect(outcome.value.status).toBe('completed')
-    const reviews = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0/review/0')
+    const reviews = outcome.value.attempts.filter(item => item.key === 'book-outline/book/candidate/0/review/0')
     expect(reviews.map(item => item.status)).toEqual(['unknown', 'succeeded'])
     expect(reviews.map(item => item.retryAuthorized)).toEqual([false, false])
-    expect(outcome.value.attempts.some(item => item.key === 'settings/0/a1/candidate/0/review/1')).toBe(false)
+    expect(outcome.value.attempts.some(item => item.key === 'book-outline/book/candidate/0/review/1')).toBe(false)
     expect(reviews[0]?.error).toContain('Writing stage exceeded its execution deadline')
   } finally { vi.useRealTimers() }
 }, 120_000)
@@ -180,11 +224,11 @@ it('fails closed when a review execution times out twice', async () => {
     const outcome = await pending
     if (outcome.status === 'rejected') throw outcome.reason
     expect(outcome.value.status).toBe('failed')
-    const reviews = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0/review/0')
+    const reviews = outcome.value.attempts.filter(item => item.key === 'book-outline/book/candidate/0/review/0')
     expect(reviews).toHaveLength(2)
     expect(reviews.map(item => item.status)).toEqual(['unknown', 'unknown'])
     expect(reviews.map(item => item.retryAuthorized)).toEqual([false, false])
-    expect(outcome.value.attempts.some(item => item.key.startsWith('settings/0/a1/candidate/0/review/1'))).toBe(false)
+    expect(outcome.value.attempts.some(item => item.key.startsWith('book-outline/book/candidate/0/review/1'))).toBe(false)
     expect(entered).toHaveLength(2)
     expect(outcome.value.error).toContain('Writing stage exceeded its execution deadline')
   } finally { vi.useRealTimers() }
@@ -208,7 +252,7 @@ it('keeps a research execution timeout fail-closed with retryAuthorized false', 
     const outcome = await pending
     if (outcome.status === 'rejected') throw outcome.reason
     expect(outcome.value.status).toBe('failed')
-    const attempts = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/research')
+    const attempts = outcome.value.attempts.filter(item => item.key === 'book-outline/book/research')
     expect(attempts).toHaveLength(1)
     expect(attempts[0]).toMatchObject({ status: 'unknown', retryAuthorized: false })
     expect(attempts[0]?.error).toContain('Writing stage exceeded its execution deadline')
@@ -236,7 +280,7 @@ it('authorizes exactly one settings candidate execution timeout and can succeed 
     const outcome = await pending
     if (outcome.status === 'rejected') throw outcome.reason
     expect(outcome.value.status).toBe('completed')
-    const candidates = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0')
+    const candidates = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')
     expect(candidates.map(item => item.status)).toEqual(['unknown', 'succeeded'])
     expect(candidates.map(item => item.retryAuthorized)).toEqual([false, false])
     expect(candidates[0]?.error).toContain('Writing stage exceeded its execution deadline')
@@ -265,7 +309,7 @@ it('fails closed when a settings candidate execution times out twice', async () 
     const outcome = await pending
     if (outcome.status === 'rejected') throw outcome.reason
     expect(outcome.value.status).toBe('failed')
-    const candidates = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0')
+    const candidates = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')
     expect(candidates).toHaveLength(2)
     expect(candidates.map(item => item.status)).toEqual(['unknown', 'unknown'])
     expect(candidates.map(item => item.retryAuthorized)).toEqual([false, false])
@@ -296,7 +340,7 @@ it('cancels a graded stage on story_stop without authorizing its timeout retry',
   })
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('stopped')
-  const candidates = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0')
+  const candidates = outcome.value.attempts.filter(item => item.key === 'settings/batch/a1/draft')
   expect(candidates).toHaveLength(1)
   expect(candidates[0]).toMatchObject({ retryAuthorized: false })
   expect(candidates[0]?.error ?? '').not.toContain('execution deadline')
@@ -313,11 +357,11 @@ it('keeps a non-timeout review failure fail-closed with retryAuthorized false', 
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
-  const reviews = outcome.value.attempts.filter(item => item.key === 'settings/0/a1/candidate/0/review/0')
+  const reviews = outcome.value.attempts.filter(item => item.key === 'book-outline/book/candidate/0/review/0')
   expect(reviews).toHaveLength(1)
   expect(reviews[0]).toMatchObject({ status: 'unknown', retryAuthorized: false })
   expect(reviews[0]?.error).toContain('Writing stage ended without a complete structured result')
   expect(reviews[0]?.error).not.toContain('execution deadline')
-  expect(outcome.value.attempts.some(item => item.key.startsWith('settings/0/a1/candidate/0/review/1'))).toBe(false)
+  expect(outcome.value.attempts.some(item => item.key.startsWith('book-outline/book/candidate/0/review/1'))).toBe(false)
   expect(outcome.value.attempts.some(item => item.retryAuthorized)).toBe(false)
 }, 120_000)

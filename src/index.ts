@@ -39,6 +39,8 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   previewDirectory: string
   /** Operator-only: skip the required-settings gate for smoke tests. Not a tool argument. Default false. */
   allowIncompleteSettings: boolean
+  /** Skip settings on a new run when a stored snapshot has the same brief text and roots. Default true. */
+  reuseSettingsSnapshot: boolean
   /** Operator-only: register story_settings_import. Enable only for an import, then turn it off. Default false: the tool is absent from the tool schema. */
   allowSettingsImport: boolean
   /** Body reviews on prompt versions 5 and 6 turn AI-tone findings quoting the body into blocking issues. Prompt version 7 records the same switch and reports a density grade instead of blocking. Frozen into each new run. Default true. */
@@ -62,8 +64,9 @@ export const Config: z<Config> = z.object({
   maxRepairAttempts: z.number().default(2),
   maxParallelStages: z.number().default(3),
   /**
-   * How many candidates one settings dimension generates on its first pass.
-   * Layer width is maxParallelStages and does not read this value. Default 1.
+   * How many comparison drafts a new settings batch captures. The default 1 keeps a single draft.
+   * A resumed per-dimension run still generates this many candidates on each dimension's first pass.
+   * Layer width is maxParallelStages and does not read this value.
    */
   settingsCandidateCount: z.number().default(1),
   maxRunAttempts: z.number().default(512),
@@ -73,6 +76,7 @@ export const Config: z<Config> = z.object({
   maxReadChars: z.number().default(4096),
   previewDirectory: z.string().default('.dsh-story'),
   allowIncompleteSettings: z.boolean().default(false),
+  reuseSettingsSnapshot: z.boolean().default(true),
   allowSettingsImport: z.boolean().default(false),
   aiToneBlocking: z.boolean().default(true),
   writingModel: z.any().default('inherit'),
@@ -110,6 +114,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!Number.isSafeInteger(config.maxRepairAttempts) || config.maxRepairAttempts < 0) throw new Error('maxRepairAttempts must be a finite nonnegative integer')
   if (config.stageTimeoutMs > 2_147_483_647) throw new Error('stageTimeoutMs exceeds the supported timer range')
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
+  if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
   const writingModel = normalizeWritingModel(config.writingModel)
   if (!Number.isSafeInteger(config.researchBudgetFloor) || config.researchBudgetFloor < 0) throw new Error('researchBudgetFloor must be a finite nonnegative integer')
@@ -149,7 +154,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
   deliveryProjection = await registerStageDeliveryProjection(ctx)
-  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings })
+  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)
   registerWritingTools(ctx, service, config.previewDirectory)
