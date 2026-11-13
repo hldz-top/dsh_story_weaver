@@ -10,11 +10,12 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * prompt under an existing key). Version 1 is the text before chapter-quality guardrails and stays frozen; runs stored
  * without a version are version 1. Version 6 appends writing-quality sentences. Version 7, for new runs only, drops the
  * chapter-outline pacing sentence, keeps measured-beat citation on body reviews, and replaces the blocking AI-tone
- * sentence with a density-graded hint. Versions 1–6 stay frozen.
+ * sentence with a density-graded hint. Version 8, for new runs only, adds the review brief-quote field and the Chinese
+ * review-prose rule. Versions 1–7 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 7
+export const CURRENT_PROMPT_VERSION: PromptVersion = 8
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
@@ -148,6 +149,10 @@ const CHAPTER_MOTIVE = 'Each scene.action names who chooses, what they want in t
 const BODY_MOTIVE = 'Show the viewpoint character’s present want inside the choice: what they notice, what they do, and the cost already established by settings or prior applied continuity. Continue from the previous scene’s ending and close on a situation the next scene can pick up. Do not summarize the outline, announce a narrator thesis, repeat an explanation already shown, stack metaphors, drift the time of day, season, or elapsed time, or grant knowledge, tools or injuries the accepted sources do not support.'
 const CONTINUITY_MOTIVE = 'For a character the reviewed prose actually changes, record location, knowledge, condition and relationships only as that prose supports them. Each timeline.event states what the prose shows, with a quote from the reviewed body. Leave a fact unchanged when the chapter does not touch it. Mark an obligation fulfilled only when the prose performs it, not when a character merely intends it.'
 const REVIEW_ACTION = 'Write each issue.message as one repair step: the location, the exact conflict or omission, and the smallest change that fixes it. A successful check.summary names the evidence that satisfied it. Do not request a full rewrite or a change to an accepted upstream source. A speculative risk, or a sentence that only might be read a certain way, is not a blocking issue. Open a blocking category only for a missing required event, a settings or persona contradiction (including a spatial impossibility or a non-physical thing written as an object), a cross-chapter continuity conflict, or a chapter-length violation the host already measured in task.measuredWordCount or task.measuredLength. Metaphor stacking, a narrator thesis, and a repeated sentence skeleton are category style and severity advisory: name the cited sentence and the smallest rewrite. Anything else, including thin motivation, plain wording and taste, is category style and severity advisory.'
+/** Version 8. The host rejects a blocking completeness or obligations issue whose briefQuote is not a verbatim brief excerpt. */
+const REVIEW_BRIEF_ONLY = 'The creative brief is the only source of requirements. A blocking completeness or obligations issue must set briefQuote to one verbatim excerpt of the creative brief that states that requirement. Do not add a scene, event, or obligation the brief does not state. A genre premise is not a demand for a scene the brief never names. Consistency, continuity, and a host-measured length finding are not a new requirement and do not use briefQuote to invent one.'
+/** Version 8. The host rejects check.summary, issue.message, and evidence.problem that contain no Han character. */
+const REVIEW_CHINESE = 'Write every check.summary, issue.message, and evidence.problem in Chinese. Do not write those fields in English.'
 const REVIEW_BY_KIND: Partial<Record<StagePromptKind, string>> = {
   settings: 'Do not demand motives or world detail from a classification dimension. On a free-form character dimension, a goal that contradicts the brief or an accepted dependency is a blocking consistency issue; missing color is advisory style.',
   'book-outline': 'An arc that states want, pressure and end state is complete. A thin but present arc is an advisory style note naming the character. A contradiction with accepted settings is a blocking consistency issue.',
@@ -155,6 +160,12 @@ const REVIEW_BY_KIND: Partial<Record<StagePromptKind, string>> = {
   body: 'A consistency issue quotes a choice that uses knowledge, a motive or a physical fact the accepted settings and prior continuity deny. A continuity issue quotes the prior applied fact and the sentence that breaks it. An obligations issue names the required event and shows the prose does not perform it. AI-tone issues stay category style and severity advisory, as the AI-tone instruction states.',
   continuity: 'Block when a new fact or a fulfilled obligation is not supported by the reviewed body, or when the chapter drops or alters a fact it does not change. A plain summary is not a block.',
   'continuity-snapshot': 'Block a character status, unrecovered note, or used bridge that the applied body and continuity do not support. Do not ask for a narrative-state graph or a foreshadowing ledger. A compact note the prose supports is complete.',
+}
+
+/** @param request - The stage being prompted. @returns Version-8 review constraints, or none before version 8 and for every other stage. */
+function reviewConstraintLines(request: StagePromptRequest): readonly string[] {
+  if ((request.promptVersion ?? 1) < 8 || request.kind !== 'review') return []
+  return [REVIEW_BRIEF_ONLY, REVIEW_CHINESE]
 }
 
 /** @param request - The stage being prompted. @returns Version-6 sentences for that stage, or none before version 6. */
@@ -301,6 +312,7 @@ export function buildStagePrompt(request: StagePromptRequest): string {
     ...aiToneLines(request),
     ...((request.promptVersion ?? 1) >= 4 ? aiToneWritingGuardrails[request.kind] ?? [] : []),
     ...qualityParagraphs(request),
+    ...reviewConstraintLines(request),
   ]
   return [...instructions, 'TASK_DATA', JSON.stringify({
     novelId: request.novelId, kind: request.kind, inputs: request.inputs, task: request.task, requirements: request.requirements,

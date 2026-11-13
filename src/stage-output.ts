@@ -55,6 +55,17 @@ export const reviewParagraphSchema = inputsSchema.extend({
   })),
 })
 /**
+ * Prompt version 8 review publication. Same paragraph citations as version 7, plus optional `briefQuote` on each issue.
+ * The host requires that field, and checks it against the creative brief, only for a blocking completeness or obligations issue.
+ */
+export const reviewParagraphSchemaV8 = reviewParagraphSchema.extend({
+  issues: z.array(z.strictObject({
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchema,
+    location: text, message: text, briefQuote: text.optional().describe('Verbatim excerpt of the creative brief. Required when this blocking issue is completeness or obligations.'),
+    evidence: z.array(paragraphCitationSchema).nonempty(),
+  })),
+})
+/**
  * Host marker on an issue none of whose evidence can be found in any admitted input: the issue is kept, made advisory,
  * and keeps its original citations so the marker can be re-verified on every readback. Never part of the model schema.
  */
@@ -69,9 +80,16 @@ const storedChecklistSchema = z.strictObject({
 })
 /** The admitted (stored) review: the quote schema, host downgrade markers, and an optional open-dimension checklist. */
 const admittedReviewSchema = reviewSchema.extend({
-  issues: z.array(z.strictObject({ ...issueShape, hostDowngrade: hostDowngradeSchema.optional() })),
+  issues: z.array(z.strictObject({ ...issueShape, briefQuote: text.optional(), hostDowngrade: hostDowngradeSchema.optional() })),
   checklist: storedChecklistSchema.optional(),
 })
+/** Admission-only review constraints. Readback of a stored review does not repeat them. */
+export interface ReviewAdmission {
+  /** Reject check summaries, issue messages, and paragraph problems that contain no Han character. */
+  readonly chinese: true
+  /** Creative-brief text. A blocking completeness or obligations issue must quote it verbatim. */
+  readonly briefText: string
+}
 const obligationSchema = z.strictObject({ id: text, description: text })
 const targetWords = z.number().int().positive()
 const bookArc = z.array(z.strictObject({ character: text, development: text })).nonempty()
@@ -335,6 +353,49 @@ export function parseStoredReview(value: unknown): ReviewOutput {
   return result.data
 }
 
+/** @param value - A stored review. @returns How many issues are still blocking after admission. */
+export function blockingIssueCount(value: unknown): number {
+  return parseStoredReview(value).issues.filter(issue => issue.severity === 'blocking').length
+}
+
+function isReviewRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** @param value - Model review JSON, before paragraph ids are expanded. @throws When a prose field has no Han character. */
+function assertReviewChinese(value: unknown): void {
+  if (!isReviewRecord(value)) return
+  const texts: string[] = []
+  if (Array.isArray(value.checks)) for (const check of value.checks) {
+    if (!isReviewRecord(check)) continue
+    if (typeof check.summary === 'string') texts.push(check.summary)
+    if (!Array.isArray(check.evidence)) continue
+    for (const evidence of check.evidence) if (isReviewRecord(evidence) && typeof evidence.problem === 'string') texts.push(evidence.problem)
+  }
+  if (Array.isArray(value.issues)) for (const issue of value.issues) {
+    if (!isReviewRecord(issue)) continue
+    if (typeof issue.message === 'string') texts.push(issue.message)
+    if (!Array.isArray(issue.evidence)) continue
+    for (const evidence of issue.evidence) if (isReviewRecord(evidence) && typeof evidence.problem === 'string') texts.push(evidence.problem)
+  }
+  for (const prose of texts) {
+    if (!/\p{Script=Han}/u.test(prose)) throw new StageValidationRejection(`Review prose must be Chinese; this text has no Han characters: ${echo(prose.slice(0, 120))}`)
+  }
+}
+
+/**
+ * @param issues - Parsed issues, still at the model's severity.
+ * @param briefText - The creative brief. @throws When a blocking completeness or obligations issue does not quote it.
+ */
+function assertBriefRequirements(issues: readonly { id: string; severity: string; category: string; briefQuote?: string | undefined }[], briefText: string): void {
+  for (const issue of issues) {
+    if (issue.severity !== 'blocking' || (issue.category !== 'completeness' && issue.category !== 'obligations')) continue
+    if (issue.briefQuote === undefined || !briefText.includes(issue.briefQuote)) {
+      throw new StageValidationRejection(`A blocking ${issue.category} issue must set briefQuote to a verbatim excerpt of the creative brief. The brief is the only source of requirements; do not add a demand it does not state. Issue ${echo(issue.id)} has no such excerpt.`)
+    }
+  }
+}
+
 function checklistRecord(checklist: NonNullable<ReviewOutput['checklist']>): void {
   const fails = checklist.items.filter(item => item.status === 'fail')
   if (checklist.failCount !== fails.length) {
@@ -410,7 +471,10 @@ export function parseReviewOutput(value: unknown, expected: {
   readonly acceptAdvisoryCompleteness?: boolean
   /** Host re-split of the reviewed candidate. Paragraph-id citations are mapped through it before the verbatim check. */
   readonly paragraphs?: readonly NumberedParagraph[]
+  /** Prompt version 8 model reviews. Omitted on readback and on every earlier prompt version. */
+  readonly admission?: ReviewAdmission
 }): ReviewOutput {
+  if (expected.admission?.chinese === true) assertReviewChinese(value)
   const expanded = expected.paragraphs === undefined ? value : expandParagraphCitations(value, expected.paragraphs, expected.reviewed.artifactId)
   const output = parseModelOutput(admittedReviewSchema, expanded, 'Review output')
   if (output.checklist !== undefined) checklistRecord(output.checklist)
@@ -432,6 +496,7 @@ export function parseReviewOutput(value: unknown, expected: {
     if (issue.category === 'completeness' && issue.severity === 'advisory' && expected.acceptAdvisoryCompleteness === true) continue
     if (issue.category !== 'style' && issue.severity !== 'blocking') throw new StageValidationRejection(`${issue.category} issues must be blocking: issue ${echo(issue.id)} is ${issue.severity}`)
   }
+  if (expected.admission !== undefined) assertBriefRequirements(output.issues, expected.admission.briefText)
   // Every non-evidence rule has passed: an evidence rejection below is the value's only defect.
   const admitted = [output.reviewed.artifactId, ...output.inputRefs.map(ref => ref.artifactId)]
   const audit = new EvidenceAudit(expected.evidenceSources, admitted)

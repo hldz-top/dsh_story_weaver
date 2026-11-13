@@ -60,16 +60,22 @@ export function openChecklistModelSchema(code: OpenChecklistCode) {
   })
 }
 
+/** When a positive fail count stops the repair. `rises` is the g4/g7 rule. `does-not-decrease` also stops when the count stays the same. */
+export type ChecklistRepairStop = 'rises' | 'does-not-decrease'
+
 /**
  * Whether another repair is allowed.
- * A fail count of zero adopts the candidate just reviewed. A higher count than the one already held stops the repair
- * and adopts that held version. Any other positive count may repair again while the attempt budget remains.
+ * A fail count of zero adopts the candidate just reviewed. `rises` (g4/g7) adopts the held version only when the new
+ * count is higher, and may repair again while the count stays level. `does-not-decrease` (outline and manuscript
+ * reviews) adopts the held version whenever the new count is not strictly lower, so a non-improving round does not
+ * spend the rest of the attempt budget.
  * @param previousFails - Fail count of the version already held, or null before the first review.
  * @param fails - Fail count of the candidate just reviewed.
+ * @param stop - Which non-zero comparison adopts the held candidate. Defaults to the g4/g7 rule.
  * @returns `apply-next` adopts the new candidate, `apply-previous` adopts the held one, `continue` may repair.
  */
-export function checklistRepairDecision(previousFails: number | null, fails: number): 'apply-next' | 'apply-previous' | 'continue' {
+export function checklistRepairDecision(previousFails: number | null, fails: number, stop: ChecklistRepairStop = 'rises'): 'apply-next' | 'apply-previous' | 'continue' {
   if (fails === 0) return 'apply-next'
-  if (previousFails !== null && fails > previousFails) return 'apply-previous'
+  if (previousFails !== null && (stop === 'does-not-decrease' ? fails >= previousFails : fails > previousFails)) return 'apply-previous'
   return 'continue'
 }

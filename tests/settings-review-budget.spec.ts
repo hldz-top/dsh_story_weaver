@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import * as Story from '../src/index.ts'
-import { BODY_STAGE_TIMEOUT_MS, CANDIDATE_STAGE_TIMEOUT_MS, PLANNING_STAGE_TIMEOUT_MS, REPAIR_STAGE_TIMEOUT_MS, REVIEW_STAGE_TIMEOUT_MS, dimensionWidth, gradedStageOf, settingsCandidatesPerDimension, stageDeadlineMs } from '../src/writing-runner.ts'
+import { BODY_STAGE_TIMEOUT_MS, CANDIDATE_STAGE_TIMEOUT_MS, OUTLINE_FIRST_CANDIDATE_TIMEOUT_MS, PLANNING_STAGE_TIMEOUT_MS, REPAIR_STAGE_TIMEOUT_MS, REVIEW_STAGE_TIMEOUT_MS, chapterBatchWidth, dimensionWidth, gradedStageOf, settingsCandidatesPerDimension, stageDeadlineMs } from '../src/writing-runner.ts'
 import { useWritingFixture, type WritingFixtureStage } from './support/writing-fixture.ts'
 
 const OTHER_STAGE_TIMEOUT_MS = 54_321
@@ -42,12 +42,16 @@ it('keeps one candidate per dimension and sizes the layer by maxParallelStages a
   expect(config.maxParallelStages).toBe(3)
   expect(PLANNING_STAGE_TIMEOUT_MS).toBe(600_000)
   expect(CANDIDATE_STAGE_TIMEOUT_MS).toBe(600_000)
+  expect(OUTLINE_FIRST_CANDIDATE_TIMEOUT_MS).toBe(1_200_000)
   expect(REVIEW_STAGE_TIMEOUT_MS).toBe(1_200_000)
   expect(BODY_STAGE_TIMEOUT_MS).toBe(1_800_000)
   expect(REPAIR_STAGE_TIMEOUT_MS).toBe(900_000)
   const limits = { maxParallelStages: 3, settingsCandidateCount: 1 }
   expect(dimensionWidth(limits)).toBe(3)
   expect(dimensionWidth({ maxParallelStages: 2 })).toBe(2)
+  expect(chapterBatchWidth(3)).toBe(3)
+  expect(chapterBatchWidth(2)).toBe(2)
+  expect(chapterBatchWidth(1)).toBe(1)
   expect(settingsCandidatesPerDimension(limits)).toBe(1)
   expect(settingsCandidatesPerDimension({})).toBe(1)
   expect(settingsCandidatesPerDimension({ settingsCandidateCount: 4 })).toBe(4)
@@ -68,7 +72,22 @@ it('keeps one candidate per dimension and sizes the layer by maxParallelStages a
   expect(gradedStageOf('settings/batch/a1/draft/repair/1')).toBe('repair')
   expect(gradedStageOf('settings/collection/0/review/0')).toBe('review')
   expect(gradedStageOf('settings/repair/a1')).toBe('repair')
-  expect(stageDeadlineMs('body/1/candidate/0', OTHER_STAGE_TIMEOUT_MS)).toBe(BODY_STAGE_TIMEOUT_MS)
+  expect(stageDeadlineMs('book-outline/book/research/planning', OTHER_STAGE_TIMEOUT_MS)).toBe(600_000)
+  expect(stageDeadlineMs('settings/0/a1/research/planning', OTHER_STAGE_TIMEOUT_MS)).toBe(600_000)
+  expect(stageDeadlineMs('settings/0/a1/research/planning/1', OTHER_STAGE_TIMEOUT_MS)).toBe(600_000)
+  expect(stageDeadlineMs('book-outline/book/candidate/0', OTHER_STAGE_TIMEOUT_MS)).toBe(1_200_000)
+  expect(stageDeadlineMs('chapter-outline/1/candidate/0', OTHER_STAGE_TIMEOUT_MS)).toBe(1_200_000)
+  expect(stageDeadlineMs('continuity/1/candidate/0', OTHER_STAGE_TIMEOUT_MS)).toBe(1_200_000)
+  expect(stageDeadlineMs('book-outline/book/candidate/1', OTHER_STAGE_TIMEOUT_MS)).toBe(900_000)
+  expect(stageDeadlineMs('chapter-outline/1/candidate/1', OTHER_STAGE_TIMEOUT_MS)).toBe(900_000)
+  expect(stageDeadlineMs('continuity/1/candidate/1', OTHER_STAGE_TIMEOUT_MS)).toBe(900_000)
+  expect(stageDeadlineMs('continuity-snapshot/1/candidate/0', OTHER_STAGE_TIMEOUT_MS)).toBe(600_000)
+  expect(stageDeadlineMs('settings/0/a1/candidate/0', OTHER_STAGE_TIMEOUT_MS)).toBe(600_000)
+  expect(stageDeadlineMs('settings/batch/a1/draft', OTHER_STAGE_TIMEOUT_MS)).toBe(600_000)
+  expect(stageDeadlineMs('settings/batch/a1-a2-a3/draft', OTHER_STAGE_TIMEOUT_MS)).toBe(600_000)
+  expect(stageDeadlineMs('body/1/candidate/0', OTHER_STAGE_TIMEOUT_MS)).toBe(1_800_000)
+  expect(stageDeadlineMs('body/1/candidate/0/review/0', OTHER_STAGE_TIMEOUT_MS)).toBe(1_200_000)
+  expect(stageDeadlineMs('body/1/candidate/1', OTHER_STAGE_TIMEOUT_MS)).toBe(1_800_000)
   expect(stageDeadlineMs('book-outline/book/research', OTHER_STAGE_TIMEOUT_MS)).toBe(OTHER_STAGE_TIMEOUT_MS)
   expect(stageDeadlineMs('settings/0/a1/candidate/1', OTHER_STAGE_TIMEOUT_MS)).toBe(REPAIR_STAGE_TIMEOUT_MS)
   expect(stageDeadlineMs('settings/batch/a1/draft', OTHER_STAGE_TIMEOUT_MS)).toBe(CANDIDATE_STAGE_TIMEOUT_MS)
@@ -165,7 +184,7 @@ it('schedules each graded deadline and leaves research execution on its configur
     expect(outcome.value.status).toBe('completed')
     expect(outcome.value.executionLimits.stageTimeoutMs).toBe(OTHER_STAGE_TIMEOUT_MS)
     const expected = outcome.value.attempts.filter(item => item.status === 'succeeded').map(item => stageDeadlineMs(item.key, OTHER_STAGE_TIMEOUT_MS))
-    for (const deadline of [PLANNING_STAGE_TIMEOUT_MS, CANDIDATE_STAGE_TIMEOUT_MS, REVIEW_STAGE_TIMEOUT_MS, BODY_STAGE_TIMEOUT_MS, REPAIR_STAGE_TIMEOUT_MS, OTHER_STAGE_TIMEOUT_MS]) {
+    for (const deadline of [PLANNING_STAGE_TIMEOUT_MS, OUTLINE_FIRST_CANDIDATE_TIMEOUT_MS, CANDIDATE_STAGE_TIMEOUT_MS, REVIEW_STAGE_TIMEOUT_MS, BODY_STAGE_TIMEOUT_MS, REPAIR_STAGE_TIMEOUT_MS, OTHER_STAGE_TIMEOUT_MS]) {
       expect(delays.filter(delay => delay === deadline)).toHaveLength(expected.filter(delay => delay === deadline).length)
     }
     expect(expected.filter(delay => delay === BODY_STAGE_TIMEOUT_MS).length).toBeGreaterThan(0)

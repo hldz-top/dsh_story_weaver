@@ -255,10 +255,10 @@ function generate(state: ChildState): object {
       const reviewed = required(task.reviewed, 'reviewed')
       if (task.checklistItems !== undefined) return { ...base, reviewed, items: task.checklistItems.map(item => ({ id: item.id, status: 'pass' as const })) }
       const evidence = task.paragraphs !== undefined && task.paragraphs.length > 0
-        ? [{ paragraphId: task.paragraphs[0]!.id, problem: 'The cited paragraph is the candidate passage this check covers.' }]
+        ? [{ paragraphId: task.paragraphs[0]!.id, problem: '这段引文覆盖本项检查所读的候选段落。' }]
         : [{ artifactId: reviewed.artifactId, quote: quoteCandidate(source(state, reviewed.artifactId)) }]
-      const checks = required(task.requiredChecks, 'requiredChecks').map(category => ({ category, summary: category === 'length' ? `Host word count ${task.measuredWordCount}; ${task.measuredLength?.status}.` : `The exact candidate was read for the required ${category} check.`, evidence }))
-      const issues = task.measuredLength?.blocking === true ? [{ id: 'fixture-length', severity: 'blocking', category: 'length', location: 'Complete chapter', message: 'The host measured this body outside the required chapter-total range.', evidence }] : []
+      const checks = required(task.requiredChecks, 'requiredChecks').map(category => ({ category, summary: category === 'length' ? `宿主计数 ${task.measuredWordCount}；${task.measuredLength?.status}。` : `已读候选并完成${category}检查。`, evidence }))
+      const issues = task.measuredLength?.blocking === true ? [{ id: 'fixture-length', severity: 'blocking', category: 'length', location: '整章', message: '宿主测得本章超出规定的章节总字数范围。', evidence }] : []
       return { ...base, reviewed, checks, issues }
     }
     case 'continuity': {

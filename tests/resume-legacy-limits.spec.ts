@@ -1,4 +1,4 @@
-/** A prompt-version-7 archive from before stage routing omits writingModel, researchEnabled and researchBudgetFloor. */
+/** A current-version archive from before stage routing omits writingModel, researchEnabled and researchBudgetFloor. */
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { expect, it } from 'vitest'
 import * as Story from '../src/index.ts'
@@ -22,7 +22,7 @@ it('resumes a pre-stage-routing archive under the default plugin limits without 
   expect(writingModel).toEqual({ planning: 'inherit', review: 'inherit', body: 'inherit' })
   expect(plugin.researchEnabled).toBe(false)
   expect(plugin.researchBudgetFloor).toBe(1)
-  expect(CURRENT_PROMPT_VERSION).toBe(7)
+  expect(CURRENT_PROMPT_VERSION).toBe(8)
   // The live comparison target is what apply() stores: the inherit map, researchEnabled false and floor 1.
   // The writing fixture's own default opts research in, so this run overrides that and would mismatch an absent archive.
   const fixture = await useWritingFixture({ executionLimits: { writingModel, researchEnabled: plugin.researchEnabled, researchBudgetFloor: plugin.researchBudgetFloor } })
@@ -35,7 +35,7 @@ it('resumes a pre-stage-routing archive under the default plugin limits without 
     ...fixture.input, chapterCount: 1, throughChapter: 1, revision: null, executionLimits: archived,
     serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits },
   })
-  expect(begun.promptVersion).toBe(7)
+  expect(begun.promptVersion).toBe(8)
   expect(begun.executionLimits).not.toHaveProperty('writingModel')
   expect(begun.executionLimits).not.toHaveProperty('researchEnabled')
   expect(begun.executionLimits).not.toHaveProperty('researchBudgetFloor')
@@ -43,7 +43,7 @@ it('resumes a pre-stage-routing archive under the default plugin limits without 
   const outcome = await fixture.run(exec => fixture.runner.resume(exec, stopped.id, false))
   if (outcome.status === 'rejected') throw outcome.reason
   const run = fixture.runs.get(fixture.actor, stopped.id)
-  expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 7, id: stopped.id })
+  expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 8, id: stopped.id })
   expect(run.executionLimits).not.toHaveProperty('writingModel')
   expect(run.executionLimits).not.toHaveProperty('researchEnabled')
   expect(run.executionLimits).not.toHaveProperty('researchBudgetFloor')

@@ -60,6 +60,7 @@ export class WritingService {
   saveManuscriptReview(actor: Actor, request: SaveManuscriptReviewRequest): Promise<ManuscriptCandidateView> { return this.manuscripts.saveManuscriptReview(actor, request) }
   /** @param actor - Owning workspace. @param request - Exact review and expected current head. @returns The adopted standalone document. */
   applyManuscriptCandidate(actor: Actor, request: ApplyManuscriptCandidateRequest): Promise<ManuscriptCandidateView> { return this.manuscripts.applyManuscriptCandidate(actor, request) }
+  recordManuscriptConvergence(actor: Actor, request: { novelId: NovelId; candidateId: ArtifactId; reviewId: ArtifactId; failCount: number }): Promise<ManuscriptCandidateView> { return this.manuscripts.recordManuscriptConvergence(actor, request) }
 
   /** @param actor - Owning workspace. @param request - Target requiring a research decision. @returns Current source versions before new research is planned. */
   manuscriptResearchInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; revisionOf?: ArtifactId; snapshotThrough?: number }): readonly ArtifactRef[] { return this.manuscripts.manuscriptResearchInputs(actor, request) }
@@ -652,7 +653,7 @@ export class WritingService {
     actor.signal?.throwIfAborted()
     const novel = this.record(actor, request.novelId)
     const candidate = this.settingsCandidate(novel, request.candidateId)
-    const output = this.settingsReviewOutput(actor, novel, candidate, request.output)
+    const output = this.settingsReviewOutput(actor, novel, candidate, request.output, request.admission)
     const hash = createHash('sha256').update(JSON.stringify([request.childSessionId, request.expectedReviewId, output])).digest('hex')
     const replay = candidate.reviewHistory.find(item => item.request.requestId === request.requestId)
     if (replay !== undefined) { this.sameRequest(replay.request.hash, hash); return this.settingsView(novel, candidate) }
@@ -723,7 +724,7 @@ export class WritingService {
     return candidate
   }
 
-  private settingsReviewOutput(actor: Actor, novel: NovelRecord, candidate: SettingsRecord, output: unknown) {
+  private settingsReviewOutput(actor: Actor, novel: NovelRecord, candidate: SettingsRecord, output: unknown, requestAdmission?: SaveSettingsReviewRequest['admission']) {
     const refs = [{ artifactId: candidate.artifact.id, sha256: candidate.artifact.sha256 }, ...candidate.inputRefs]
     const sources = refs.map(ref => {
       const artifact = this.getArtifact(actor, { novelId: novel.id, artifactId: ref.artifactId })
@@ -737,7 +738,9 @@ export class WritingService {
         paragraphs: paragraphsOfStoredCandidate(stored.kind, stored.text), evidenceSources: sources })
     }
     return parseReviewOutput(output, { reviewed, inputRefs: candidate.inputRefs, requiredChecks: ['completeness', 'consistency'], evidenceSources: sources,
-      acceptAdvisoryCompleteness: true, ...(hasParagraphCitation(output) ? { paragraphs: paragraphsOfStoredCandidate(stored.kind, stored.text) } : {}) })
+      acceptAdvisoryCompleteness: true, ...(hasParagraphCitation(output) ? { paragraphs: paragraphsOfStoredCandidate(stored.kind, stored.text) } : {}),
+      // Checklist admission builds its own review. A model checklist has no prose fields for these constraints.
+      ...(isRawChecklist(output) || requestAdmission === undefined ? {} : { admission: requestAdmission }) })
   }
 
   private validateSettings(actor: Actor, novel: NovelRecord, candidate: SettingsRecord, seen = new Set<ArtifactId>()): void {

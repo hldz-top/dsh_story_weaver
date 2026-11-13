@@ -34,6 +34,11 @@ export const manuscriptRecordSchema = z.strictObject({
   artifact: reference, target: manuscriptTargetSchema, inputRefs: z.array(inputRef).nonempty(), childSessionId: sessionId.nullable(), researchPlanId: artifactIdSchema.nullable(),
   request: receipt, reviewHistory: z.array(z.strictObject({ artifact: reviewReference, request: receipt, childSessionId: sessionId, blocking: z.boolean() })),
   applied: z.boolean(), revisionOf: artifactIdSchema.nullable(),
+  /**
+   * Present only when a later review did not reduce the blocking-issue count and this held candidate was applied anyway.
+   * The review stays blocking. Host length and unfulfilled obligations still refuse application.
+   */
+  convergence: z.strictObject({ reviewId: artifactIdSchema, failCount: z.number().int().nonnegative() }).optional(),
 }).refine(record => record.artifact.kind === record.target.kind, 'Manuscript target and artifact kind must agree')
 /** Current standalone applied document slots; bodies and continuity apply as a pair. */
 export const manuscriptHeadSchema = z.strictObject({

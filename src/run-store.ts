@@ -124,7 +124,7 @@ const runSchema = z.strictObject({
   startedBy: sessionIdSchema, lastResumedBy: sessionIdSchema,
   attempts: z.array(attemptSchema), error: z.string().nullable(),
   // Prompt text version fixed at creation so a resume rebuilds identical prompts; absent on runs created before versioning (= 1).
-  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7)]).optional(),
+  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8)]).optional(),
 })
 /** Detached progress metadata; raw stage outputs are read explicitly. */
 export type WritingRun = Omit<RunRecord, 'attempts'> & { readonly attempts: readonly WritingAttempt[] }

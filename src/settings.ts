@@ -1,7 +1,7 @@
 /** Versioned settings candidates and their host-owned adoption state. */
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ArtifactId, ArtifactRef, NovelId, RequestId } from './contracts.ts'
-import type { StageInputRef } from './stage-output.ts'
+import type { ReviewAdmission, StageInputRef } from './stage-output.ts'
 
 /** Host submission of one completed stage; callers cannot request automatic adoption. */
 export interface SaveSettingsCandidateRequest {
@@ -56,6 +56,8 @@ export interface SaveSettingsReviewRequest extends SettingsCandidateRequest {
   readonly requestId: RequestId
   readonly output: unknown
   readonly childSessionId: SessionId
+  /** Prompt version 8 model reviews. Host-synthesized reviews omit it. */
+  readonly admission?: ReviewAdmission
 }
 /** Compare-and-adopt the exact reviewed version without replacing an unexpected head. */
 export interface ApplySettingsCandidateRequest extends SettingsCandidateRequest {
