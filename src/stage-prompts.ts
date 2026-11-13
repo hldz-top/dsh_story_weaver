@@ -1,5 +1,6 @@
 /** Logged writing-stage instructions derived from Story V2 business roles. */
 import type { ArtifactId, NovelId } from './contracts.ts'
+import { isOpenChecklistCode, openChecklistItems, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS_FACTS } from './stage-output.ts'
 
@@ -33,6 +34,8 @@ export interface StagePromptRequest {
   readonly settingsCollectionKinds?: Readonly<Record<string, SettingsDimensionKind>>
   /** For a 'review' stage, the kind of the reviewed candidate; the version-3 AI-tone sentence goes only to reviews of a body. */
   readonly reviewedKind?: StagePromptKind
+  /** g4 or g7 on a version-7 review: the prompt names that dimension's fixed checklist. */
+  readonly settingsDimensionCode?: OpenChecklistCode
   /** The run's recorded prompt version; omitted means version 1, the frozen pre-guardrail text. */
   readonly promptVersion?: PromptVersion
   /**
@@ -47,6 +50,12 @@ export interface StagePromptRequest {
 const CHAPTER_PACING = 'Use chapter-total targets as pacing guidance for scene allocation; do not impose a hard per-scene ceiling. Return a plan, not body prose. Scene outcomes are proposed events until reviewed prose and final continuity establish that they happened.'
 const CHAPTER_PACING_V7 = 'Do not impose a hard per-scene ceiling. Return a plan, not body prose. Scene outcomes are proposed events until reviewed prose and final continuity establish that they happened.'
 const MEASURED_BEATS = 'Cite chapter positions and proportions only from the host-measured task.measuredBeats; never estimate where an event falls in the chapter.'
+
+/**
+ * Version 7 review lead. The model cites a host paragraph id. Versions 1–6 keep the quote-copying lead in
+ * {@link stageInstructions}.
+ */
+const REVIEW_PARAGRAPH_LEAD = 'Independently inspect the exact candidate and its stated input versions. Cover every required check supplied by the host, including successful checks. Cite evidence only as { paragraphId, problem }. paragraphId is one id from task.paragraphs, the host split of the reviewed candidate body; do not copy a quote, a character offset, or a paraphrase. problem is one sentence naming the defect or the fact that satisfied the check. The host maps the id back to that paragraph and checks the paragraph text verbatim. A bare approval, an unknown paragraphId, or an unread required source cannot support acceptance.'
 
 const stageInstructions: Record<StagePromptKind, readonly string[]> = {
   settings: [
@@ -220,19 +229,32 @@ function settingsInstructions(settingsDimensionKind: SettingsDimensionKind | und
   ]
 }
 
+/** @param code - g4 or g7. @returns The version-7 checklist sentence, including each fixed item. */
+function checklistLead(code: OpenChecklistCode): string {
+  const items = openChecklistItems(code).map(item => `${item.id}: ${item.statement}`).join(' ')
+  return `This open dimension is scored only on this fixed checklist, in this order. Return every id once with status pass, fail, or na. A fail includes paragraphId from task.paragraphs. pass and na omit paragraphId. Do not add, rename, or merge items. The host counts fails and continues repair only while that count does not increase. ${items}`
+}
+
 /**
- * @param settingsDimensionKind - The reviewed candidate's settings dimension kind, when reviewing one settings-dimension candidate.
- * @param settingsCollectionKinds - Every selected dimension's catalog kind, when reviewing the assembled settings collection.
- * @returns Classification-scoped review instructions for an enum dimension or the collection, or today's review instructions otherwise.
+ * @param request - The review stage being prompted.
+ * @returns Classification-scoped review instructions for an enum dimension or the collection, paragraph-id wording on version 7, or the frozen quote wording before that.
  */
-function reviewInstructions(settingsDimensionKind: SettingsDimensionKind | undefined, settingsCollectionKinds: Readonly<Record<string, SettingsDimensionKind>> | undefined): readonly string[] {
-  if (settingsCollectionKinds !== undefined) {
-    return [...stageInstructions.review,
+function reviewInstructions(request: StagePromptRequest): readonly string[] {
+  const version = request.promptVersion ?? 1
+  const [quoteLead, ...rest] = stageInstructions.review
+  const lines = [version >= 7 ? REVIEW_PARAGRAPH_LEAD : quoteLead!, ...rest]
+  if (request.settingsCollectionKinds !== undefined) {
+    return [...lines,
       'Completeness for the assembled settings collection means each selected dimension, listed with its catalog kind in task.dimensionKinds, fulfils its own catalog role. A classification dimension is complete with its labels, grounds and constraints; do not require detail owned by unselected dimensions or by outlines and chapters. Consistency still applies to everything the collection states.']
   }
-  if (settingsDimensionKind === undefined || !ENUM_SETTINGS_KINDS.has(settingsDimensionKind)) return stageInstructions.review
-  return [...stageInstructions.review,
-    'For a classification dimension, completeness means a valid label and its grounds. Do not require world-building detail, or plot elements owned by other dimensions or by chapters; those belong elsewhere. Consistency still applies to what the candidate does state.']
+  if (request.settingsDimensionKind !== undefined && ENUM_SETTINGS_KINDS.has(request.settingsDimensionKind)) {
+    return [...lines,
+      'For a classification dimension, completeness means a valid label and its grounds. Do not require world-building detail, or plot elements owned by other dimensions or by chapters; those belong elsewhere. Consistency still applies to what the candidate does state.']
+  }
+  if (version >= 7 && request.settingsDimensionCode !== undefined && isOpenChecklistCode(request.settingsDimensionCode)) {
+    return [...lines, checklistLead(request.settingsDimensionCode)]
+  }
+  return lines
 }
 
 /**
@@ -243,7 +265,7 @@ function reviewInstructions(settingsDimensionKind: SettingsDimensionKind | undef
 /** @param request - The stage being prompted. @returns Its base instructions. Version 7 chapter outlines omit the scene-allocation clause. */
 function stageLines(request: StagePromptRequest): readonly string[] {
   if (request.kind === 'settings') return settingsInstructions(request.settingsDimensionKind)
-  if (request.kind === 'review') return reviewInstructions(request.settingsDimensionKind, request.settingsCollectionKinds)
+  if (request.kind === 'review') return reviewInstructions(request)
   const lines = stageInstructions[request.kind]
   if (request.kind === 'chapter-outline' && (request.promptVersion ?? 1) >= 7) return lines.map(line => line === CHAPTER_PACING ? CHAPTER_PACING_V7 : line)
   return lines

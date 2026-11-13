@@ -4,6 +4,8 @@ import { isDeepStrictEqual } from 'node:util'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { planSettings } from './settings-plan.ts'
 import { manuscriptTargetSchema, settingsCollectionSchema, type ManuscriptRecord } from './manuscript-records.ts'
+import { paragraphsOfStoredCandidate } from './candidate-paragraphs.ts'
+import { hasParagraphCitation } from './paragraphs.ts'
 import { parseBodyOutput, parseBookOutlineOutput, parseChapterOutlineOutput, parseContinuityOutput, parseContinuitySnapshot, parseReviewOutput, StageOutputSchemas } from './stage-output.ts'
 import { WritingError } from './contracts.ts'
 import { checkModelArtifactBytes, parseModelOutput } from './stage-rejection.ts'
@@ -575,8 +577,10 @@ export class ManuscriptStore {
       if (source.sha256 !== ref.sha256) throw new WritingError('corrupt-artifact', 'Manuscript review input hash differs from saved content')
       return { artifactId: source.id, text: source.kind === 'body' ? assembleBody(StageOutputSchemas.body.parse(JSON.parse(source.text))) : source.text }
     })
+    const stored = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: candidate.artifact.id })
     return parseReviewOutput(value, { reviewed: inputRef(candidate.artifact), inputRefs: candidate.inputRefs, requiredChecks: requiredChecks(candidate.target.kind), evidenceSources,
-      acceptAdvisoryCompleteness: candidate.target.kind === 'settings' })
+      acceptAdvisoryCompleteness: candidate.target.kind === 'settings',
+      ...(hasParagraphCitation(value) ? { paragraphs: paragraphsOfStoredCandidate(stored.kind, stored.text) } : {}) })
   }
 
   private passingReview(actor: Actor, novel: NovelRecord, candidate: ManuscriptRecord, reviewId: ArtifactId): void {

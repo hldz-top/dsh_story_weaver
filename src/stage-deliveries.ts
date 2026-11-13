@@ -13,7 +13,7 @@ import { parseArtifactId, type Actor, type Artifact, type ArtifactId, type Novel
 import { parseAttemptId, parseRunId, type RunId, type RunStore } from './run-store.ts'
 import type { WritingService } from './service.ts'
 import { projectArtifact, projectDocument } from './projection.ts'
-import { StageOutputSchemas } from './stage-output.ts'
+import { parseStoredReview, StageOutputSchemas } from './stage-output.ts'
 import { writingActor } from './tools.ts'
 import { parseStoryStageDeliveries, type StoryStageDeliverySource, type StoryStageDeliveries } from './stage-delivery.ts'
 
@@ -96,7 +96,7 @@ function artifactDescription(service: WritingService, actor: Actor, artifact: Ar
     case 'continuity': label = `Chapter ${StageOutputSchemas.continuity.parse(JSON.parse(artifact.text)).chapterNumber} continuity`; break
     case 'continuity-snapshot': label = `Chapter ${StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(artifact.text)).chapterNumber} continuity snapshot`; break
     case 'review': {
-      const review = StageOutputSchemas.review.parse(JSON.parse(artifact.text))
+      const review = parseStoredReview(JSON.parse(artifact.text))
       const reviewed = service.getArtifact(actor, { novelId: artifact.novelId, artifactId: review.reviewed.artifactId })
       if (reviewed.kind === 'review') throw new Error('A writing-stage review cannot review another review')
       label = `Review of ${artifactDescription(service, actor, reviewed)}`

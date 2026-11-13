@@ -34,9 +34,15 @@ const execution: StageExecutionConfig = {
   stageProvider: 'stage-spawn', maxDelegationDepth: 2, allowedTools: [], maxStageRequests: 1, stageTimeoutMs: 5000,
 }
 
+const paragraphReview = { ...common, reviewed: source, checks: [{ category: 'completeness', summary: 'The action is recorded.', evidence: [{ paragraphId: 'p1', problem: 'The keeper opens the log.' }] }], issues: [] }
+
 it.each(kinds)('captures %s through the actual native child structured-output tool', async kind => {
-  const output = outputs[kind]
-  expect(StageOutputSchemas[kind].parse(output)).toEqual(output)
+  const output = kind === 'review' ? paragraphReview : outputs[kind]
+  if (kind === 'review') {
+    expect(validateJsonSchemaValue(nativeStageOutputSchema('review'), paragraphReview)).toEqual([])
+    expect(validateJsonSchemaValue(nativeStageOutputSchema('review', 6), outputs.review)).toEqual([])
+    expect(validateJsonSchemaValue(nativeStageOutputSchema('review'), outputs.review)).not.toEqual([])
+  } else expect(StageOutputSchemas[kind].parse(output)).toEqual(output)
   const fixture = await useStageFixture(request => {
     expect(request.provider).toBe('stage-fixture')
     expect(request.model).toBe('inherited-model')

@@ -2,8 +2,10 @@
 import { z } from 'zod'
 import { artifactIdSchema, type ArtifactId } from './contracts.ts'
 import type { SettingsDimensionKind } from './settings-catalog.ts'
+import { evidenceQuoteOccurs, reportQuoteRepair, resolveEvidenceQuote, type QuoteRepair } from './evidence-quote.ts'
+import { openChecklistItems, openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
+import { expandParagraphCitations, type NumberedParagraph } from './paragraphs.ts'
 import { echo, parseModelOutput, StageValidationRejection } from './stage-rejection.ts'
-import { reportQuoteRepair, resolveEvidenceQuote, type QuoteRepair } from './evidence-quote.ts'
 
 /** A catalog classification dimension records a label and its grounds, not world-building detail. The single source for this set; stage-prompts.ts imports it rather than declaring its own copy. */
 export const ENUM_SETTINGS_KINDS: ReadonlySet<SettingsDimensionKind> = new Set(['enum_single', 'enum_multi'])
@@ -25,24 +27,51 @@ const settingsSchema = inputsSchema.extend({
   dimensionCode: z.string().regex(/^[a-z][a-z0-9]*$/), facts: z.array(factSchema).nonempty(), contentMarkdown: text,
 })
 const citationSchema = z.strictObject({ artifactId: artifactIdSchema, quote: text })
+const paragraphCitationSchema = z.strictObject({
+  paragraphId: z.string().regex(/^p[1-9][0-9]*$/u),
+  problem: text,
+})
 const reviewCategorySchema = z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style'])
 const issueShape = {
   id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchema,
   location: text, message: text, evidence: z.array(citationSchema).nonempty(),
 }
-/** The schema a model review must satisfy (also published to the native child). */
+/** The schema a model review must satisfy on prompt versions before 7 (also published to those native children). */
 const reviewSchema = inputsSchema.extend({
   reviewed: inputRefSchema,
   checks: z.array(z.strictObject({ category: reviewCategorySchema, summary: text, evidence: z.array(citationSchema).nonempty() })).nonempty(),
   issues: z.array(z.strictObject(issueShape)),
 })
 /**
+ * Prompt version 7 review publication. Evidence is `{ paragraphId, problem }`. The host maps the id back to the
+ * paragraph and then admits that text with the quote checks. Versions before 7 keep {@link reviewSchema}.
+ */
+export const reviewParagraphSchema = inputsSchema.extend({
+  reviewed: inputRefSchema,
+  checks: z.array(z.strictObject({ category: reviewCategorySchema, summary: text, evidence: z.array(paragraphCitationSchema).nonempty() })).nonempty(),
+  issues: z.array(z.strictObject({
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchema,
+    location: text, message: text, evidence: z.array(paragraphCitationSchema).nonempty(),
+  })),
+})
+/**
  * Host marker on an issue none of whose evidence can be found in any admitted input: the issue is kept, made advisory,
  * and keeps its original citations so the marker can be re-verified on every readback. Never part of the model schema.
  */
 const hostDowngradeSchema = z.strictObject({ from: z.enum(['blocking', 'advisory']), reason: text })
-/** The admitted (stored) review: the model schema plus host downgrade markers. */
-const admittedReviewSchema = reviewSchema.extend({ issues: z.array(z.strictObject({ ...issueShape, hostDowngrade: hostDowngradeSchema.optional() })) })
+/** Host record of an open-dimension checklist. Fails stay visible here; they are not blocking issues, so a converged candidate can be applied. */
+const storedChecklistSchema = z.strictObject({
+  dimensionCode: z.enum(['g4', 'g7']),
+  failCount: z.number().int().nonnegative(),
+  items: z.array(z.strictObject({
+    id: text, status: z.enum(['pass', 'fail', 'na']), paragraphId: z.string().regex(/^p[1-9][0-9]*$/u).optional(),
+  })).nonempty(),
+})
+/** The admitted (stored) review: the quote schema, host downgrade markers, and an optional open-dimension checklist. */
+const admittedReviewSchema = reviewSchema.extend({
+  issues: z.array(z.strictObject({ ...issueShape, hostDowngrade: hostDowngradeSchema.optional() })),
+  checklist: storedChecklistSchema.optional(),
+})
 const obligationSchema = z.strictObject({ id: text, description: text })
 const targetWords = z.number().int().positive()
 const bookArc = z.array(z.strictObject({ character: text, development: text })).nonempty()
@@ -299,13 +328,92 @@ export function checkSettingsDimensionScope(output: SettingsDimensionOutput, kin
   }
 }
 
+/** Structural read of a stored review, including a checklist and host downgrade markers. Evidence is not re-checked. */
+export function parseStoredReview(value: unknown): ReviewOutput {
+  const result = admittedReviewSchema.safeParse(value)
+  if (!result.success) throw new StageValidationRejection('Stored review cannot be read')
+  return result.data
+}
+
+function checklistRecord(checklist: NonNullable<ReviewOutput['checklist']>): void {
+  const fails = checklist.items.filter(item => item.status === 'fail')
+  if (checklist.failCount !== fails.length) {
+    throw new StageValidationRejection(`Checklist failCount is ${checklist.failCount}; ${fails.length} item(s) are fail`)
+  }
+  for (const item of checklist.items) {
+    if (item.status === 'fail' && item.paragraphId === undefined) throw new StageValidationRejection(`Checklist fail ${echo(item.id)} must include a paragraphId`)
+    if (item.status !== 'fail' && item.paragraphId !== undefined) throw new StageValidationRejection(`Checklist item ${echo(item.id)} is ${item.status} and must omit paragraphId`)
+  }
+}
+
+/**
+ * Admit one g4 or g7 checklist. The stored review keeps the fixed items, maps each fail's paragraph id to that
+ * paragraph, and records the fails as advisory style issues so a later monotone stop can still apply the candidate.
+ * @param value - Model checklist JSON. @param expected - Dimension, exact candidate, its re-split, and evidence sources.
+ * @returns A review whose `checklist.failCount` is the number of fails.
+ */
+export function admitOpenDimensionChecklist(value: unknown, expected: {
+  dimensionCode: OpenChecklistCode
+  reviewed: StageInputRef
+  inputRefs: readonly StageInputRef[]
+  paragraphs: readonly NumberedParagraph[]
+  evidenceSources: readonly EvidenceSource[]
+}): ReviewOutput {
+  const model = parseModelOutput(openChecklistModelSchema(expected.dimensionCode), value, 'Open-dimension checklist')
+  const items = openChecklistItems(expected.dimensionCode)
+  if (model.items.length !== items.length || model.items.some((item, index) => item.id !== items[index]!.id)) {
+    throw new StageValidationRejection(`Checklist items must be ${items.map(item => item.id).join(', ')} in that order`)
+  }
+  if (expected.paragraphs.length === 0) throw new StageValidationRejection('The reviewed candidate has no paragraph to cite')
+  const source = expected.evidenceSources.find(item => item.artifactId === expected.reviewed.artifactId)
+  if (source === undefined) throw new StageValidationRejection('The reviewed candidate has no evidence source')
+  const byId = new Map(expected.paragraphs.map(paragraph => [paragraph.id, paragraph.text]))
+  const scored = model.items.map((item, index) => {
+    const statement = items[index]!.statement
+    if (item.status !== 'fail') {
+      if (item.paragraphId !== undefined) throw new StageValidationRejection(`Checklist item ${echo(item.id)} is ${item.status} and must omit paragraphId`)
+      return { id: item.id, status: item.status, statement }
+    }
+    if (item.paragraphId === undefined) throw new StageValidationRejection(`Checklist fail ${echo(item.id)} must include a paragraphId`)
+    const quote = byId.get(item.paragraphId)
+    if (quote === undefined) throw new StageValidationRejection(`Checklist fail ${echo(item.id)} cites paragraphId ${echo(item.paragraphId)}, which is not in this split`)
+    if (!evidenceQuoteOccurs(quote, source.text)) throw new StageValidationRejection(`Checklist paragraph ${echo(item.paragraphId)} does not occur in the reviewed candidate`)
+    return { id: item.id, status: 'fail' as const, statement, paragraphId: item.paragraphId, quote }
+  })
+  const anchor = scored.find((item): item is typeof item & { quote: string } => item.status === 'fail')
+  const evidence = [{ artifactId: expected.reviewed.artifactId, quote: anchor?.quote ?? expected.paragraphs[0]!.text }]
+  const failCount = scored.filter(item => item.status === 'fail').length
+  return parseReviewOutput({
+    version: 1, inputRefs: model.inputRefs, reviewed: model.reviewed,
+    checks: [
+      { category: 'completeness', summary: `Open-dimension checklist ${expected.dimensionCode} scored ${failCount} fail${failCount === 1 ? '' : 's'}.`, evidence },
+      { category: 'consistency', summary: 'Each fail names one paragraph of this candidate.', evidence },
+    ],
+    issues: scored.flatMap(item => item.status === 'fail' ? [{
+      id: item.id, severity: 'advisory' as const, category: 'style' as const, location: `paragraph ${item.paragraphId}`,
+      message: item.statement, evidence: [{ artifactId: expected.reviewed.artifactId, quote: item.quote }],
+    }] : []),
+    checklist: {
+      dimensionCode: expected.dimensionCode, failCount,
+      items: scored.map(item => item.status === 'fail' ? { id: item.id, status: item.status, paragraphId: item.paragraphId } : { id: item.id, status: item.status }),
+    },
+  }, {
+    reviewed: expected.reviewed, inputRefs: expected.inputRefs, requiredChecks: ['completeness', 'consistency'],
+    evidenceSources: expected.evidenceSources, acceptAdvisoryCompleteness: true,
+  })
+}
+
 /** @param value - Model review JSON. @param expected - Exact target, required checks, and host-verified sources. @returns A review with cited evidence; adoption remains host-owned. */
 export function parseReviewOutput(value: unknown, expected: {
   reviewed: StageInputRef; inputRefs: readonly StageInputRef[]; requiredChecks: readonly ReviewCategory[]; evidenceSources: readonly EvidenceSource[]
   /** Settings reviews only: keep an advisory completeness note as a recorded, nonblocking finding instead of rejecting the whole review. */
   readonly acceptAdvisoryCompleteness?: boolean
+  /** Host re-split of the reviewed candidate. Paragraph-id citations are mapped through it before the verbatim check. */
+  readonly paragraphs?: readonly NumberedParagraph[]
 }): ReviewOutput {
-  const output = parseModelOutput(admittedReviewSchema, value, 'Review output')
+  const expanded = expected.paragraphs === undefined ? value : expandParagraphCitations(value, expected.paragraphs, expected.reviewed.artifactId)
+  const output = parseModelOutput(admittedReviewSchema, expanded, 'Review output')
+  if (output.checklist !== undefined) checklistRecord(output.checklist)
   matchingInputs(output.inputRefs, expected.inputRefs)
   if (output.reviewed.artifactId !== expected.reviewed.artifactId || output.reviewed.sha256 !== expected.reviewed.sha256) {
     throw new StageValidationRejection(`Reviewed artifact differs from the requested candidate version: got ${output.reviewed.artifactId}@${output.reviewed.sha256.slice(0, 12)}, expected ${expected.reviewed.artifactId}@${expected.reviewed.sha256.slice(0, 12)}`)

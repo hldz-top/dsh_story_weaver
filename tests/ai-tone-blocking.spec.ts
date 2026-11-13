@@ -141,7 +141,13 @@ async function scripted(script: Script, options: WritingFixtureOptions = {}) {
         const artifactId = stage.task?.reviewed?.artifactId ?? ''
         const review = output as { issues: object[] }
         const quotes = script.quotes(reviews++)
-        return { ...review, issues: [...review.issues, ...quotes.map((quote, index) => aiToneIssue(`ai-tone-${index + 1}`, artifactId, quote))] }
+        const paragraphs = stage.task?.paragraphs
+        const issues = quotes.map((quote, index) => {
+          if (paragraphs === undefined || paragraphs.length === 0) return aiToneIssue(`ai-tone-${index + 1}`, artifactId, quote)
+          const paragraph = paragraphs.find(item => item.text.includes(quote)) ?? paragraphs[0]!
+          return { id: `ai-tone-${index + 1}`, severity: 'advisory', category: 'style', location: 'Scene 1 narration', message: 'AI tone in narration.', evidence: [{ paragraphId: paragraph.id, problem: 'AI tone in this paragraph.' }] }
+        })
+        return { ...review, issues: [...review.issues, ...issues] }
       }
       return output
     } })

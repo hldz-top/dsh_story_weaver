@@ -1,7 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import { setImmediate } from 'node:timers/promises'
 import { once } from 'node:events'
-import { StageOutputSchemas } from '../src/stage-output.ts'
 import { useWritingFixture } from './support/writing-fixture.ts'
 
 function fulfilled<T>(outcome: PromiseSettledResult<T>): T {
@@ -102,7 +101,7 @@ it('resumes its own interrupted cross-dimension repair without rejecting the res
     if (stage.kind !== 'review' || stage.task?.reviewed === undefined || blockedCollection) return output
     if (stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'settings') return output
     blockedCollection = true
-    const review = StageOutputSchemas.review.parse(output)
+    const review = output as { checks: { evidence: unknown[] }[] }
     return { ...review, issues: [{ id: 'cross-dimension-conflict', category: 'consistency', severity: 'blocking', location: 'Selected dimensions',
       message: 'Repair the selected dimensions together before accepting the collection.', evidence: review.checks[0]!.evidence }] }
   } })

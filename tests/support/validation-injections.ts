@@ -50,7 +50,12 @@ export const isSettings = (stage: WritingFixtureStage, code: string) => stage.ki
 const isDimensionReview = (stage: WritingFixtureStage, code: string) => reviewed(stage)?.kind === 'settings-dimension' && reviewedJson(stage).dimensionCode === code
 const isReviewOf = (stage: WritingFixtureStage, kind: string, chapter?: number) => reviewed(stage)?.kind === kind && (chapter === undefined || reviewedJson(stage).chapterNumber === chapter)
 export const isChapterStage = (stage: WritingFixtureStage, kind: string, chapter: number) => stage.kind === kind && stage.task?.chapterNumber === chapter
-const misquote = (output: Output) => ({ ...output, checks: output.checks.map((check: Output, index: number) => index === 0 ? { ...check, evidence: [{ ...check.evidence[0], quote: `进一步确认${check.evidence[0].quote}` }] } : check) })
+const misquote = (output: Output) => ({ ...output, checks: output.checks.map((check: Output, index: number) => {
+  if (index !== 0) return check
+  const evidence = check.evidence[0]
+  if (evidence.paragraphId !== undefined) return { ...check, evidence: [{ paragraphId: 'p99', problem: `进一步确认${evidence.problem}` }] }
+  return { ...check, evidence: [{ ...evidence, quote: `进一步确认${evidence.quote}` }] }
+}) })
 const dropCheck = (category: string) => (output: Output) => ({ ...output, checks: output.checks.filter((check: Output) => check.category !== category) })
 export const next = (key: string) => key.replace(/\/(\d+)(\/citations)?$/u, (_, n: string, citations?: string) => `/${Number(n) + 1}${citations ?? ''}`)
 /** An evidence-only review rejection is repaired by a citation-only stage rather than a whole new review. */

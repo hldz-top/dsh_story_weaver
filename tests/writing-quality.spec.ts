@@ -13,6 +13,22 @@ it('keeps versions 1 through 6 free of the version-7 sentences', () => {
   }
 })
 
+it('asks a version-7 review to cite paragraph ids and keeps quote copying on versions 1 through 6', () => {
+  const current = buildStagePrompt({ ...base, kind: 'review', reviewedKind: 'body', promptVersion: 7 })
+  expect(current).toContain('paragraphId')
+  expect(current).toContain('task.paragraphs')
+  expect(current).not.toContain('Quote exact evidence')
+  const open = buildStagePrompt({ ...base, kind: 'review', promptVersion: 7, settingsDimensionKind: 'llm_free', settingsDimensionCode: 'g4' })
+  expect(open).toContain('g4-payoff-shown')
+  expect(open).toContain('pass, fail, or na')
+  expect(buildStagePrompt({ ...base, kind: 'review', promptVersion: 7, settingsDimensionKind: 'enum_single' })).not.toContain('g4-payoff-shown')
+  for (const promptVersion of [1, 2, 3, 4, 5, 6] as const) {
+    const prompt = buildStagePrompt({ ...base, kind: 'review', reviewedKind: 'body', promptVersion })
+    expect(prompt, String(promptVersion)).toContain('Quote exact evidence')
+    expect(prompt, String(promptVersion)).not.toContain('task.paragraphs')
+  }
+})
+
 it('drops scene-allocation pacing on a version-7 chapter outline and keeps measured beats on body review only', () => {
   const chapter = buildStagePrompt({ ...base, kind: 'chapter-outline', promptVersion: 7 })
   expect(chapter).not.toContain('pacing guidance for scene allocation')

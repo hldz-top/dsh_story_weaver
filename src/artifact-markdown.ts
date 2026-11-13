@@ -4,7 +4,7 @@ import { assembleBody, countStoryWords } from './body-text.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { WritingError, type Artifact, type ResearchOutcome } from './contracts.ts'
 import { researchEvidenceContentSchema, researchPlanContentSchema } from './research.ts'
-import { StageOutputSchemas, type EvidenceCitation, type ReviewCategory } from './stage-output.ts'
+import { parseStoredReview, StageOutputSchemas, type EvidenceCitation, type ReviewCategory } from './stage-output.ts'
 import { literalTextBlock, quotedText, readableList, readableText } from './readable-markdown.ts'
 
 /** How recorded text, quotations and provenance entries become Markdown blocks. */
@@ -77,10 +77,16 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
       provenance.push(`Input ${index + 1} artifact: ${input.artifactId}`, `Input ${index + 1} SHA-256: ${input.sha256}`)
     }
   } else if (artifact.kind === 'review') {
-    const review = parseContent(StageOutputSchemas.review, artifact.text)
+    let review: ReturnType<typeof parseStoredReview>
+    try { review = parseStoredReview(JSON.parse(artifact.text)) }
+    catch (cause) { throw new WritingError('corrupt-artifact', 'Writing artifact JSON cannot be rendered', { cause }) }
     const blocking = review.issues.filter(issue => issue.severity === 'blocking').length
     sections.push('# Review', `Review result: ${blocking > 0 ? 'Blocking issues found' : 'No blocking issues reported'}`,
       `Blocking issues: ${blocking}`, `Advisory issues: ${review.issues.length - blocking}`)
+    if (review.checklist !== undefined) {
+      sections.push('## Open-dimension checklist', `Dimension: ${review.checklist.dimensionCode}`, `Fail count: ${review.checklist.failCount}`)
+      for (const item of review.checklist.items) sections.push(`### ${item.id}`, `Status: ${item.status}`, ...(item.paragraphId === undefined ? [] : [`Paragraph: ${item.paragraphId}`]))
+    }
     for (const [index, check] of review.checks.entries()) {
       sections.push(`## Check ${index + 1}`, `Category: ${reviewCategories[check.category]}`, 'Summary', style.text(check.summary),
         ...evidenceSections(style, check.evidence))
