@@ -313,7 +313,7 @@ export class WritingRunner {
     if (items.length > 0) throw new ImportReviewBlockedError(items)
   }
 
-  /** Research stays off unless the run enabled it, and a low remaining call allowance skips it without failing the stage. */
+  /** Research planning and research children stay off when research is disabled or the remaining call allowance is below the floor. Settings official retrieval does not use this decision. */
   private researchSkip(inv: Invocation): 'disabled' | 'budget' | null {
     if (inv.run.executionLimits.researchEnabled !== true) return inv.run.executionLimits.researchEnabled === false ? 'disabled' : null
     const floor = inv.run.executionLimits.researchBudgetFloor ?? 1
@@ -823,7 +823,11 @@ export class WritingRunner {
           ? 'Research is disabled for this run. Resolve this output from the supplied inputs.'
           : 'Remaining research call budget is below the configured floor. Resolve this output from the supplied inputs.'
         const recorded = await this.service.recordInputOnlyResearch(inv.actor, { novelId: inv.run.novelId, briefArtifactId: inv.run.briefArtifactId, requestId: requestId(inv.run, key), reason })
-        return { planId: recorded.planId, officialExcerpts: [] as readonly string[] }
+        // Outline and body stay input-only. A settings dimension still asks the host for official text, and any used excerpts reach the settings candidate.
+        if (!isSettingsOutputTarget(outputTarget)) return { planId: recorded.planId, officialExcerpts: [] as readonly string[] }
+        const official = await attemptSettingsOfficialRetrieval(this.ctx, inv.exec, purpose)
+        if (official.kind === 'failed') throw official.error
+        return { planId: recorded.planId, officialExcerpts: official.kind === 'used' ? official.excerpts : [] }
       }
     }
     const legacy = attempts.some(attempt => attempt.key === key) && !attempts.some(attempt => attempt.key === `${key}/planning`)

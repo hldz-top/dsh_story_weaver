@@ -48,9 +48,9 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
    * A map names planning, review and body. `opencode-go` is rejected: OpenCode Go is a host subscription, and this plugin registers no adapter.
    */
   writingModel: string | { planning?: 'inherit' | { provider: string; model: string }; review?: 'inherit' | { provider: string; model: string }; body?: 'inherit' | { provider: string; model: string } }
-  /** When false, research is not run. Default false. Enable it to use the host's official retrieval. */
+  /** When false, research planning and research children do not run. Default false. Official settings retrieval is independent of this switch. */
   researchEnabled: boolean
-  /** Skip research when remaining native web-call slots are below this floor. Default 1. */
+  /** Skip research planning and research children when remaining native web-call slots are below this floor. Default 1. Settings official retrieval still runs. */
   researchBudgetFloor: number
 }
 

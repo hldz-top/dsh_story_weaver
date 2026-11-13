@@ -78,7 +78,7 @@ async function writeSettings(options: Parameters<typeof useWritingFixture>[0] = 
 }
 
 it('calls official web_search and web_fetch for settings and passes the text to the settings writer', async () => {
-  const { fixture, run, official } = await writeSettings({ webSearch: async () => ({ content: 'A harbor light marks the channel.', sources: [{ url: 'https://example.test/harbor', title: 'Harbor', snippet: 'The stone mole shelters the channel.' }], truncated: false }) })
+  const { fixture, run, official } = await writeSettings({ executionLimits: { researchEnabled: true, researchBudgetFloor: 1 }, webSearch: async () => ({ content: 'A harbor light marks the channel.', sources: [{ url: 'https://example.test/harbor', title: 'Harbor', snippet: 'The stone mole shelters the channel.' }], truncated: false }) })
   expect(run.error).toBeNull()
   expect(official.some(call => call.startsWith('web_search:'))).toBe(true)
   expect(official.some(call => call.startsWith('web_fetch:'))).toBe(true)
@@ -86,6 +86,8 @@ it('calls official web_search and web_fetch for settings and passes the text to 
   const settings = [...fixture.stages.values()].find(stage => stage.kind === 'settings')
   const prompt = fixture.childRequests.find(request => request.sessionId === settings?.sessionId)?.messages.flatMap(message => message.content).find(block => block.type === 'text' && block.text.includes('officialRetrieval'))
   expect(prompt?.type === 'text' ? prompt.text : '').toContain('The stone mole shelters the channel.')
+  expect([...fixture.stages.values()].some(stage => stage.kind === 'research-planning')).toBe(true)
+  expect([...fixture.stages.values()].some(stage => stage.kind === 'research' && stage.data.kind === 'research' && stage.data.purpose.includes('settings dimension'))).toBe(true)
   const outline = [...fixture.stages.values()].find(stage => stage.kind === 'research' && stage.data.kind === 'research' && stage.data.purpose.startsWith('Resolve evidence needed for'))
   const outlineTools = fixture.childRequests.find(request => request.sessionId === outline?.sessionId)?.tools?.map(tool => tool.name) ?? []
   expect(outlineTools).not.toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
