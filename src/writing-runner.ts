@@ -581,13 +581,11 @@ export class WritingRunner {
     const brief = this.service.getNovel(inv.actor, inv.run.novelId).brief
     if (await this.reuseAppliedSettings(inv, plan, brief)) return
     this.stopOnStaleImport(inv)
-    const needed = new Set(this.settingsNeeded(inv, plan))
-    for (const layer of plan.layers) {
-      const batchCodes = layer.filter(code => needed.has(code) && !isOpenChecklistCode(code))
-      const openCodes = layer.filter(code => needed.has(code) && isOpenChecklistCode(code))
-      if (batchCodes.length > 0) await this.draftSettings(inv, batchCodes, brief)
-      for (const code of openCodes) await this.dimension(inv, code, 0, [])
-    }
+    const needed = this.settingsNeeded(inv, plan)
+    const batchCodes = needed.filter(code => !isOpenChecklistCode(code))
+    if (batchCodes.length > 0) await this.draftSettings(inv, batchCodes, brief)
+    // g4 and g7 keep their own candidate lines. Their dependencies are ordinary dimensions and are already applied.
+    for (const code of needed) if (isOpenChecklistCode(code)) await this.dimension(inv, code, 0, [])
     const selected = [...plan.selectedCodes]
     const collection = await this.service.assembleSettings(inv.actor, { novelId: inv.run.novelId, selectedCodes: inv.run.settingsRoots, requestId: requestId(inv.run, 'settings/collection/0') })
     await this.deliver(inv, collection.artifact)
@@ -737,6 +735,7 @@ export class WritingRunner {
     for (const code of plan.layers.flat()) {
       if (issues.some(issue => issue.dimension === code) && isOpenChecklistCode(code)) await this.dimension(inv, code, 1, [])
     }
+    if (named.length === 0) return
     const planId = await this.ensureSettingsResearch(inv, brief)
     const groups = planSettingsBatches(named, inv.run.limits.maxOutputBytes)
     for (const codes of groups) {
