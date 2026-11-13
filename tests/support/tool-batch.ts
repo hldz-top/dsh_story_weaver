@@ -1,4 +1,4 @@
-/** Call one registered tool through the DSH 0.2.2-rc.2 batch executor. */
+/** Call one registered tool through the DSH 0.2.2-rc.3 batch executor. */
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'

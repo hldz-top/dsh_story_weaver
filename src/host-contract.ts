@@ -1,7 +1,7 @@
 /** Exact host package this plugin has been verified against. Not a range. */
 import { createRequire } from 'node:module'
 
-export const VERIFIED_DSH_SUBAGENT_VERSION = '0.2.2-rc.2'
+export const VERIFIED_DSH_SUBAGENT_VERSION = '0.2.2-rc.3'
 
 const require = createRequire(import.meta.url)
 
