@@ -57,8 +57,8 @@ export const Config: z<Config> = z.object({
   maxRepairAttempts: z.number().default(2),
   maxParallelStages: z.number().default(3),
   /**
-   * How many settings dimensions in one dependency layer may start together.
-   * The layer still will not exceed maxParallelStages. Default 1.
+   * How many candidates one settings dimension generates on its first pass.
+   * Layer width is maxParallelStages and does not read this value. Default 1.
    */
   settingsCandidateCount: z.number().default(1),
   maxRunAttempts: z.number().default(512),
