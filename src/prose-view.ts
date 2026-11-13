@@ -29,3 +29,28 @@ export function proseView(kind: string, text: string): string {
   strings(parsed, values)
   return values.join('\n')
 }
+
+/**
+ * Body-stage view of one outline: what happens in this chapter, and what the characters do now.
+ * Book outlines contribute only this chapter's title, purpose and obligation descriptions.
+ * Chapter outlines contribute the title, through-line, obligation descriptions, and each scene's purpose and action.
+ * Word targets, constraints, state notes and the rest of the book are not in this view, so a beat table or a percentage
+ * position stored on the outline is not handed to the writer. Other kinds are returned unchanged.
+ * @param kind - Stored artifact kind. @param text - Exact stored text. @param chapterNumber - The chapter being written.
+ * @returns The feed text. A value that is not an outline of this chapter is returned unchanged.
+ */
+export function bodyFeed(kind: string, text: string, chapterNumber: number): string {
+  if (kind !== 'book-outline' && kind !== 'chapter-outline') return text
+  let parsed: unknown
+  try { parsed = JSON.parse(text) } catch { return text }
+  if (kind === 'book-outline') {
+    const outline = StageOutputSchemas['book-outline'].safeParse(parsed)
+    const chapter = outline.success ? outline.data.chapters.find(item => item.chapterNumber === chapterNumber) : undefined
+    if (chapter === undefined) return text
+    return [chapter.title, chapter.purpose, ...chapter.obligations.map(item => item.description)].join('\n')
+  }
+  const outline = StageOutputSchemas['chapter-outline'].safeParse(parsed)
+  if (!outline.success || outline.data.chapterNumber !== chapterNumber) return text
+  return [outline.data.title, outline.data.throughLine, ...outline.data.obligations.map(item => item.description),
+    ...outline.data.scenes.flatMap(scene => [scene.purpose, scene.action])].join('\n')
+}

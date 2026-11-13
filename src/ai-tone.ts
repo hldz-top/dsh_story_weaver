@@ -14,12 +14,19 @@
  * From prompt version 3 the body-review task includes this report. tests/ai-tone.spec.ts freezes it for the two
  * chapter fixtures. Prompt versions 3 and 4 are on main: changing that report makes a paused body review hit
  * attempt-conflict on resume, so bump CURRENT_PROMPT_VERSION in the same change. Excerpt windows stay the UTF-16
- * slice used since version 3, so resumed v1–v4 prompts rebuild identical marker bytes.
+ * slice used since version 3, so resumed v1–v6 prompts rebuild identical marker bytes.
+ *
+ * Prompt version 7 hands the review {@link gradeAiTone} instead: the same markers plus a density grade. That grade is a
+ * hint. It does not decide whether a chapter applies. Dialogue and panels stay out of the scan.
  */
 
 export type AiToneRule = 'reversal' | 'enumeration' | 'dash' | 'opener' | 'nominalization' | 'long-attributive' | 'when-clause' | 'topic-shell' | 'connective' | 'restatement' | 'zero-subject-comment'
 export interface AiToneMarker { readonly rule: AiToneRule; readonly skillRule: string; readonly count: number; readonly perThousandHan: number; readonly examples: readonly string[] }
 export interface AiToneReport { readonly source: 'lieflat-less-ai-tone@27d2923 (MIT)'; readonly narrationHan: number; readonly markers: readonly AiToneMarker[] }
+/** Density grade on a version-7 report. Sparse is a hint; it is not a pass/fail gate. */
+export type AiToneGrade = 'hint' | 'notice' | 'heavy'
+export interface GradedAiToneMarker extends AiToneMarker { readonly grade: AiToneGrade }
+export interface GradedAiToneReport extends Omit<AiToneReport, 'markers'> { readonly markers: readonly GradedAiToneMarker[] }
 
 const SPAN = '[^，。！？；\\n]'
 const patterns: readonly { readonly rule: Exclude<AiToneRule, 'zero-subject-comment'>; readonly skillRule: string; readonly pattern: RegExp }[] = [
@@ -79,6 +86,16 @@ export function detectAiTone(text: string): AiToneReport {
   const paragraphs = text.split('\n').map(line => line.trim()).filter(line => line.length >= 8 && !/^[「“【]/u.test(line))
   add('zero-subject-comment', '11 段首零主语评论', paragraphs.slice(1).filter(paragraph => COMMENT.test(paragraph) && !ANAPHOR.test(paragraph.split(/[，。！？]/u)[0] ?? '')).map(paragraph => paragraph.split(/[，。！？]/u)[0] ?? paragraph))
   return { source: 'lieflat-less-ai-tone@27d2923 (MIT)', narrationHan, markers }
+}
+
+/**
+ * Grade each marker by hits per thousand narration Han characters: under 1 is `hint`, under 5 is `notice`, otherwise
+ * `heavy`. A single dash or 、 list in a chapter-length narration is a hint. The grade is report-only.
+ * @param report - The frozen {@link detectAiTone} report. @returns The same markers with a grade. The input report is unchanged.
+ */
+export function gradeAiTone(report: AiToneReport): GradedAiToneReport {
+  const grade = (perThousandHan: number): AiToneGrade => perThousandHan < 1 ? 'hint' : perThousandHan < 5 ? 'notice' : 'heavy'
+  return { ...report, markers: report.markers.map(marker => ({ ...marker, grade: grade(marker.perThousandHan) })) }
 }
 
 /** One detector hit located in the narration view, with a position-independent identity for repeat detection. */

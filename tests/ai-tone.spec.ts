@@ -1,7 +1,7 @@
 /** AI-tone markers adapted from lieflat-less-ai-tone (MIT, third_party/lieflat-less-ai-tone.LICENSE). */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { detectAiTone, narrationOf } from '../src/ai-tone.ts'
+import { detectAiTone, gradeAiTone, narrationOf } from '../src/ai-tone.ts'
 
 const rules = (text: string) => Object.fromEntries(detectAiTone(text).markers.map(marker => [marker.rule, marker.count]))
 
@@ -90,6 +90,14 @@ describe('detectAiTone', () => {
     const chapter = (name: string) => body(name).scenes.map(scene => scene.text).join('\n\n')
     expect(rules(chapter('ch1-v1-body.json'))).toEqual({ enumeration: 4, dash: 14 })
     expect(rules(chapter('ch1-v2-body.json'))).toEqual({ enumeration: 2 })
+  })
+
+  it('grades a single dash or enumeration in a chapter-length narration as a hint', () => {
+    const narration = `${'他看着灯。'.repeat(400)}灯塔——终于亮了。船上有缆绳、铁锚、油灯。`
+    const graded = gradeAiTone(detectAiTone(narration))
+    expect(graded.markers.find(marker => marker.rule === 'dash')?.grade).toBe('hint')
+    expect(graded.markers.find(marker => marker.rule === 'enumeration')?.grade).toBe('hint')
+    expect(detectAiTone(narration).markers.every(marker => !('grade' in marker))).toBe(true)
   })
 
   it('freezes detector output for the two chapter fixtures', () => {

@@ -22,8 +22,8 @@ const outputs = {
   review: { ...common, reviewed: source, checks: [{ category: 'completeness', summary: 'The action is recorded.', evidence: [citation] }], issues: [] },
   'book-outline': { ...common, contentMarkdown: 'The keeper investigates.', ending: 'The log identifies the sender.',
     characterArcs: [{ character: 'The keeper', development: 'She learns to trust the crew.' }],
-    chapters: [{ chapterNumber: 1, title: 'The log', purpose: 'Recover the log.', targetWords: 3500, obligations: [] }] },
-  'chapter-outline': { ...common, chapterNumber: 1, title: 'The log', targetWords: 3500, throughLine: 'Recover the log.',
+    chapters: [{ chapterNumber: 1, title: 'The log', purpose: 'Recover the log.', obligations: [] }] },
+  'chapter-outline': { ...common, chapterNumber: 1, title: 'The log', throughLine: 'Recover the log.',
     constraints: [], obligations: [], scenes: [{ id: 'open-log', purpose: 'Read the record.', action: 'The keeper opens the log.', obligationIds: [] }] },
   body: { ...common, chapterNumber: 1, scenes: [{ sceneId: 'open-log', text: 'The keeper opens the log.' }] },
   continuity: { ...common, chapterNumber: 1, summary: 'The log is recovered.', characters: [{ name: 'The keeper', state: 'Holds the log.' }],
@@ -47,6 +47,17 @@ it.each(kinds)('captures %s through the actual native child structured-output to
   expect(outcome).toMatchObject({ status: 'fulfilled', value: { structured: output } })
   expect(fixture.childRequests).toHaveLength(1)
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
+})
+
+it('publishes version 7 outlines without targetWords and keeps it required through version 6', () => {
+  for (const kind of ['book-outline', 'chapter-outline'] as const) {
+    expect(JSON.stringify(nativeStageOutputSchema(kind))).not.toContain('targetWords')
+    expect(JSON.stringify(nativeStageOutputSchema(kind, 6))).toContain('targetWords')
+    expect(validateJsonSchemaValue(nativeStageOutputSchema(kind), outputs[kind])).toEqual([])
+  }
+  const book = { ...outputs['book-outline'], chapters: [{ ...outputs['book-outline'].chapters[0], targetWords: 3500 }] }
+  expect(validateJsonSchemaValue(nativeStageOutputSchema('book-outline', 6), book)).toEqual([])
+  expect(validateJsonSchemaValue(nativeStageOutputSchema('book-outline'), book)).not.toEqual([])
 })
 
 it('keeps native structure strict while publishing host constraints in field descriptions', () => {

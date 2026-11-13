@@ -231,17 +231,25 @@ export function registerWritingTools(ctx: Context, service: WritingService, prev
           totalChars: { type: 'integer', required: true },
           text: { type: 'string', required: true },
           eof: { type: 'boolean', required: true },
-          view: { type: 'string', required: true, enum: ['stored', 'prose'] },
+          view: { type: 'string', required: true, enum: ['stored', 'prose', 'feed'] },
         },
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      // Review children always read the reader-facing prose view; the host decides, not the child.
-      const view = service.readsProse(exec.agent?.session.id) ? 'prose' : 'stored'
-      return service.readArtifact(await writingActor(ctx, exec), {
-        ...args, novelId: parseToolNovelId(args.novelId), artifactId: parseToolArtifactId(args.artifactId), view,
+      // The host decides the view, not the child. Reviews read prose. A body child on prompt version 7 reads book and
+      // chapter outlines as the thin feed and every other artifact as stored text.
+      const sessionId = exec.agent?.session.id
+      const actor = await writingActor(ctx, exec)
+      const novelId = parseToolNovelId(args.novelId)
+      const artifactId = parseToolArtifactId(args.artifactId)
+      const feedChapter = service.bodyFeedChapter(sessionId)
+      const kind = feedChapter === undefined ? undefined : service.getArtifact(actor, { novelId, artifactId }).kind
+      const view = service.readsProse(sessionId) ? 'prose'
+        : feedChapter !== undefined && (kind === 'book-outline' || kind === 'chapter-outline') ? 'feed' : 'stored'
+      return service.readArtifact(actor, {
+        ...args, novelId, artifactId, view, ...(view === 'feed' && feedChapter !== undefined ? { feedChapter } : {}),
       })
     },
   })))

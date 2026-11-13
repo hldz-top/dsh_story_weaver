@@ -80,11 +80,13 @@ export interface ArtifactRequest { readonly novelId: NovelId; readonly artifactI
 /** Requested character interval; limit must not exceed the configured maximum. */
 export interface ReadArtifactRequest extends ArtifactRequest {
   readonly offset: number; readonly limit: number
-  /** `prose` serves the reader-facing plain text (see prose-view.ts) instead of the stored text; default `stored`. */
+  /** `prose` serves the reader-facing plain text (see prose-view.ts) instead of the stored text. `feed` serves the body-stage outline feed. Default `stored`. */
   readonly view?: ArtifactView
+  /** Chapter whose outline feed is served. Used only when `view` is `feed`. */
+  readonly feedChapter?: number
 }
-/** Which text of an artifact a read serves: the exact stored text, or its reader-facing plain-text view. */
-export type ArtifactView = 'stored' | 'prose'
+/** Which text of an artifact a read serves: the exact stored text, its reader-facing plain text, or the body-stage outline feed. */
+export type ArtifactView = 'stored' | 'prose' | 'feed'
 /** A Unicode code-point interval that can be continued until eof. */
 export interface ArtifactSlice extends ArtifactRequest {
   readonly kind: ArtifactKind

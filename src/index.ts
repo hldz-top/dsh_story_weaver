@@ -40,7 +40,7 @@ export interface Config extends ResearchLimits, RunExecutionLimits {
   allowIncompleteSettings: boolean
   /** Operator-only: register story_settings_import. Enable only for an import, then turn it off. Default false: the tool is absent from the tool schema. */
   allowSettingsImport: boolean
-  /** Body reviews on prompt version 5 turn AI-tone findings quoting the body into blocking issues. Frozen into each new run. Default true. */
+  /** Body reviews on prompt versions 5 and 6 turn AI-tone findings quoting the body into blocking issues. Prompt version 7 records the same switch and reports a density grade instead of blocking. Frozen into each new run. Default true. */
   aiToneBlocking: boolean
   /**
    * Writing-stage model route. `inherit` uses the parent Agent's configured model and subscription.

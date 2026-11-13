@@ -114,7 +114,7 @@ describe('version 3 AI-tone review', () => {
 })
 
 describe('version 2 guardrails', () => {
-  it('is followed by version 6 for new runs', () => { expect(CURRENT_PROMPT_VERSION).toBe(6) })
+  it('is followed by version 7 for new runs', () => { expect(CURRENT_PROMPT_VERSION).toBe(7) })
 
   it('appends each sentence only to its own stage', () => {
     for (const kind of kinds) {
@@ -239,15 +239,18 @@ describe('runs keep their prompt version', () => {
     expect(bodyReview?.prompt).not.toContain('the host itself blocks the chapter')
   })
 
-  it('starts new runs on version 6 and hands body reviews host-measured beats and AI-tone markers', { timeout: 120_000 }, async () => {
+  it('starts new runs on version 7 and hands body reviews host-measured beats and graded AI-tone markers', { timeout: 120_000 }, async () => {
     const record = recorder()
     const fixture = await useWritingFixture({ maxReadChars: 8192, onChildRequest: record.onChildRequest })
     const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
     if (outcome.status === 'rejected') throw outcome.reason
-    expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 6, executionLimits: { aiToneBlocking: true } })
+    expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 7, executionLimits: { aiToneBlocking: true } })
     expect(record.seen.find(item => item.stage.kind === 'settings')?.prompt).toContain('Do not expand this classification into motives')
     expect(record.seen.find(item => item.stage.kind === 'book-outline')?.prompt).toContain('starting want, the pressure that changes it')
     expect(record.seen.find(item => item.stage.kind === 'chapter-outline')?.prompt).toContain('who chooses, what they want in that moment')
+    expect(record.seen.find(item => item.stage.kind === 'chapter-outline')?.prompt).not.toContain('pacing guidance for scene allocation')
+    expect(record.seen.find(item => item.stage.kind === 'book-outline')?.prompt).not.toContain('3000–5000')
+    expect(record.seen.find(item => item.stage.kind === 'body')?.prompt).toContain('aim for about 3000')
     expect(record.seen.find(item => item.stage.kind === 'body')?.prompt).toContain('present want inside the choice')
     expect(record.seen.find(item => item.stage.kind === 'continuity')?.prompt).toContain('only when the prose performs it')
     expect(record.seen.find(item => item.stage.kind === 'body')?.prompt).toContain('tool or equipment list in the settings')
@@ -261,6 +264,10 @@ describe('runs keep their prompt version', () => {
     expect(bodyReview.prompt).toContain('one repair step')
     expect(bodyReview.prompt).toContain('prior applied fact and the sentence that breaks it')
     expect(bodyReview.prompt).toContain(AI_TONE_PHRASE)
+    expect(bodyReview.prompt).toContain('density-graded hint report')
+    expect(bodyReview.prompt).not.toContain('the host itself blocks the chapter')
+    const chapterOutlineReview = record.seen.find(item => item.stage.kind === 'review' && item.stage.task?.reviewed !== undefined && item.stage.sources.get(item.stage.task.reviewed.artifactId)?.kind === 'chapter-outline')
+    expect(chapterOutlineReview?.prompt).not.toContain('task.measuredBeats')
     expect(JSON.parse((bodyReview.stage.data as { task: string }).task)).toHaveProperty('aiToneMarkers.source', 'lieflat-less-ai-tone@27d2923 (MIT)')
     const otherReviews = record.seen.filter(item => item.stage.kind === 'review' && item !== bodyReview && typeof item.stage.task?.measuredWordCount !== 'number')
     expect(otherReviews.length).toBeGreaterThan(0)

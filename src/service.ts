@@ -13,7 +13,7 @@ import { writingDomain, type NovelRecord, type ResearchRecord, type SettingsReco
 import { parseSelectedFindings, researchEvidenceContentSchema, researchPlanContentSchema, researchQuestions } from './research.ts'
 
 import { settingsCatalog } from './settings-catalog.ts'
-import { proseView } from './prose-view.ts'
+import { bodyFeed, proseView } from './prose-view.ts'
 import { parseSettingsDimensionOutput, parseReviewOutput, checkSettingsDimensionScope } from './stage-output.ts'
 import type { ApplySettingsCandidateRequest, ImportSettingsRequest, SaveSettingsReviewRequest, SaveSettingsCandidateRequest, SettingsCandidateView, SettingsView } from './settings.ts'
 import { ManuscriptStore, type AssembleSettingsRequest, type ManuscriptCandidateView, type ManuscriptView, type SaveManuscriptReviewRequest, type ApplyManuscriptCandidateRequest, type ManuscriptLimits, type ManuscriptContext, type GeneratedManuscriptTarget, type SaveManuscriptCandidateRequest, type ApplyChapterRequest, type AppliedChapterView } from './manuscript.ts'
@@ -192,7 +192,9 @@ export class WritingService {
     }
     const artifact = this.getArtifact(actor, request)
     const view = request.view ?? 'stored'
-    const characters = [...(view === 'prose' ? proseView(artifact.kind, artifact.text) : artifact.text)]
+    const served = view === 'prose' ? proseView(artifact.kind, artifact.text)
+      : view === 'feed' ? bodyFeed(artifact.kind, artifact.text, request.feedChapter ?? 0) : artifact.text
+    const characters = [...served]
     if (request.offset > characters.length) throw new WritingError('invalid-range', 'Artifact offset is past EOF')
     const nextOffset = Math.min(characters.length, request.offset + request.limit)
     return {
@@ -220,6 +222,22 @@ export class WritingService {
   }
   /** @param sessionId - Reading Session. @returns Whether its reads must use the prose view. */
   readsProse(sessionId: string | undefined): boolean { return sessionId !== undefined && this.proseReaders.has(sessionId) }
+
+  /** Body-stage sessions whose book and chapter outlines are served as {@link bodyFeed}. The value is the chapter being written. */
+  private readonly feedReaders = new Map<string, number>()
+  /** @param sessionId - Native body child. @param chapterNumber - The chapter that child is writing. @returns A function ending its outline feed. */
+  serveBodyFeedTo(sessionId: string, chapterNumber: number): () => void {
+    this.feedReaders.set(sessionId, chapterNumber)
+    return () => { this.feedReaders.delete(sessionId) }
+  }
+  /** @param sessionId - Reading Session. @returns The chapter number when this session's outlines are served as the body feed. */
+  bodyFeedChapter(sessionId: string | undefined): number | undefined { return sessionId === undefined ? undefined : this.feedReaders.get(sessionId) }
+
+  /** Code points of the body-stage outline feed. Other kinds match the stored text. */
+  feedChars(actor: Actor, request: ArtifactRequest, chapterNumber: number): number {
+    const artifact = this.getArtifact(actor, request)
+    return [...bodyFeed(artifact.kind, artifact.text, chapterNumber)].length
+  }
 
   /** @param actor - Plan-owning Session and workspace. @param request - Questions and exact current brief. @param startSeq - First admitted Session log position. @returns The published immutable plan or its idempotent replay. */
   async startResearch(actor: Actor, request: StartResearchRequest, startSeq: number): Promise<ResearchView> {

@@ -44,20 +44,50 @@ const hostDowngradeSchema = z.strictObject({ from: z.enum(['blocking', 'advisory
 /** The admitted (stored) review: the model schema plus host downgrade markers. */
 const admittedReviewSchema = reviewSchema.extend({ issues: z.array(z.strictObject({ ...issueShape, hostDowngrade: hostDowngradeSchema.optional() })) })
 const obligationSchema = z.strictObject({ id: text, description: text })
-const bookOutlineSchema = inputsSchema.extend({
-  contentMarkdown: text, ending: text,
-  characterArcs: z.array(z.strictObject({ character: text, development: text })).nonempty(),
+const targetWords = z.number().int().positive()
+const bookArc = z.array(z.strictObject({ character: text, development: text })).nonempty()
+const bookChapter = {
+  chapterNumber: z.number().int().positive(), title: text, purpose: text, obligations: z.array(obligationSchema),
+}
+/**
+ * Prompt versions before 7 publish this schema. Property order matches the frozen schema: `targetWords` sits between
+ * `purpose` and `obligations`. Admission and version 7 publication do not use it.
+ */
+export const bookOutlineSchemaLegacy = inputsSchema.extend({
+  contentMarkdown: text, ending: text, characterArcs: bookArc,
   chapters: z.array(z.strictObject({
-    chapterNumber: z.number().int().positive(), title: text, purpose: text, targetWords: z.number().int().positive(),
-    obligations: z.array(obligationSchema),
+    chapterNumber: bookChapter.chapterNumber, title: bookChapter.title, purpose: bookChapter.purpose, targetWords, obligations: bookChapter.obligations,
   })).nonempty(),
 })
+/** Version 7 publication: no `targetWords`. The host counts the body; the outline does not plan a word number. */
+export const bookOutlineSchemaV7 = inputsSchema.extend({
+  contentMarkdown: text, ending: text, characterArcs: bookArc,
+  chapters: z.array(z.strictObject(bookChapter)).nonempty(),
+})
+/** Admission accepts a historical `targetWords` and a version-7 outline that omits it. */
+const bookOutlineSchema = inputsSchema.extend({
+  contentMarkdown: text, ending: text, characterArcs: bookArc,
+  chapters: z.array(z.strictObject({
+    chapterNumber: bookChapter.chapterNumber, title: bookChapter.title, purpose: bookChapter.purpose, targetWords: targetWords.optional(), obligations: bookChapter.obligations,
+  })).nonempty(),
+})
+const sceneCard = z.array(z.strictObject({ id: text, purpose: text, action: text, obligationIds: z.array(text) })).nonempty()
+/** Optional free-text state list (prompt version 2). No enums, so a loose note never costs a repair attempt. */
+const stateNotes = z.array(text).optional()
+/** Prompt versions 2–6 publish this schema. `targetWords` stays between `title` and `throughLine`, as in the frozen schema. */
+export const chapterOutlineSchemaLegacy = inputsSchema.extend({
+  chapterNumber: z.number().int().positive(), title: text, targetWords, throughLine: text,
+  constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
+})
+/** Version 7 publication: no `targetWords`. Scene plans stay; the host does not ask for a chapter word number. */
+export const chapterOutlineSchemaV7 = inputsSchema.extend({
+  chapterNumber: z.number().int().positive(), title: text, throughLine: text,
+  constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
+})
+/** Admission accepts a historical `targetWords` and a version-7 outline that omits it. */
 const chapterOutlineSchema = inputsSchema.extend({
-  chapterNumber: z.number().int().positive(), title: text, targetWords: z.number().int().positive(), throughLine: text,
-  constraints: z.array(text), obligations: z.array(obligationSchema),
-  scenes: z.array(z.strictObject({ id: text, purpose: text, action: text, obligationIds: z.array(text) })).nonempty(),
-  // Optional free-text state list (prompt version 2): where key objects and places are, who holds them, whether they are physical. No enums, so a loose note never costs a repair attempt.
-  stateNotes: z.array(text).optional(),
+  chapterNumber: z.number().int().positive(), title: text, targetWords: targetWords.optional(), throughLine: text,
+  constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
 })
 const bodySchema = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), scenes: z.array(z.strictObject({ sceneId: text, text })).nonempty(),
@@ -92,8 +122,8 @@ export type EvidenceCitation = z.infer<typeof citationSchema>
 /** Host-verified text available for exact quotation checks. */
 export interface EvidenceSource { readonly artifactId: ArtifactId; readonly text: string }
 
-/** The chapter-outline schema published to runs on prompt version 1, before stateNotes existed. */
-export const chapterOutlineSchemaV1 = chapterOutlineSchema.omit({ stateNotes: true })
+/** The chapter-outline schema published to runs on prompt version 1, before stateNotes existed. `targetWords` stays required there. */
+export const chapterOutlineSchemaV1 = chapterOutlineSchemaLegacy.omit({ stateNotes: true })
 
 /** Model response schemas; use z.toJSONSchema(schema, { io: 'input' }) for the branded identifier parsers. */
 export const StageOutputSchemas = {
