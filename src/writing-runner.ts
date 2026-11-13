@@ -1,9 +1,10 @@
 /** Native writing orchestration with durable attempts and reviewed version publication. */
 import { createHash } from 'node:crypto'
-import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { nativeStageOutputSchema } from './native-stage-schema.ts'
+import { paragraphsOfStoredCandidate } from './candidate-paragraphs.ts'
+import { nativeStageOutputSchema, openChecklistNativeSchema } from './native-stage-schema.ts'
+import { checklistRepairDecision, isOpenChecklistCode, openChecklistItems, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import { AiToneReviewBlockedError, aiToneRepairInstruction, ImportRefusedError, ImportReviewBlockedError, SettingsIncompleteError, WritingError, parseArtifactId, parseRequestId, type Actor, type ArtifactId, type ArtifactRef, type ImportItem } from './contracts.ts'
 import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
@@ -45,6 +46,13 @@ type ProducedSettings =
   | { readonly kind: 'passing'; readonly candidate: SettingsCandidateView; readonly review: NonNullable<SettingsCandidateView['review']> }
   | { readonly kind: 'blocked'; readonly candidate: SettingsCandidateView }
   | { readonly kind: 'invalid'; readonly message: string }
+  | { readonly kind: 'checklist'; readonly decision: ReturnType<typeof checklistRepairDecision>; readonly candidate: SettingsCandidateView; readonly review: NonNullable<SettingsCandidateView['review']>; readonly fails: number }
+/** Fail count and held candidate for one open-checklist line. Other lines and other dimensions do not read it. */
+interface OpenChecklistLine {
+  held: { readonly candidate: SettingsCandidateView; readonly fails: number } | null
+  feedback: readonly ArtifactRef[]
+  validationError: string | null
+}
 /** Stage classes with a fixed deadline and one unknown execution-timeout replacement. Research execution stays on stageTimeoutMs. */
 export type GradedStage = 'planning' | 'candidate' | 'review' | 'body' | 'repair'
 
@@ -573,12 +581,13 @@ export class WritingRunner {
     for (let round = 0; round <= inv.run.executionLimits.maxRepairAttempts; round++) {
       const previousReview = this.runs.get(inv.actor, inv.run.id).attempts.findLast(attempt => attempt.key.startsWith(`settings/collection/${round}/review`) && attempt.status === 'succeeded')
       if (previousReview !== undefined) {
-        const output = StageOutputSchemas.review.safeParse(JSON.parse(this.runs.readOutput(inv.actor, inv.run.id, previousReview.id).text))
-        if (output.success && output.data.issues.some(issue => issue.severity === 'blocking')) {
-          const rejected = this.service.getManuscript(inv.actor, inv.run.novelId).history.find(item => item.artifact.id === output.data.reviewed.artifactId)
+        const raw = JSON.parse(this.runs.readOutput(inv.actor, inv.run.id, previousReview.id).text) as { reviewed?: { artifactId?: string }; issues?: { severity?: string }[] }
+        if (typeof raw.reviewed?.artifactId === 'string' && raw.issues?.some(issue => issue.severity === 'blocking') === true) {
+          const rejected = this.service.getManuscript(inv.actor, inv.run.novelId).history.find(item => item.artifact.id === raw.reviewed?.artifactId)
           if (rejected !== undefined && rejected.review !== null) {
-            const saved = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: rejected.review.id })
-            if (isDeepStrictEqual(JSON.parse(saved.text), output.data)) {
+            // The stored review is the admitted form. Paragraph-id model output is not byte-identical to it.
+            const saved = JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: rejected.review.id }).text) as { reviewed?: { artifactId?: string }; issues?: { severity?: string }[] }
+            if (saved.reviewed?.artifactId === raw.reviewed.artifactId && saved.issues?.some(issue => issue.severity === 'blocking') === true) {
               this.stopOnBlockedImport(inv)
               await this.deliver(inv, rejected.artifact)
               feedback = this.feedback(rejected)
@@ -621,14 +630,25 @@ export class WritingRunner {
     const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, research.planId, revision?.baseArtifactId)
     const officialRetrieval = research.officialExcerpts
     const candidateCount = settingsCandidatesPerDimension(inv.run.executionLimits)
+    // Each first-pass slot is its own line. Its held candidate and fail count stay inside this dimension call and are never copied onto a sibling.
+    const checklistLines: OpenChecklistLine[] | null = promptVersionOf(inv.run) >= 7 && isOpenChecklistCode(code)
+      ? Array.from({ length: candidateCount }, () => ({ held: null, feedback: crossFeedback, validationError: null }))
+      : null
     let feedback = crossFeedback
     let validationError: string | null = null
     for (let repair = 0; repair <= inv.run.executionLimits.maxRepairAttempts; repair++) {
-      const slots = repair === 0 ? candidateCount : 1
-      const settled = await Promise.allSettled(Array.from({ length: slots }, (_, index) => this.writeSettingsCandidate(inv, {
-        code, dimension, refs, officialRetrieval, revision, feedback, validationError, researchPlanId: research.planId,
-        stageKey: settingsCandidateStageKey(key, repair, index, slots),
-      })))
+      const slots = checklistLines === null ? (repair === 0 ? candidateCount : 1) : checklistLines.length
+      const settled = await Promise.allSettled(Array.from({ length: slots }, (_, index) => {
+        const line = checklistLines?.[index]
+        return this.writeSettingsCandidate(inv, {
+          code, dimension, refs, officialRetrieval, revision,
+          feedback: line === undefined ? feedback : line.feedback,
+          validationError: line === undefined ? validationError : line.validationError,
+          researchPlanId: research.planId,
+          stageKey: settingsCandidateStageKey(key, repair, index, line === undefined ? slots : candidateCount),
+          ...(line === undefined ? {} : { checklistPreviousFails: line.held?.fails ?? null }),
+        })
+      }))
       if (inv.exec.signal.aborted) {
         const rejected = settled.find((item): item is PromiseRejectedResult => item.status === 'rejected')
         throw rejected === undefined ? inv.exec.signal.reason : rejected.reason
@@ -638,20 +658,59 @@ export class WritingRunner {
       // A failed slot stays a failure. Adopting a sibling would leave that attempt unfinished and could not complete the run.
       if (failures.length === 1) throw failures[0]
       if (failures.length > 1) throw new AggregateError(failures, 'A settings candidate set could not complete')
-      const passing = produced.find(item => item.kind === 'passing')
-      if (passing !== undefined) {
-        await this.service.applySettingsCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: passing.candidate.artifact.id, reviewId: passing.review.id, expectedAppliedId: old?.artifact.id ?? null })
+      if (checklistLines === null) {
+        const passing = produced.find(item => item.kind === 'passing')
+        if (passing !== undefined && passing.kind === 'passing') {
+          await this.service.applySettingsCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: passing.candidate.artifact.id, reviewId: passing.review.id, expectedAppliedId: old?.artifact.id ?? null })
+          return
+        }
+        const blocked = produced.flatMap(item => item.kind === 'blocked' ? [item.candidate] : [])
+        if (blocked.length > 0) feedback = [...crossFeedback, ...blocked.flatMap(candidate => this.feedback(candidate))]
+        const invalid = produced.flatMap(item => item.kind === 'invalid' ? [item.message] : [])
+        if (invalid.length > 0) validationError = invalid.at(-1) ?? validationError
+        continue
+      }
+      let applyNext: { readonly candidate: SettingsCandidateView; readonly review: NonNullable<SettingsCandidateView['review']> } | undefined
+      let applyHeld: { readonly candidate: SettingsCandidateView; readonly review: NonNullable<SettingsCandidateView['review']> } | undefined
+      for (const [index, item] of produced.entries()) {
+        const line = checklistLines[index]
+        if (line === undefined) throw new WritingError('corrupt-artifact', 'Open-dimension candidate line is missing')
+        if (item.kind === 'invalid') {
+          line.validationError = item.message
+          continue
+        }
+        if (item.kind !== 'checklist') throw new WritingError('corrupt-artifact', 'Open-dimension candidate was not checklist-scored')
+        if (item.decision === 'apply-next') {
+          applyNext ??= { candidate: item.candidate, review: item.review }
+          continue
+        }
+        if (item.decision === 'apply-previous') {
+          const held = line.held?.candidate
+          if (held?.review == null) throw new WritingError('corrupt-artifact', 'Open-dimension convergence has no candidate to apply')
+          applyHeld ??= { candidate: held, review: held.review }
+          continue
+        }
+        line.held = { candidate: item.candidate, fails: item.fails }
+        line.feedback = [...crossFeedback, ...this.feedback(item.candidate)]
+        line.validationError = null
+      }
+      // A zero-fail line is a passing slot. Only when none exists does a line apply the candidate it already holds.
+      const chosen = applyNext ?? applyHeld
+      if (chosen !== undefined) {
+        await this.service.applySettingsCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: chosen.candidate.artifact.id, reviewId: chosen.review.id, expectedAppliedId: old?.artifact.id ?? null })
         return
       }
-      const blocked = produced.flatMap(item => item.kind === 'blocked' ? [item.candidate] : [])
-      if (blocked.length > 0) feedback = [...crossFeedback, ...blocked.flatMap(candidate => this.feedback(candidate))]
-      const invalid = produced.flatMap(item => item.kind === 'invalid' ? [item.message] : [])
-      if (invalid.length > 0) validationError = invalid.at(-1) ?? validationError
     }
-    throw new WritingError('review-blocked', `Settings repair limit was exhausted for ${code}${validationError === null ? '' : `: ${validationError}`}`)
+    // A fail count that stays positive and does not rise is still review-blocked. The held candidate is not applied.
+    const checklistError = checklistLines?.findLast(line => line.validationError !== null)?.validationError ?? null
+    const exhausted = checklistLines === null ? validationError : checklistError
+    throw new WritingError('review-blocked', `Settings repair limit was exhausted for ${code}${exhausted === null ? '' : `: ${exhausted}`}`)
   }
 
-  /** Generate and review one settings candidate. A host output rejection stays in the repair loop; every other failure rejects the slot. */
+  /**
+   * Generate and review one settings candidate. A host output rejection stays in the repair loop; every other failure rejects the slot.
+   * `checklistPreviousFails` is that candidate line's own previous fail count. The decision does not read any other line.
+   */
   private async writeSettingsCandidate(inv: Invocation, input: {
     readonly code: string
     readonly dimension: SettingsDimension
@@ -662,6 +721,8 @@ export class WritingRunner {
     readonly validationError: string | null
     readonly researchPlanId: ArtifactId
     readonly stageKey: string
+    /** Absent for an ordinary settings review. Null is the first review of this line. */
+    readonly checklistPreviousFails?: number | null
   }): Promise<ProducedSettings> {
     const stage = await this.stage(inv, input.stageKey, 'settings', input.refs, {
       dimensionCode: input.code, catalog: input.dimension, revisionInstructions: input.revision?.instructions, validationError: input.validationError,
@@ -679,6 +740,12 @@ export class WritingRunner {
       this.service.saveSettingsReview(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, requestId: requestId(inv.run, reviewKey),
         expectedReviewId: null, childSessionId: review.childSessionId, output: review.structured }))
     const review = candidate.review
+    if ('checklistPreviousFails' in input) {
+      if (review === null) throw new WritingError('corrupt-artifact', 'Open-dimension review was not saved')
+      const fails = openChecklistFailCount(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: review.id }).text)
+      const decision = checklistRepairDecision(input.checklistPreviousFails ?? null, fails)
+      return { kind: 'checklist', decision, candidate, review, fails }
+    }
     if (candidate.status !== 'blocked' && review !== null) return { kind: 'passing', candidate, review }
     return { kind: 'blocked', candidate }
   }
@@ -811,7 +878,13 @@ export class WritingRunner {
     const settingsCollectionKinds = 'target' in candidate && candidate.target.kind === 'settings' ? collectionDimensionKinds(candidate.target.selectedCodes) : undefined
     // The reviewed candidate's own kind, so stage() can limit the host-owned chapter-total range to book-outline/chapter-outline/body and their reviews.
     const reviewedKind: StagePromptKind = 'dimensionCode' in candidate ? 'settings' : candidate.target.kind
+    const promptVersion = promptVersionOf(inv.run)
+    const openCode = promptVersion >= 7 && 'dimensionCode' in candidate && isOpenChecklistCode(candidate.dimensionCode) ? candidate.dimensionCode : undefined
+    const stored = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id })
+    const paragraphs = promptVersion >= 7 ? paragraphsOfStoredCandidate(stored.kind, stored.text) : undefined
     return this.stage(inv, key, 'review', refs, { reviewed: inputRef(candidate.artifact), requiredChecks, validationError,
+      ...(paragraphs === undefined ? {} : { paragraphs }),
+      ...(openCode === undefined ? {} : { checklistItems: openChecklistItems(openCode) }),
       ...('length' in candidate ? { measuredWordCount: candidate.wordCount, measuredLength: candidate.length } : {}),
       // Version-1 runs keep their original task text; later runs hand the body review host-measured positions to cite.
       ...('beats' in candidate && candidate.beats !== null && promptVersionOf(inv.run) >= 2 ? { measuredBeats: candidate.beats } : {}),
@@ -819,7 +892,8 @@ export class WritingRunner {
       ...('aiTone' in candidate && candidate.aiTone !== null && promptVersionOf(inv.run) >= 3 ? { aiToneMarkers: promptVersionOf(inv.run) >= 7 ? gradeAiTone(candidate.aiTone) : candidate.aiTone } : {}),
       ...(settingsDimensionKind === undefined ? {} : { dimensionKind: settingsDimensionKind }),
       ...(settingsCollectionKinds === undefined ? {} : { dimensionKinds: settingsCollectionKinds }) },
-      [candidate.artifact], settingsDimensionKind, settingsCollectionKinds, reviewedKind)
+      [candidate.artifact], settingsDimensionKind, settingsCollectionKinds, reviewedKind, undefined,
+      openCode === undefined ? undefined : openChecklistNativeSchema(openCode), openCode)
   }
 
   private async research(inv: Invocation, key: string, refs: readonly ArtifactRef[], purpose: string, outputTarget: object) {
@@ -887,7 +961,8 @@ export class WritingRunner {
   }
 
   private async stage(inv: Invocation, key: string, kind: StagePromptKind, refs: readonly ArtifactRef[], task: object, feedback: readonly ArtifactRef[],
-    settingsDimensionKind?: SettingsDimensionKind, settingsCollectionKinds?: Readonly<Record<string, SettingsDimensionKind>>, reviewedKind?: StagePromptKind, repairMode?: RepairMode): Promise<CapturedStage> {
+    settingsDimensionKind?: SettingsDimensionKind, settingsCollectionKinds?: Readonly<Record<string, SettingsDimensionKind>>, reviewedKind?: StagePromptKind, repairMode?: RepairMode,
+    publishedSchema?: object, settingsDimensionCode?: OpenChecklistCode): Promise<CapturedStage> {
     const allRefs = uniqueRefs([...refs, ...feedback])
     // Chinese counting treats each CJK character as a word: stating the chapter-total range on a settings/continuity stage reads as "write N characters" and contradicts the classification bound. Versions before 7 state it on book-outline, chapter-outline and body (and reviews of them). Version 7 states it only for a body, where the host actually counts.
     const promptVersion = promptVersionOf(inv.run)
@@ -915,11 +990,12 @@ export class WritingRunner {
           ? 'Condense or expand across all scenes to reach the aim; preserve required events, established facts and scene identities rather than passage wording.'
           : 'Repair the defects documented in the supplied prior candidate and review. Preserve unaffected facts and passages and return the entire candidate.'] : []),
       ], ...(settingsDimensionKind === undefined ? {} : { settingsDimensionKind }), ...(settingsCollectionKinds === undefined ? {} : { settingsCollectionKinds }),
-      ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}), promptVersion,
+      ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}),
+      ...(settingsDimensionCode === undefined ? {} : { settingsDimensionCode }), promptVersion,
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}) })
     // Settings, outlines, body, continuity, continuity snapshots, and their repairs only write text. Review stays on a subagent.
     const direct = kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot'
-    return this.capture(inv, key, prompt, allRefs, nativeStageOutputSchema(kind, promptVersion), direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, stageWritingRole(kind), direct)
+    return this.capture(inv, key, prompt, allRefs, publishedSchema ?? nativeStageOutputSchema(kind, promptVersion), direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, stageWritingRole(kind), direct)
   }
 
   private feedChars(inv: Invocation, ref: ArtifactRef, chapterNumber: number): number {
@@ -1120,6 +1196,14 @@ function lengthRepairError(wordCount: number | null, status: 'too-short' | 'too-
   const over = status === 'too-long'
   const scenes = body.scenes.map(scene => `${scene.sceneId} ${countStoryWords(scene.text)}`).join(', ')
   return `The host counted ${wordCount} Story-counted words (accepted ${limits.minChapterWords}–${limits.maxChapterWords}): ${over ? `${wordCount - limits.maxChapterWords} over the maximum` : `${limits.minChapterWords - wordCount} under the minimum`}. Scene counts: ${scenes}. Return the complete chapter at about ${chapterAim(limits, promptVersion)} words by ${over ? 'condensing' : 'expanding'} every scene proportionally; keep every required event, scene identity and the chapter's actual outcome.`
+}
+
+function openChecklistFailCount(text: string): number {
+  const parsed = JSON.parse(text) as { checklist?: { failCount?: unknown } }
+  if (typeof parsed.checklist?.failCount !== 'number' || !Number.isInteger(parsed.checklist.failCount) || parsed.checklist.failCount < 0) {
+    throw new WritingError('corrupt-artifact', 'Open-dimension review has no checklist fail count')
+  }
+  return parsed.checklist.failCount
 }
 
 function isReaderDocument(artifact: ArtifactRef): boolean {

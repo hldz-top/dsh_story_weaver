@@ -1,7 +1,8 @@
 /** Native DSH publication of the canonical writing-stage schemas. */
 import { assertObjectJsonSchema, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
-import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, StageOutputSchemas } from './stage-output.ts'
+import { openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
+import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, reviewParagraphSchema, StageOutputSchemas } from './stage-output.ts'
 import { CURRENT_PROMPT_VERSION, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 
 const nativeFields = new Set(['type', 'required', 'additionalProperties', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -65,6 +66,7 @@ export function projectNativeStageSchema(schema: object): ObjectJsonSchema {
  * @param kind - The canonical stage schema selected by the writing run.
  * @param promptVersion - The run's prompt version. Version 1 chapter outlines omit `stateNotes`. Versions before 7 still
  * require `targetWords`. Version 7 book and chapter outlines omit it, so the model is not asked for a word number.
+ * Version 7 reviews cite `{ paragraphId, problem }` instead of a copied quote.
  * @returns An object-root schema; the caller must still run canonical admission.
  */
 export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION): ObjectJsonSchema {
@@ -73,6 +75,13 @@ export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: Pr
     ? kind === 'book-outline' ? bookOutlineSchemaV7 : chapterOutlineSchemaV7
     : kind === 'chapter-outline'
       ? promptVersion === 1 ? chapterOutlineSchemaV1 : chapterOutlineSchemaLegacy
-      : kind === 'book-outline' ? bookOutlineSchemaLegacy : StageOutputSchemas[kind]
+      : kind === 'book-outline' ? bookOutlineSchemaLegacy
+        : kind === 'review' && promptVersion >= 7 ? reviewParagraphSchema
+          : StageOutputSchemas[kind]
   return projectNativeStageSchema(z.toJSONSchema(schema, { io: 'input' }))
+}
+
+/** @param code - g4 or g7. @returns Native object schema of that dimension's fixed checklist. */
+export function openChecklistNativeSchema(code: OpenChecklistCode): ObjectJsonSchema {
+  return projectNativeStageSchema(z.toJSONSchema(openChecklistModelSchema(code), { io: 'input' }))
 }

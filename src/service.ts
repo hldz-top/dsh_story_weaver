@@ -14,9 +14,16 @@ import { parseSelectedFindings, researchEvidenceContentSchema, researchPlanConte
 
 import { settingsCatalog } from './settings-catalog.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
-import { parseSettingsDimensionOutput, parseReviewOutput, checkSettingsDimensionScope } from './stage-output.ts'
+import { paragraphsOfStoredCandidate } from './candidate-paragraphs.ts'
+import { isOpenChecklistCode } from './open-dimension-checklist.ts'
+import { hasParagraphCitation } from './paragraphs.ts'
+import { admitOpenDimensionChecklist, parseSettingsDimensionOutput, parseReviewOutput, checkSettingsDimensionScope } from './stage-output.ts'
 import type { ApplySettingsCandidateRequest, ImportSettingsRequest, SaveSettingsReviewRequest, SaveSettingsCandidateRequest, SettingsCandidateView, SettingsView } from './settings.ts'
 import { ManuscriptStore, type AssembleSettingsRequest, type ManuscriptCandidateView, type ManuscriptView, type SaveManuscriptReviewRequest, type ApplyManuscriptCandidateRequest, type ManuscriptLimits, type ManuscriptContext, type GeneratedManuscriptTarget, type SaveManuscriptCandidateRequest, type ApplyChapterRequest, type AppliedChapterView, type SaveContinuitySnapshotRequest, type AttachContinuitySnapshotRequest } from './manuscript.ts'
+
+function isRawChecklist(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && 'items' in value && !('checks' in value)
+}
 
 function researchContent<T>(schema: z.ZodType<T>, text: string): T {
   try { return schema.parse(JSON.parse(text)) }
@@ -722,8 +729,14 @@ export class WritingService {
       if (artifact.sha256 !== ref.sha256) throw new WritingError('corrupt-artifact', 'Review source differs from its saved hash')
       return { artifactId: artifact.id, text: artifact.text }
     })
-    return parseReviewOutput(output, { reviewed: { artifactId: candidate.artifact.id, sha256: candidate.artifact.sha256 }, inputRefs: candidate.inputRefs,
-      requiredChecks: ['completeness', 'consistency'], evidenceSources: sources, acceptAdvisoryCompleteness: true })
+    const reviewed = { artifactId: candidate.artifact.id, sha256: candidate.artifact.sha256 }
+    const stored = this.getArtifact(actor, { novelId: novel.id, artifactId: candidate.artifact.id })
+    if (isOpenChecklistCode(candidate.dimensionCode) && isRawChecklist(output)) {
+      return admitOpenDimensionChecklist(output, { dimensionCode: candidate.dimensionCode, reviewed, inputRefs: candidate.inputRefs,
+        paragraphs: paragraphsOfStoredCandidate(stored.kind, stored.text), evidenceSources: sources })
+    }
+    return parseReviewOutput(output, { reviewed, inputRefs: candidate.inputRefs, requiredChecks: ['completeness', 'consistency'], evidenceSources: sources,
+      acceptAdvisoryCompleteness: true, ...(hasParagraphCitation(output) ? { paragraphs: paragraphsOfStoredCandidate(stored.kind, stored.text) } : {}) })
   }
 
   private validateSettings(actor: Actor, novel: NovelRecord, candidate: SettingsRecord, seen = new Set<ArtifactId>()): void {

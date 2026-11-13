@@ -4,6 +4,14 @@ import { useWritingFixture, type WritingFixtureStage } from './support/writing-f
 
 const reviewedKind = (stage: WritingFixtureStage) => stage.task?.reviewed ? stage.sources.get(stage.task.reviewed.artifactId)?.kind : undefined
 
+/** Quote reattribution is the citation style of prompt versions before 7. Version 7 cites paragraph ids instead. */
+async function resumeVersion6(fixture: Awaited<ReturnType<typeof useWritingFixture>>, throughChapter: number) {
+  const begun = await fixture.runs.begin(fixture.actor, { ...fixture.input, throughChapter, revision: null,
+    executionLimits: fixture.runner.limits, serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits } }, 6)
+  await fixture.runs.finish(fixture.actor, begun.id, 'stopped', 'Stored on prompt version 6.')
+  return fixture.run(exec => fixture.runner.resume(exec, begun.id, false))
+}
+
 /**
  * A correct, verbatim quote of the reviewed candidate labeled with another admitted input's id must be
  * reattributed by the host for every review stage, without spending a repair: with maxRepairAttempts 0
@@ -24,7 +32,7 @@ describe('mislabeled review quote source is reattributed in every review stage',
       target = { reviewed: evidence.artifactId, declared: other.artifactId, quote: evidence.quote }
       return { ...review, checks: [{ ...check!, evidence: [{ ...evidence, artifactId: other.artifactId }, ...check!.evidence.slice(1)] }, ...rest] }
     } })
-    const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
+    const outcome = await resumeVersion6(fixture, 1)
     if (outcome.status === 'rejected') throw outcome.reason
     expect(target, `no ${kind} review ran`).toBeDefined()
     expect(outcome.value.error).toBeNull()
@@ -55,7 +63,7 @@ describe('mislabeled review quote source is reattributed in every review stage',
       const [check, ...rest] = review.checks
       return { ...review, checks: [{ ...check!, evidence: [{ artifactId: research.artifactId, quote: QUOTE }] }, ...rest] }
     } })
-    const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
+    const outcome = await resumeVersion6(fixture, 1)
     if (outcome.status === 'rejected') throw outcome.reason
     expect(ids).toBeDefined()
     expect(outcome.value.error).toBeNull()
@@ -83,7 +91,7 @@ describe('mislabeled review quote source is reattributed in every review stage',
       target = { matches, declared: other.artifactId }
       return { ...review, checks: [{ ...check!, evidence: [{ ...evidence, artifactId: other.artifactId }, ...check!.evidence.slice(1)] }, ...rest] }
     } })
-    const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
+    const outcome = await resumeVersion6(fixture, 1)
     if (outcome.status === 'rejected') throw outcome.reason
     expect(outcome.value.error).toBeNull()
     expect(outcome.value.status).toBe('completed')
@@ -111,7 +119,7 @@ describe('drop and downgrade apply in every review stage, with recorded events a
         checks: [{ ...check!, evidence: [...check!.evidence, { artifactId: evidence.artifactId, quote: INVENTED }] }, ...rest],
         issues: [...review.issues, { id: 'qa-invented', severity: 'blocking', category: check!.category, location: '全篇', message: '引文无法核对的阻断问题。', evidence: [{ artifactId: evidence.artifactId, quote: INVENTED }] }] }
     } })
-    const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
+    const outcome = await resumeVersion6(fixture, 1)
     if (outcome.status === 'rejected') throw outcome.reason
     expect(injected).toBe(true)
     expect(outcome.value.error).toBeNull()
@@ -134,7 +142,7 @@ describe('host-repaired evidence in a generated manuscript candidate stays verif
       target = { declared: other.artifactId, quote: evidence.quote }
       return { ...continuity, timeline: [{ ...entry!, evidence: [{ ...evidence, artifactId: other.artifactId }, ...entry!.evidence.slice(1)] }, ...rest] }
     } })
-    const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
+    const outcome = await resumeVersion6(fixture, 1)
     if (outcome.status === 'rejected') throw outcome.reason
     expect(target).toBeDefined()
     expect(outcome.value.error).toBeNull()

@@ -142,7 +142,7 @@ it('shows full body repair versions while never applying the mechanically short 
 it('stops after repeated blocking body reviews without starting continuity or the next chapter', async () => {
   const fixture = await useWritingFixture({ intervene(stage, output) {
     if (stage.kind !== 'review' || stage.task?.reviewed === undefined || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'body') return output
-    const review = StageOutputSchemas.review.parse(output)
+    const review = output as { checks: { evidence: unknown[] }[] }
     return { ...review, issues: [{ id: 'conflict', category: 'consistency', severity: 'blocking', location: 'First scene', message: 'A required character constraint is contradicted.', evidence: review.checks[0]!.evidence }] }
   } })
   const outcome = await fixture.run(exec => fixture.runner.start(exec, fixture.input))
@@ -382,14 +382,18 @@ it('regenerates an over-bound classification settings candidate and carries its 
 it('repairs a settings review whose quote adds words to its source by rewriting only that citation, not the whole review', async () => {
   // Mirrors live run run_2a372815: the model prefixed "进一步确认" to an exact a4 excerpt.
   let misquoted = false
-  let original: ReturnType<typeof StageOutputSchemas.review.parse> | undefined
+  let original: { checks: { summary: string }[] } | undefined
   const fixture = await useWritingFixture({ intervene(stage, output) {
     if (stage.kind !== 'review' || misquoted) return output
     misquoted = true
-    const review = StageOutputSchemas.review.parse(output)
+    const review = output as { checks: { evidence: { paragraphId?: string; problem?: string; quote?: string }[] }[] }
     const [check, ...rest] = review.checks
-    original = { ...review, checks: [{ ...check!, evidence: [{ ...check!.evidence[0]!, quote: `进一步确认${check!.evidence[0]!.quote}` }] }, ...rest] }
-    return original
+    const cited = check!.evidence[0]!
+    const misquotedReview = { ...review, checks: [{ ...check!, evidence: [cited.paragraphId === undefined
+      ? { ...cited, quote: `进一步确认${cited.quote}` }
+      : { paragraphId: 'p99', problem: `进一步确认${cited.problem}` }] }, ...rest] }
+    original = misquotedReview as unknown as { checks: { summary: string }[] }
+    return misquotedReview
   } })
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
@@ -407,8 +411,10 @@ it('repairs a settings review whose quote adds words to its source by rewriting 
   // The admitted review is the prior value with only checks[0].evidence replaced.
   const a1 = fixture.service.getSettings(fixture.actor, fixture.input.novelId).history.find(item => item.dimensionCode === 'a1' && item.review !== null)!
   const saved = StageOutputSchemas.review.parse(JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.input.novelId, artifactId: a1.review!.id }).text))
-  expect({ ...saved, checks: saved.checks.slice(1) }).toEqual({ ...original!, checks: original!.checks.slice(1) })
-  expect({ ...saved.checks[0], evidence: [] }).toEqual({ ...original!.checks[0], evidence: [] })
+  const reviewStage = [...fixture.stages.values()].find(stage => stage.kind === 'review' && stage.task?.paragraphs !== undefined)!
+  expect(saved.checks.slice(1).map(check => check.summary)).toEqual(original!.checks.slice(1).map(check => check.summary))
+  expect(saved.checks[1]!.evidence[0]!.quote).toBe(reviewStage.task!.paragraphs![0]!.text)
+  expect(saved.checks[0]!.summary).toBe(original!.checks[0]!.summary)
   expect(saved.checks[0]!.evidence[0]!.quote).not.toContain('进一步确认')
 })
 
@@ -448,9 +454,12 @@ it('drops an unresolvable citation from an item that keeps other valid evidence 
   const fixture = await useWritingFixture({ intervene(stage, output) {
     if (stage.kind !== 'review' || injected) return output
     injected = true
-    const review = StageOutputSchemas.review.parse(output)
+    const review = output as { checks: { evidence: { paragraphId?: string; artifactId?: string }[] }[] }
     const [check, ...rest] = review.checks
-    return { ...review, checks: [{ ...check!, evidence: [...check!.evidence, { artifactId: check!.evidence[0]!.artifactId, quote: '这句话从未出现在任何输入中。' }] }, ...rest] }
+    const extra = check!.evidence[0]!.paragraphId === undefined
+      ? { artifactId: check!.evidence[0]!.artifactId, quote: '这句话从未出现在任何输入中。' }
+      : { paragraphId: 'p99', problem: '这句话从未出现在任何输入中。' }
+    return { ...review, checks: [{ ...check!, evidence: [...check!.evidence, extra] }, ...rest] }
   } })
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
@@ -637,7 +646,7 @@ it.each(['settings-dimension', 'book-outline', 'body'] as const)('keeps the revi
   const fixture = await useWritingFixture({ intervene(stage, output) {
     if (blocked || stage.kind !== 'review' || stage.task?.reviewed === undefined || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== reviewedKind) return output
     blocked = true
-    const review = StageOutputSchemas.review.parse(output)
+    const review = output as { checks: { category: string; evidence: unknown[] }[] }
     return { ...review, issues: [{ id: 'conflict', category: review.checks[0]!.category, severity: 'blocking', location: 'First scene', message: 'A required character constraint is contradicted.', evidence: review.checks[0]!.evidence }] }
   } })
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))

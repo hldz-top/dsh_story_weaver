@@ -2,7 +2,6 @@
 import { expect, it } from 'vitest'
 import { z } from 'zod'
 import type { ArtifactId } from '../src/contracts.ts'
-import { StageOutputSchemas } from '../src/stage-output.ts'
 import { useWritingFixture } from './support/writing-fixture.ts'
 
 function fulfilled<T>(outcome: PromiseSettledResult<T>): T {
@@ -23,7 +22,7 @@ it('replays the complete blocked collection and retains its internal review afte
       if (blockedCollection || stage.kind !== 'review' || stage.task?.reviewed === undefined
         || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'settings') return output
       blockedCollection = true
-      const review = StageOutputSchemas.review.parse(output)
+      const review = output as { checks: { evidence: unknown[] }[] }
       return { ...review, issues: [{ id: 'collection-conflict', category: 'consistency', severity: 'blocking', location: 'Selected dimensions',
         message: 'Repair the selected dimension before accepting this collection.', evidence: review.checks[0]!.evidence }] }
     },
@@ -84,7 +83,7 @@ it('replays rejected review admission after a native repair interruption without
       return output
     }
     malformedCollection = true
-    const review = StageOutputSchemas.review.parse(output)
+    const review = output as { reviewed: { artifactId: string; sha256: string }; checks: { evidence: unknown[] }[] }
     return { ...review, reviewed: { ...review.reviewed, sha256: '0'.repeat(64) },
       issues: [{ id: 'unadmitted-collection-conflict', category: 'consistency', severity: 'blocking', location: 'Selected dimensions',
         message: 'This invalid review cannot authorize collection repair.', evidence: review.checks[0]!.evidence }] }
@@ -110,7 +109,7 @@ it('replays rejected review admission after a native repair interruption without
   if (firstReview === undefined) throw new Error('The raw review attempt was not retained')
   expect(firstReview.status).toBe('succeeded')
   const raw = fixture.runs.readOutput(fixture.actor, failed.id, firstReview.id)
-  expect(StageOutputSchemas.review.parse(JSON.parse(raw.text)).reviewed.sha256).toBe('0'.repeat(64))
+  expect((JSON.parse(raw.text) as { reviewed: { sha256: string } }).reviewed.sha256).toBe('0'.repeat(64))
   const requestsAtFailure = fixture.childRequests.length
   const completed = fulfilled(await fixture.run(exec => fixture.runner.resume(exec, failed.id, true)))
   expect(completed.error).toBeNull()

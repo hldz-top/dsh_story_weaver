@@ -50,6 +50,8 @@ This parser is structural, so stored candidates and replayed requests always par
 
 All citations must identify either the exact reviewed candidate or a declared input, and their quotes must occur in supplied text. There is no model-authored approval field. The host derives whether a validated review permits progress from its issues and the independent mechanical checks.
 
+Prompt version 7 publishes `{ paragraphId, problem }` in place of `{ artifactId, quote }`. The host re-splits the reviewed candidate body into paragraphs (`p1`, `p2`, …), maps the id to that paragraph, and then runs the verbatim quote check on the paragraph text. The same text splits to the same ids and content hashes; a repair re-splits the new text. An unknown id is admitted as a quote of `problem`, so the existing quote rejection and citation repair still apply. Versions before 7 keep copied quotes. `admitOpenDimensionChecklist` accepts a g4 or g7 checklist of fixed `pass | fail | na` items. A fail must name a paragraph id. The stored review records `checklist.failCount` and keeps each fail as an advisory style issue.
+
 ## Book outline
 
 `parseBookOutlineOutput(value, { inputRefs, chapterCount })` returns `BookOutlineOutput`. Chapters must appear in order from 1 through the exact requested count. Obligation IDs are unique across the entire book outline.

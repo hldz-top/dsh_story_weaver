@@ -43,6 +43,8 @@ const taskSchema = z.object({
   reviewed: inputRef.optional(), bodyId: artifactIdSchema.optional(),
   measuredWordCount: z.number().nullable().optional(),
   measuredLength: z.object({ status: z.enum(['within-range', 'too-short', 'too-long']), blocking: z.boolean() }).nullable().optional(),
+  paragraphs: z.array(z.object({ id: z.string(), sha256: z.string(), text: z.string() })).optional(),
+  checklistItems: z.array(z.object({ id: z.string(), statement: z.string() })).optional(),
 })
 const pageSchema = z.object({
   novelId: novelIdSchema, artifactId: artifactIdSchema, kind: z.enum(artifactKinds), revision: z.number(), sha256: z.string(),
@@ -241,7 +243,10 @@ function generate(state: ChildState): object {
     }
     case 'review': {
       const reviewed = required(task.reviewed, 'reviewed')
-      const evidence = [{ artifactId: reviewed.artifactId, quote: quoteCandidate(source(state, reviewed.artifactId)) }]
+      if (task.checklistItems !== undefined) return { ...base, reviewed, items: task.checklistItems.map(item => ({ id: item.id, status: 'pass' as const })) }
+      const evidence = task.paragraphs !== undefined && task.paragraphs.length > 0
+        ? [{ paragraphId: task.paragraphs[0]!.id, problem: 'The cited paragraph is the candidate passage this check covers.' }]
+        : [{ artifactId: reviewed.artifactId, quote: quoteCandidate(source(state, reviewed.artifactId)) }]
       const checks = required(task.requiredChecks, 'requiredChecks').map(category => ({ category, summary: category === 'length' ? `Host word count ${task.measuredWordCount}; ${task.measuredLength?.status}.` : `The exact candidate was read for the required ${category} check.`, evidence }))
       const issues = task.measuredLength?.blocking === true ? [{ id: 'fixture-length', severity: 'blocking', category: 'length', location: 'Complete chapter', message: 'The host measured this body outside the required chapter-total range.', evidence }] : []
       return { ...base, reviewed, checks, issues }
