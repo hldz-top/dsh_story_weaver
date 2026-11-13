@@ -19,7 +19,7 @@ function lastLine(text: string | null | undefined): Record<string, unknown> {
 }
 
 describe('prompt version 5', () => {
-  it('is no longer the version new runs record', () => { expect(CURRENT_PROMPT_VERSION).toBe(7) })
+  it('is no longer the version new runs record', () => { expect(CURRENT_PROMPT_VERSION).toBe(8) })
 
   it('keeps every stage byte-identical to version 4 unless a body review has the switch on', () => {
     for (const kind of kinds) for (const reviewedKind of [undefined, ...kinds]) {
@@ -155,15 +155,10 @@ async function scripted(script: Script, options: WritingFixtureOptions = {}) {
 }
 
 async function write(fixture: Awaited<ReturnType<typeof useWritingFixture>>, version: 6 | 7 = 7): Promise<WritingRun> {
-  if (version === 6) {
-    const begun = await fixture.runs.begin(fixture.actor, { ...fixture.input, chapterCount: 1, throughChapter: 1, revision: null,
-      executionLimits: fixture.runner.limits, serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits } }, 6)
-    await fixture.runs.finish(fixture.actor, begun.id, 'stopped', 'Stored on prompt version 6.')
-    const outcome = await fixture.run(exec => fixture.runner.resume(exec, begun.id, false))
-    if (outcome.status === 'rejected') throw outcome.reason
-    return outcome.value
-  }
-  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
+  const begun = await fixture.runs.begin(fixture.actor, { ...fixture.input, chapterCount: 1, throughChapter: 1, revision: null,
+    executionLimits: fixture.runner.limits, serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits } }, version)
+  await fixture.runs.finish(fixture.actor, begun.id, 'stopped', `Stored on prompt version ${version}.`)
+  const outcome = await fixture.run(exec => fixture.runner.resume(exec, begun.id, false))
   if (outcome.status === 'rejected') throw outcome.reason
   return outcome.value
 }
@@ -380,7 +375,7 @@ describe('resume rules', () => {
   it('(3) refuses a current-version run whose recorded value differs from the current config, in the limit-mismatch style', async () => {
     const fixture = await useWritingFixture()
     const stopped = await begin(fixture, { ...fixture.runner.limits, aiToneBlocking: false })
-    expect(stopped).toMatchObject({ promptVersion: 7, executionLimits: { aiToneBlocking: false } })
+    expect(stopped).toMatchObject({ promptVersion: 8, executionLimits: { aiToneBlocking: false } })
     const outcome = await fixture.run(exec => fixture.runner.resume(exec, stopped.id, false))
     expect(outcome).toMatchObject({ status: 'rejected', reason: { code: 'run-limits', message: expect.stringContaining('Restore the captured writing and research limits before resuming') } })
     if (outcome.status !== 'rejected') throw new Error('Resume was not refused')

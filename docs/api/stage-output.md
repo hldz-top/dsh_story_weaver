@@ -52,6 +52,8 @@ All citations must identify either the exact reviewed candidate or a declared in
 
 Prompt version 7 publishes `{ paragraphId, problem }` in place of `{ artifactId, quote }`. The host re-splits the reviewed candidate body into paragraphs (`p1`, `p2`, …), maps the id to that paragraph, and then runs the verbatim quote check on the paragraph text. The same text splits to the same ids and content hashes; a repair re-splits the new text. An unknown id is admitted as a quote of `problem`, so the existing quote rejection and citation repair still apply. Versions before 7 keep copied quotes. `admitOpenDimensionChecklist` accepts a g4 or g7 checklist of fixed `pass | fail | na` items. A fail must name a paragraph id. The stored review records `checklist.failCount` and keeps each fail as an advisory style issue.
 
+Prompt version 8 publishes optional `briefQuote` on each issue. On admission of a version-8 model review, `check.summary`, `issue.message`, and `evidence.problem` must contain a Han character, and a blocking `completeness` or `obligations` issue must set `briefQuote` to a verbatim excerpt of the creative brief. A missing or non-matching excerpt rejects the review. Stored reviews from earlier versions omit the field and are read back without those checks. The version-7 published schema does not include `briefQuote`.
+
 ## Book outline
 
 `parseBookOutlineOutput(value, { inputRefs, chapterCount })` returns `BookOutlineOutput`. Chapters must appear in order from 1 through the exact requested count. Obligation IDs are unique across the entire book outline.

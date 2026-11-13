@@ -6,7 +6,7 @@ import { planSettings } from './settings-plan.ts'
 import { manuscriptTargetSchema, settingsCollectionSchema, type ManuscriptRecord } from './manuscript-records.ts'
 import { paragraphsOfStoredCandidate } from './candidate-paragraphs.ts'
 import { hasParagraphCitation } from './paragraphs.ts'
-import { parseBodyOutput, parseBookOutlineOutput, parseChapterOutlineOutput, parseContinuityOutput, parseContinuitySnapshot, parseReviewOutput, StageOutputSchemas } from './stage-output.ts'
+import { parseBodyOutput, parseBookOutlineOutput, parseChapterOutlineOutput, parseContinuityOutput, parseContinuitySnapshot, parseReviewOutput, StageOutputSchemas, type ReviewAdmission } from './stage-output.ts'
 import { WritingError } from './contracts.ts'
 import { checkModelArtifactBytes, parseModelOutput } from './stage-rejection.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -76,15 +76,23 @@ export interface ManuscriptCandidateView {
 export interface SaveManuscriptReviewRequest {
   readonly novelId: NovelId; readonly candidateId: ArtifactId; readonly requestId: RequestId; readonly expectedReviewId: ArtifactId | null
   readonly childSessionId: SessionId; readonly output: unknown
+  /** Prompt version 8 model reviews. Readback and earlier prompt versions omit it. */
+  readonly admission?: ReviewAdmission
 }
 /** Standalone settings or outline adoption with a current-head precondition. */
 export interface ApplyManuscriptCandidateRequest {
   readonly novelId: NovelId; readonly candidateId: ArtifactId; readonly reviewId: ArtifactId; readonly expectedAppliedId: ArtifactId | null
+  /** Adopt this review even though it still has this many blocking issues, because a later round did not reduce that count. */
+  readonly convergence?: { readonly failCount: number }
 }
 /** Atomic publication of one reviewed body and its reviewed actual continuity. */
 export interface ApplyChapterRequest {
   readonly novelId: NovelId; readonly bodyId: ArtifactId; readonly bodyReviewId: ArtifactId
   readonly continuityId: ArtifactId; readonly continuityReviewId: ArtifactId; readonly expectedBodyId: ArtifactId | null; readonly expectedContinuityId: ArtifactId | null
+  /** Body review adopted because a later round did not reduce its blocking-issue count. */
+  readonly bodyConvergence?: { readonly failCount: number }
+  /** Continuity review adopted because a later round did not reduce its blocking-issue count. */
+  readonly continuityConvergence?: { readonly failCount: number }
 }
 /** Current chapter application with mechanically recomputed count and source validity. */
 export interface AppliedChapterView extends AppliedChapterRecord { readonly wordCount: number; readonly stale: boolean; readonly changedInputs: readonly StageInputRef[] }
@@ -143,7 +151,7 @@ export class ManuscriptStore {
     const novel = this.record(actor, request.novelId)
     const candidate = this.candidate(novel, request.candidateId)
     this.validateCandidate(actor, novel, candidate)
-    const output = this.reviewOutput(actor, novel, candidate, request.output)
+    const output = this.reviewOutput(actor, novel, candidate, request.output, request.admission)
     const hash = digest([request.childSessionId, request.expectedReviewId, output])
     const replay = candidate.reviewHistory.find(item => item.request.requestId === request.requestId)
     if (replay !== undefined) { sameRequest(replay.request.hash, hash); return this.view(actor, novel, candidate) }
@@ -171,18 +179,19 @@ export class ManuscriptStore {
     const novel = this.record(actor, request.novelId)
     const candidate = this.candidate(novel, request.candidateId)
     if (candidate.target.kind === 'body' || candidate.target.kind === 'continuity' || candidate.target.kind === 'continuity-snapshot') throw new WritingError('review-blocked', 'Body and continuity must apply together')
-    this.passingReview(actor, novel, candidate, request.reviewId)
+    this.passingReview(actor, novel, candidate, request.reviewId, request.convergence)
     if (candidate.applied) return this.view(actor, novel, candidate)
     const updated = await this.domain.table('novels').update(novel.id, current => {
       actor.signal?.throwIfAborted()
       const active = this.candidate(current, candidate.artifact.id)
-      this.passingReview(actor, current, active, request.reviewId)
+      this.passingReview(actor, current, active, request.reviewId, request.convergence)
       if (active.applied) return current
       this.currentInputs(actor, current, active)
       const head = current.manuscriptHeads.find(item => `${item.kind}:${item.chapterNumber}` === slot(active.target))
       if ((head?.artifactId ?? null) !== request.expectedAppliedId || (active.revisionOf !== null && request.expectedAppliedId !== active.revisionOf)) throw new WritingError('revision-conflict', 'A different manuscript version is the current head')
       if (active.target.kind === 'body' || active.target.kind === 'continuity' || active.target.kind === 'continuity-snapshot') throw new WritingError('review-blocked', 'Body and continuity must apply together')
-      return { ...current, manuscriptHistory: current.manuscriptHistory.map(item => item.artifact.id === active.artifact.id ? { ...item, applied: true } : item),
+      const convergence = request.convergence === undefined ? {} : { convergence: { reviewId: request.reviewId, failCount: request.convergence.failCount } }
+      return { ...current, manuscriptHistory: current.manuscriptHistory.map(item => item.artifact.id === active.artifact.id ? { ...item, applied: true, ...convergence } : item),
         manuscriptHeads: [...current.manuscriptHeads.filter(item => `${item.kind}:${item.chapterNumber}` !== slot(active.target)),
           { kind: active.target.kind, chapterNumber: 'chapterNumber' in active.target ? active.target.chapterNumber : null, artifactId: active.artifact.id }] }
     })
@@ -252,7 +261,7 @@ export class ManuscriptStore {
       if (replay.bodyReview.id !== request.bodyReviewId || replay.continuityReview.id !== request.continuityReviewId) throw new WritingError('review-blocked', 'Applied chapter review identities differ from this request')
       return this.chapterView(actor, novel, replay)
     }
-    this.checkedPair(actor, novel, request, this.owner.manuscriptLimits)
+    this.checkedPair(actor, novel, request, this.owner.manuscriptLimits, chapterConvergence(request))
     const updated = await this.domain.table('novels').update(novel.id, current => {
       actor.signal?.throwIfAborted()
       const duplicate = current.appliedChapters.find(item => item.body.id === request.bodyId && item.continuity.id === request.continuityId)
@@ -260,7 +269,7 @@ export class ManuscriptStore {
         if (duplicate.bodyReview.id !== request.bodyReviewId || duplicate.continuityReview.id !== request.continuityReviewId) throw new WritingError('review-blocked', 'Applied chapter review identities differ from this request')
         return current
       }
-      const pair = this.checkedPair(actor, current, request, this.owner.manuscriptLimits)
+      const pair = this.checkedPair(actor, current, request, this.owner.manuscriptLimits, chapterConvergence(request))
       this.currentInputs(actor, current, pair.body)
       this.currentInputs(actor, current, pair.continuity)
       const previous = current.appliedChapters.findLast(item => item.chapterNumber === pair.chapterNumber)
@@ -268,7 +277,11 @@ export class ManuscriptStore {
       const bodyReview = pair.body.reviewHistory.at(-1)
       const continuityReview = pair.continuity.reviewHistory.at(-1)
       if (bodyReview === undefined || continuityReview === undefined || pair.body.artifact.kind !== 'body' || pair.continuity.artifact.kind !== 'continuity') throw new WritingError('corrupt-artifact', 'Reviewed chapter pair is incomplete')
-      return { ...current, manuscriptHistory: current.manuscriptHistory.map(item => item.artifact.id === pair.body.artifact.id || item.artifact.id === pair.continuity.artifact.id ? { ...item, applied: true } : item),
+      return { ...current, manuscriptHistory: current.manuscriptHistory.map(item => {
+        if (item.artifact.id === pair.body.artifact.id) return { ...item, applied: true, ...convergenceOf(request.bodyReviewId, request.bodyConvergence) }
+        if (item.artifact.id === pair.continuity.artifact.id) return { ...item, applied: true, ...convergenceOf(request.continuityReviewId, request.continuityConvergence) }
+        return item
+      }),
         appliedChapters: [...current.appliedChapters, { chapterNumber: pair.chapterNumber,
           body: { ...pair.body.artifact, kind: 'body' as const }, bodyReview: bodyReview.artifact,
           continuity: { ...pair.continuity.artifact, kind: 'continuity' as const }, continuityReview: continuityReview.artifact, obligations: pair.output.obligations, wordBounds: { ...this.owner.manuscriptLimits }, snapshot: null }] }
@@ -352,13 +365,13 @@ export class ManuscriptStore {
     return this.chapterView(actor, updated, saved)
   }
 
-  private checkedPair(actor: Actor, novel: NovelRecord, request: ApplyChapterRequest, bounds: ManuscriptLimits) {
+  private checkedPair(actor: Actor, novel: NovelRecord, request: ApplyChapterRequest, bounds: ManuscriptLimits, convergence?: ChapterConvergence) {
     const body = this.candidate(novel, request.bodyId)
     const continuity = this.candidate(novel, request.continuityId)
     if (body.target.kind !== 'body' || continuity.target.kind !== 'continuity' || continuity.target.bodyId !== body.artifact.id
       || continuity.target.chapterNumber !== body.target.chapterNumber) throw new WritingError('review-blocked', 'Body and continuity must identify the same chapter and exact body version')
-    this.passingReview(actor, novel, body, request.bodyReviewId)
-    this.passingReview(actor, novel, continuity, request.continuityReviewId)
+    this.passingReview(actor, novel, body, request.bodyReviewId, convergence?.body)
+    this.passingReview(actor, novel, continuity, request.continuityReviewId, convergence?.continuity)
     const prose = this.validateCandidate(actor, novel, body)
     const actual = this.validateCandidate(actor, novel, continuity)
     if (prose.kind !== 'body' || actual.kind !== 'continuity') throw new WritingError('corrupt-artifact', 'Chapter pair has incorrect document kinds')
@@ -477,7 +490,9 @@ export class ManuscriptStore {
       if (bodyRecord.target.kind !== 'body' || bodyRecord.target.chapterNumber !== target.chapterNumber || !bodyRecord.reviewHistory.some(item => item.artifact.id === review.id)) throw new WritingError('corrupt-artifact', 'Continuity review does not belong to the requested chapter body')
       const bodyOutput = StageOutputSchemas.body.parse(JSON.parse(body.text))
       const bodyReview = this.reviewOutput(actor, novel, bodyRecord, JSON.parse(review.text))
-      if (bodyReview.issues.some(issue => issue.severity === 'blocking')) throw new WritingError('review-blocked', 'Continuity body still has blocking issues')
+      const blocking = bodyReview.issues.filter(issue => issue.severity === 'blocking')
+      const converged = bodyRecord.convergence?.reviewId === review.id && bodyRecord.convergence.failCount === blocking.length
+      if (blocking.length > 0 && !converged) throw new WritingError('review-blocked', 'Continuity body still has blocking issues')
       const expectedBodySources = sources.slice(0, index).filter(source => source.kind !== 'research-evidence').map(inputRef)
       const actualBodySources = bodyRecord.inputRefs.filter(ref => this.owner.getArtifact(actor, { novelId: novel.id, artifactId: ref.artifactId }).kind !== 'research-evidence')
       if (!sameRefs(actualBodySources, expectedBodySources)) throw new WritingError('corrupt-artifact', 'Continuity and body use different chapter source versions')
@@ -570,7 +585,7 @@ export class ManuscriptStore {
     this.currentInputs(actor, novel, candidate)
   }
 
-  private reviewOutput(actor: Actor, novel: NovelRecord, candidate: ManuscriptRecord, value: unknown) {
+  private reviewOutput(actor: Actor, novel: NovelRecord, candidate: ManuscriptRecord, value: unknown, admission?: ReviewAdmission) {
     const refs = [inputRef(candidate.artifact), ...candidate.inputRefs]
     const evidenceSources = refs.map(ref => {
       const source = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: ref.artifactId })
@@ -580,16 +595,42 @@ export class ManuscriptStore {
     const stored = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: candidate.artifact.id })
     return parseReviewOutput(value, { reviewed: inputRef(candidate.artifact), inputRefs: candidate.inputRefs, requiredChecks: requiredChecks(candidate.target.kind), evidenceSources,
       acceptAdvisoryCompleteness: candidate.target.kind === 'settings',
+      ...(admission === undefined ? {} : { admission }),
       ...(hasParagraphCitation(value) ? { paragraphs: paragraphsOfStoredCandidate(stored.kind, stored.text) } : {}) })
   }
 
-  private passingReview(actor: Actor, novel: NovelRecord, candidate: ManuscriptRecord, reviewId: ArtifactId): void {
+  /**
+   * Remember that this candidate's latest review is the one to keep because a later round did not reduce its blocking-issue count.
+   * Application still checks length and, for a chapter, fulfilled obligations. Continuity may then read this body.
+   */
+  async recordManuscriptConvergence(actor: Actor, request: { novelId: NovelId; candidateId: ArtifactId; reviewId: ArtifactId; failCount: number }): Promise<ManuscriptCandidateView> {
+    actor.signal?.throwIfAborted()
+    const novel = this.record(actor, request.novelId)
+    const candidate = this.candidate(novel, request.candidateId)
+    this.passingReview(actor, novel, candidate, request.reviewId, { failCount: request.failCount })
+    if (candidate.convergence?.reviewId === request.reviewId && candidate.convergence.failCount === request.failCount) return this.view(actor, novel, candidate)
+    const updated = await this.domain.table('novels').update(novel.id, current => {
+      actor.signal?.throwIfAborted()
+      const active = this.candidate(current, candidate.artifact.id)
+      this.passingReview(actor, current, active, request.reviewId, { failCount: request.failCount })
+      if (active.convergence?.reviewId === request.reviewId && active.convergence.failCount === request.failCount) return current
+      return { ...current, manuscriptHistory: current.manuscriptHistory.map(item => item.artifact.id === active.artifact.id
+        ? { ...item, convergence: { reviewId: request.reviewId, failCount: request.failCount } } : item) }
+    })
+    return this.view(actor, updated, this.candidate(updated, candidate.artifact.id))
+  }
+
+  private passingReview(actor: Actor, novel: NovelRecord, candidate: ManuscriptRecord, reviewId: ArtifactId, requested?: { readonly failCount: number }): void {
     this.validateCandidate(actor, novel, candidate)
     const latest = candidate.reviewHistory.at(-1)
     if (latest === undefined || latest.artifact.id !== reviewId) throw new WritingError('review-blocked', 'The latest exact manuscript review is required')
     const artifact = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: reviewId })
     const output = this.reviewOutput(actor, novel, candidate, JSON.parse(artifact.text))
-    if (output.issues.some(issue => issue.severity === 'blocking')) throw new WritingError('review-blocked', 'Manuscript review still has blocking issues')
+    const blocking = output.issues.filter(issue => issue.severity === 'blocking')
+    if (blocking.length === 0) return
+    const stored = candidate.convergence?.reviewId === reviewId && candidate.convergence.failCount === blocking.length
+    const asked = requested !== undefined && requested.failCount === blocking.length
+    if (!stored && !asked) throw new WritingError('review-blocked', 'Manuscript review still has blocking issues')
   }
 
   private validateReviews(actor: Actor, novel: NovelRecord, candidate: ManuscriptRecord): void {
@@ -598,9 +639,12 @@ export class ManuscriptStore {
         const artifact = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: review.artifact.id })
         const parsed = this.reviewOutput(actor, novel, candidate, JSON.parse(artifact.text))
         if (review.blocking !== parsed.issues.some(issue => issue.severity === 'blocking')) throw new Error('Review index differs from immutable issues')
+        if (candidate.convergence?.reviewId === review.artifact.id && candidate.convergence.failCount !== parsed.issues.filter(issue => issue.severity === 'blocking').length) throw new Error('Convergence fail count differs from the review')
         if (review.request.hash !== digest([review.childSessionId, candidate.reviewHistory[index - 1]?.artifact.id ?? null, parsed])) throw new Error('Review provenance differs from its publication receipt')
       }
-      if (candidate.applied && (candidate.reviewHistory.length === 0 || candidate.reviewHistory.at(-1)?.blocking)) throw new Error('Applied manuscript has no passing review')
+      const latestReview = candidate.reviewHistory.at(-1)
+      if (candidate.convergence !== undefined && candidate.convergence.reviewId !== latestReview?.artifact.id) throw new Error('Convergence does not name the latest review')
+      if (candidate.applied && (candidate.reviewHistory.length === 0 || (latestReview?.blocking === true && candidate.convergence?.reviewId !== latestReview.artifact.id))) throw new Error('Applied manuscript has no passing review')
       if (candidate.applied && (candidate.target.kind === 'body' || candidate.target.kind === 'continuity')
         && !novel.appliedChapters.some(chapter => chapter.body.id === candidate.artifact.id || chapter.continuity.id === candidate.artifact.id)) throw new Error('Applied body or continuity has no atomic chapter application')
       if (candidate.applied && candidate.target.kind === 'continuity-snapshot'
@@ -730,6 +774,13 @@ export class ManuscriptStore {
   }
 }
 
+interface ChapterConvergence { readonly body?: { readonly failCount: number }; readonly continuity?: { readonly failCount: number } }
+function chapterConvergence(request: ApplyChapterRequest): ChapterConvergence {
+  return { ...(request.bodyConvergence === undefined ? {} : { body: request.bodyConvergence }), ...(request.continuityConvergence === undefined ? {} : { continuity: request.continuityConvergence }) }
+}
+function convergenceOf(reviewId: ArtifactId, convergence: { readonly failCount: number } | undefined): { convergence?: { reviewId: ArtifactId; failCount: number } } {
+  return convergence === undefined ? {} : { convergence: { reviewId, failCount: convergence.failCount } }
+}
 function digest(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex') }
 function sameRequest(stored: string, received: string): void { if (stored !== received) throw new WritingError('request-conflict', 'Request ID was already used with different input') }
 function inputRef(ref: ArtifactRef): StageInputRef { return { artifactId: ref.id, sha256: ref.sha256 } }

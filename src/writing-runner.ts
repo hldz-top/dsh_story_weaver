@@ -20,7 +20,7 @@ import { batchDimensionKind, batchFactStatement, dimensionDocument, parseSetting
 import { StageValidationRejection } from './stage-rejection.ts'
 import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
-import { EvidenceRejection, StageOutputSchemas, type BodyOutput, type ReviewCategory, type StageInputRef } from './stage-output.ts'
+import { blockingIssueCount, EvidenceRejection, StageOutputSchemas, type BodyOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { countStoryWords } from './body-text.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
@@ -62,8 +62,14 @@ export type GradedStage = 'planning' | 'candidate' | 'review' | 'body' | 'repair
 
 /** Research planning. */
 export const PLANNING_STAGE_TIMEOUT_MS = 600_000
-/** Settings, outline and continuity candidate generation, including a batch draft, its comparison drafts, and a dimension's extra first-pass slots. */
+/** Settings drafts, batch drafts, comparison slots, and a continuity-snapshot's first candidate. Outline and continuity first candidates use {@link OUTLINE_FIRST_CANDIDATE_TIMEOUT_MS}. */
 export const CANDIDATE_STAGE_TIMEOUT_MS = 600_000
+/**
+ * First generation of a book outline, chapter outline, or continuity candidate (`…/candidate/0`).
+ * These documents are the long JSON that exhausted 600s. Later `/candidate/1` repairs stay on {@link REPAIR_STAGE_TIMEOUT_MS}.
+ * Settings drafts and continuity snapshots do not use this deadline.
+ */
+export const OUTLINE_FIRST_CANDIDATE_TIMEOUT_MS = 1_200_000
 /** Review children use this deadline. */
 export const REVIEW_STAGE_TIMEOUT_MS = 1_200_000
 /** Body generation, including a body replacement under the same candidate key family. */
@@ -117,13 +123,19 @@ export function gradedStageOf(key: string): GradedStage | undefined {
   return Number(candidate[1]) === 0 ? 'candidate' : 'repair'
 }
 
+/** Book outline, chapter outline, and continuity first candidates. Repairs and every other candidate/0 stay on their grade. */
+const OUTLINE_FIRST_CANDIDATE_KEY = /^(?:book-outline\/book|chapter-outline\/[1-9][0-9]*|continuity\/[1-9][0-9]*)\/candidate\/0$/
+
 /**
  * Deadline for one stage key.
+ * A book-outline, chapter-outline, or continuity `candidate/0` uses {@link OUTLINE_FIRST_CANDIDATE_TIMEOUT_MS}.
+ * Other graded keys use their grade. Research execution uses `configuredMs`.
  * @param key - Durable stage key.
  * @param configuredMs - The run's stageTimeoutMs, used only for an ungraded stage.
- * @returns The graded deadline, or `configuredMs` for research execution.
+ * @returns The deadline in milliseconds.
  */
 export function stageDeadlineMs(key: string, configuredMs: number): number {
+  if (OUTLINE_FIRST_CANDIDATE_KEY.test(key)) return OUTLINE_FIRST_CANDIDATE_TIMEOUT_MS
   const graded = gradedStageOf(key)
   return graded === undefined ? configuredMs : GRADED_STAGE_TIMEOUT_MS[graded]
 }
@@ -508,11 +520,13 @@ export class WritingRunner {
       return
     }
     const body = await this.generated(inv, { kind: 'body', chapterNumber }, undefined, snapshotThrough)
-    const continuity = await this.generated(inv, { kind: 'continuity', chapterNumber, bodyId: body.artifact.id }, undefined, snapshotThrough)
-    if (body.review === null || continuity.review === null) throw new WritingError('review-blocked', 'Both chapter documents need exact passing reviews')
-    const applied = await this.service.applyChapter(inv.actor, { novelId: inv.run.novelId, bodyId: body.artifact.id, bodyReviewId: body.review.id,
-      continuityId: continuity.artifact.id, continuityReviewId: continuity.review.id,
-      expectedBodyId: existing?.body.id ?? null, expectedContinuityId: existing?.continuity.id ?? null })
+    const continuity = await this.generated(inv, { kind: 'continuity', chapterNumber, bodyId: body.candidate.artifact.id }, undefined, snapshotThrough)
+    if (body.candidate.review === null || continuity.candidate.review === null) throw new WritingError('review-blocked', 'Both chapter documents need exact passing reviews')
+    const applied = await this.service.applyChapter(inv.actor, { novelId: inv.run.novelId, bodyId: body.candidate.artifact.id, bodyReviewId: body.candidate.review.id,
+      continuityId: continuity.candidate.artifact.id, continuityReviewId: continuity.candidate.review.id,
+      expectedBodyId: existing?.body.id ?? null, expectedContinuityId: existing?.continuity.id ?? null,
+      ...(body.convergence === null ? {} : { bodyConvergence: body.convergence }),
+      ...(continuity.convergence === null ? {} : { continuityConvergence: continuity.convergence }) })
     await this.publishSnapshot(inv, applied, snapshotThrough)
   }
 
@@ -571,8 +585,8 @@ export class WritingRunner {
     const base = manuscript.heads.find(item => item.artifact.id === revision.baseArtifactId)
     if (base === undefined || (base.target.kind !== 'book-outline' && base.target.kind !== 'chapter-outline')) throw new WritingError('revision-conflict', 'baseArtifactId must be the current applied settings dimension or outline')
     const candidate = await this.generated(inv, base.target, revision)
-    if (candidate.review === null) throw new WritingError('review-blocked', 'Upstream revision requires a passing review')
-    await this.service.applyManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, reviewId: candidate.review.id, expectedAppliedId: revision.baseArtifactId })
+    if (candidate.candidate.review === null) throw new WritingError('review-blocked', 'Upstream revision requires a passing review')
+    await this.service.applyManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.candidate.artifact.id, reviewId: candidate.candidate.review.id, expectedAppliedId: revision.baseArtifactId, ...(candidate.convergence === null ? {} : { convergence: candidate.convergence }) })
   }
 
   private async settings(inv: Invocation): Promise<void> {
@@ -1040,7 +1054,7 @@ export class WritingRunner {
     }
     candidate = await this.reviewLoop(inv, input.stageKey, candidate, ['completeness', 'consistency'], (review, reviewKey) =>
       this.service.saveSettingsReview(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, requestId: requestId(inv.run, reviewKey),
-        expectedReviewId: null, childSessionId: review.childSessionId, output: review.structured }))
+        expectedReviewId: null, childSessionId: review.childSessionId, output: review.structured, ...this.reviewAdmission(inv) }))
     const review = candidate.review
     if ('checklistPreviousFails' in input) {
       if (review === null) throw new WritingError('corrupt-artifact', 'Open-dimension review was not saved')
@@ -1056,11 +1070,11 @@ export class WritingRunner {
     const current = this.head(inv, target)
     if (current !== undefined && !current.stale && (target.kind !== 'book-outline' || (current.target.kind === 'book-outline' && current.target.chapterCount === target.chapterCount))) { await this.deliver(inv, current.artifact); return }
     const candidate = await this.generated(inv, target, undefined, snapshotThrough)
-    if (candidate.review === null) throw new WritingError('review-blocked', 'Manuscript needs an exact passing review')
-    await this.service.applyManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, reviewId: candidate.review.id, expectedAppliedId: current?.artifact.id ?? null })
+    if (candidate.candidate.review === null) throw new WritingError('review-blocked', 'Manuscript needs an exact passing review')
+    await this.service.applyManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.candidate.artifact.id, reviewId: candidate.candidate.review.id, expectedAppliedId: current?.artifact.id ?? null, ...(candidate.convergence === null ? {} : { convergence: candidate.convergence }) })
   }
 
-  private async generated(inv: Invocation, target: GeneratedManuscriptTarget, revision?: NonNullable<WritingRun['revision']>, snapshotThrough?: number): Promise<ManuscriptCandidateView> {
+  private async generated(inv: Invocation, target: GeneratedManuscriptTarget, revision?: NonNullable<WritingRun['revision']>, snapshotThrough?: number): Promise<{ candidate: ManuscriptCandidateView; convergence: { readonly failCount: number } | null }> {
     const key = revision === undefined ? targetKey(target) : `revision/${revision.baseArtifactId}/${targetKey(target)}`
     const ceiling = snapshotThrough === undefined ? {} : { snapshotThrough }
     const sourceRefs = this.service.manuscriptResearchInputs(inv.actor, { novelId: inv.run.novelId, target, ...ceiling, ...(revision === undefined ? {} : { revisionOf: revision.baseArtifactId }) })
@@ -1072,6 +1086,7 @@ export class WritingRunner {
     // AI-tone gate state (body, prompt version 5, aiToneBlocking on): the previous reviewed round's blocking spans and body text.
     let previousAiTone: { readonly hitKeys: ReadonlySet<string>; readonly body: string } | null = null
     let aiToneSpans: string[] = []
+    let heldReview: { readonly candidate: ManuscriptCandidateView; readonly fails: number } | null = null
     for (let repair = 0; repair <= inv.run.executionLimits.maxRepairAttempts; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       aiToneSpans = []
@@ -1108,7 +1123,19 @@ export class WritingRunner {
         const last = repair === inv.run.executionLimits.maxRepairAttempts
         await this.markAiToneBlock(inv, stageKey, { reason: !last ? 'ai-tone' : repair === 0 ? 'ai-tone' : 'ai-tone-exhausted', spans: aiToneSpans })
       } else previousAiTone = null
-      if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0) return reviewed
+      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0
+      if (promptVersionOf(inv.run) >= 8 && reviewBlocked && reviewed.review !== null) {
+        const fails = blockingIssueCount(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: reviewed.review.id }).text))
+        const decision = checklistRepairDecision(heldReview?.fails ?? null, fails, 'does-not-decrease')
+        if (decision === 'apply-previous') {
+          const held = heldReview
+          if (held?.candidate.review == null) throw new WritingError('corrupt-artifact', 'Outline or manuscript convergence has no candidate to apply')
+          await this.service.recordManuscriptConvergence(inv.actor, { novelId: inv.run.novelId, candidateId: held.candidate.artifact.id, reviewId: held.candidate.review.id, failCount: held.fails })
+          return { candidate: held.candidate, convergence: { failCount: held.fails } }
+        }
+        if (decision === 'continue') heldReview = { candidate: reviewed, fails }
+      }
+      if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0) return { candidate: reviewed, convergence: null }
       if (aiToneSpans.length > 0) { validationError = `${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`; repairMode = 'review' }
       else if (incomplete) { validationError = `Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`; repairMode = 'review' }
       else if (reviewed.length?.blocking) { validationError = lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(result.structured), inv.run.executionLimits, promptVersionOf(inv.run)); repairMode = 'length' }
@@ -1120,10 +1147,17 @@ export class WritingRunner {
     throw new WritingError('review-blocked', `Repair limit was exhausted for ${key}${validationError === null ? '' : `: ${validationError}`}`)
   }
 
+  /** Prompt version 8 model reviews. Earlier runs and host-synthesized reviews omit it. */
+  private reviewAdmission(inv: Invocation): { readonly admission?: ReviewAdmission } {
+    if (promptVersionOf(inv.run) < 8) return {}
+    const brief = this.service.getNovel(inv.actor, inv.run.novelId).brief
+    return { admission: { chinese: true, briefText: this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: brief.id }).text } }
+  }
+
   private async reviewManuscript(inv: Invocation, key: string, candidate: ManuscriptCandidateView, requiredChecks: readonly ReviewCategory[]): Promise<ManuscriptCandidateView> {
     return this.reviewLoop(inv, key, candidate, requiredChecks, (result, reviewKey) => this.service.saveManuscriptReview(inv.actor, {
       novelId: inv.run.novelId, candidateId: candidate.artifact.id, expectedReviewId: null,
-      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured }))
+      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv) }))
   }
 
   /**

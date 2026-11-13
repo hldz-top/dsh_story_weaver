@@ -29,7 +29,7 @@ const runSchema = {
     chapterCount: integer, fromChapter: integer, throughChapter: integer, mode: { ...text, enum: ['write', 'update', 'revise'] },
     status: { ...text, enum: ['running', 'interrupted', 'completed', 'failed', 'stopped'] },
     revision: { required: true, oneOf: [{ type: 'object', additionalProperties: false, properties: { baseArtifactId: text, instructions: text } }, { type: 'null' }] },
-    startedBy: text, lastResumedBy: text, error: nullableText, promptVersion: { type: 'integer', enum: [1, 2, 3, 4, 5, 6, 7] },
+    startedBy: text, lastResumedBy: text, error: nullableText, promptVersion: { type: 'integer', enum: [1, 2, 3, 4, 5, 6, 7, 8] },
     limits: { type: 'object', required: true, additionalProperties: false, properties: { maxAttempts: integer, maxOutputBytes: integer } },
     serviceLimits: { required: true, oneOf: [{ type: 'object', additionalProperties: false, properties: {
       maxArtifactBytes: integer, maxReadChars: integer, maxResearchQuestions: integer, maxResearchCalls: integer,

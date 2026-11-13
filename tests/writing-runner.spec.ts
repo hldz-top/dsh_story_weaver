@@ -139,20 +139,31 @@ it('shows full body repair versions while never applying the mechanically short 
   expect(delivered.filter(item => item.source.kind === 'artifact' && bodyIds.includes(parseArtifactId(item.source.artifactId)))).toHaveLength(2)
 })
 
-it('stops after repeated blocking body reviews without starting continuity or the next chapter', async () => {
-  const fixture = await useWritingFixture({ intervene(stage, output) {
+it('applies the previous body when a later review does not reduce the blocking-issue count', async () => {
+  let reviews = 0
+  const fixture = await useWritingFixture({ executionLimits: { maxRepairAttempts: 2 }, intervene(stage, output) {
     if (stage.kind !== 'review' || stage.task?.reviewed === undefined || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'body') return output
+    reviews += 1
+    if (reviews > 2) return output
     const review = output as { checks: { evidence: unknown[] }[] }
-    return { ...review, issues: [{ id: 'conflict', category: 'consistency', severity: 'blocking', location: 'First scene', message: 'A required character constraint is contradicted.', evidence: review.checks[0]!.evidence }] }
+    return { ...review, issues: [{ id: reviews === 1 ? 'conflict-a' : 'conflict-b', category: 'consistency', severity: 'blocking', location: '首场', message: reviews === 1 ? '人物约束与已接受设定矛盾。' : '另一处人物关系与已接受设定矛盾。', evidence: review.checks[0]!.evidence }] }
   } })
-  const outcome = await fixture.run(exec => fixture.runner.start(exec, fixture.input))
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
-  expect(outcome.value.status).toBe('failed')
-  expect(outcome.value.error).toContain('Repair limit was exhausted')
-  expect(fixture.service.getManuscript(fixture.actor, fixture.novel.id).appliedChapters).toEqual([])
-  expect([...fixture.stages.values()].some(stage => stage.kind === 'continuity' || stage.kind === 'continuity-snapshot')).toBe(false)
-  expect([...fixture.stages.values()].some(stage => stage.kind === 'body' && stage.task?.chapterNumber === 3)).toBe(false)
-})
+  expect(outcome.value.status).toBe('completed')
+  expect(reviews).toBe(2)
+  const keys = outcome.value.attempts.map(item => item.key)
+  expect(keys).toContain('body/1/candidate/0')
+  expect(keys).toContain('body/1/candidate/1')
+  expect(keys.some(key => key.startsWith('body/1/candidate/2'))).toBe(false)
+  const applied = fixture.service.getManuscript(fixture.actor, fixture.novel.id).appliedChapters.find(item => item.chapterNumber === 1)
+  if (applied === undefined) throw new Error('chapter 1 was not applied')
+  const first = outcome.value.attempts.find(item => item.key === 'body/1/candidate/0' && item.status === 'succeeded')
+  expect(first?.childSessionId).toBeDefined()
+  const body = fixture.service.getManuscript(fixture.actor, fixture.novel.id).history.find(item => item.artifact.id === applied.body.id)
+  expect(body?.childSessionId).toBe(first?.childSessionId)
+  expect([...fixture.stages.values()].some(stage => stage.kind === 'continuity')).toBe(true)
+}, 180_000)
 
 it('retries a malformed chapter body response under the same key and completes the run', async () => {
   let injected = false
@@ -646,7 +657,7 @@ it.each(['book-outline', 'body'] as const)('keeps the review repair line, and fo
     if (blocked || stage.kind !== 'review' || stage.task?.reviewed === undefined || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== reviewedKind) return output
     blocked = true
     const review = output as { checks: { category: string; evidence: unknown[] }[] }
-    return { ...review, issues: [{ id: 'conflict', category: review.checks[0]!.category, severity: 'blocking', location: 'First scene', message: 'A required character constraint is contradicted.', evidence: review.checks[0]!.evidence }] }
+    return { ...review, issues: [{ id: 'conflict', category: 'consistency', severity: 'blocking', location: '首场', message: '人物约束与已接受设定矛盾。', evidence: review.checks[0]!.evidence }] }
   } })
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
