@@ -330,6 +330,9 @@ export class WritingRunner {
    * The resume limits comparison: the seven service limits, the two chapter-word bounds and, as the tenth item,
    * aiToneBlocking. Runs before prompt version 5 never recorded the switch and compare as off, so they resume under any
    * current setting and keep advisory AI tone; a version-5 run without the recorded value is corrupt and is refused.
+   * writingModel, researchEnabled and researchBudgetFloor are later fields. A run that never stored one of them is not
+   * a mismatch and is not back-filled: it keeps the parent model, still researches, and uses floor 1, whatever the
+   * current plugin defaults are. A present value is compared strictly. A missing researchEnabled is not treated as false.
    * A refusal names every differing key ({@link RunLimitsError}).
    */
   private requireRunLimits(run: WritingRun): void {
@@ -342,11 +345,19 @@ export class WritingRunner {
     }
     for (const key of ['minChapterWords', 'maxChapterWords'] as const) if (run.executionLimits[key] !== bounds[key]) mismatched.push({ key, saved: run.executionLimits[key], current: bounds[key] })
     if (promptVersionOf(run) >= 5 && aiToneBlockingOf(run) !== this.aiToneBlocking) mismatched.push({ key: 'aiToneBlocking', saved: aiToneBlockingOf(run), current: this.aiToneBlocking })
-    const savedModel = JSON.stringify(run.executionLimits.writingModel ?? null)
-    const currentModel = JSON.stringify(this.limits.writingModel ?? null)
-    if (savedModel !== currentModel) mismatched.push({ key: 'writingModel', saved: savedModel, current: currentModel })
-    if ((run.executionLimits.researchEnabled ?? null) !== (this.limits.researchEnabled ?? null)) mismatched.push({ key: 'researchEnabled', saved: run.executionLimits.researchEnabled ?? null, current: this.limits.researchEnabled ?? false })
-    if ((run.executionLimits.researchBudgetFloor ?? null) !== (this.limits.researchBudgetFloor ?? null)) mismatched.push({ key: 'researchBudgetFloor', saved: run.executionLimits.researchBudgetFloor ?? null, current: this.limits.researchBudgetFloor ?? 1 })
+    // Absent on archives stored before stage routing. Do not coerce a missing value to the live default before comparing:
+    // that would either refuse every such run or treat a missing researchEnabled as false and skip research.
+    if (run.executionLimits.writingModel !== undefined) {
+      const savedModel = JSON.stringify(run.executionLimits.writingModel ?? null)
+      const currentModel = JSON.stringify(this.limits.writingModel ?? null)
+      if (savedModel !== currentModel) mismatched.push({ key: 'writingModel', saved: savedModel, current: currentModel })
+    }
+    if (run.executionLimits.researchEnabled !== undefined && (run.executionLimits.researchEnabled ?? null) !== (this.limits.researchEnabled ?? null)) {
+      mismatched.push({ key: 'researchEnabled', saved: run.executionLimits.researchEnabled ?? null, current: this.limits.researchEnabled ?? false })
+    }
+    if (run.executionLimits.researchBudgetFloor !== undefined && (run.executionLimits.researchBudgetFloor ?? null) !== (this.limits.researchBudgetFloor ?? null)) {
+      mismatched.push({ key: 'researchBudgetFloor', saved: run.executionLimits.researchBudgetFloor ?? null, current: this.limits.researchBudgetFloor ?? 1 })
+    }
     if (mismatched.length > 0) throw new RunLimitsError(mismatched)
   }
 
