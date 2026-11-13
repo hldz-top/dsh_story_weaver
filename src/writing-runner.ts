@@ -24,6 +24,7 @@ import { blockingIssueCount, EvidenceRejection, StageOutputSchemas, type BodyOut
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { countStoryWords } from './body-text.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
+import { applyOutlinePatch, buildOutlineRepairPrompt, OUTLINE_PATCH_OUTPUT_SCHEMA, outlineRepairUsesPatch, type OutlineRepairKind } from './outline-repair.ts'
 import { collectQuoteRepairs } from './evidence-quote.ts'
 import type { AppliedChapterView, GeneratedManuscriptTarget, ManuscriptCandidateView, ManuscriptTarget } from './manuscript.ts'
 import type { ImportSettingsRequest, SettingsCandidateView } from './settings.ts'
@@ -1087,24 +1088,45 @@ export class WritingRunner {
     let previousAiTone: { readonly hitKeys: ReadonlySet<string>; readonly body: string } | null = null
     let aiToneSpans: string[] = []
     let heldReview: { readonly candidate: ManuscriptCandidateView; readonly fails: number } | null = null
+    // The last admitted book or chapter outline. From prompt version 7, a later repair patches this instead of rewriting it.
+    let priorOutline: unknown = null
     for (let repair = 0; repair <= inv.run.executionLimits.maxRepairAttempts; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       aiToneSpans = []
-      const result = await this.stage(inv, stageKey, target.kind, context.inputRefs,
-        { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError }, feedback,
-        undefined, undefined, undefined, repairMode)
+      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError }
+      const outlineKind: OutlineRepairKind | null = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? target.kind : null
+      const patching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
+      let result: CapturedStage
+      let structured: unknown
+      if (patching && outlineKind !== null) {
+        result = await this.outlinePatchStage(inv, stageKey, outlineKind, context.inputRefs, priorOutline, stageTask, feedback)
+        try {
+          structured = outlineKind === 'book-outline'
+            ? applyOutlinePatch('book-outline', priorOutline, result.structured)
+            : applyOutlinePatch('chapter-outline', priorOutline, result.structured)
+        }
+        catch (cause) {
+          if (!isOutputError(cause)) throw cause
+          validationError = cause.message
+          continue
+        }
+      } else {
+        result = await this.stage(inv, stageKey, target.kind, context.inputRefs, stageTask, feedback, undefined, undefined, undefined, repairMode)
+        structured = result.structured
+      }
       let candidate: ManuscriptCandidateView
       try {
         candidate = await this.service.saveManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, target, researchPlanId: research.planId,
-          requestId: requestId(inv.run, stageKey), childSessionId: result.childSessionId, output: result.structured, ...ceiling, ...(revision === undefined ? {} : { revisionOf: revision.baseArtifactId }) })
+          requestId: requestId(inv.run, stageKey), childSessionId: result.childSessionId, output: structured, ...ceiling, ...(revision === undefined ? {} : { revisionOf: revision.baseArtifactId }) })
       } catch (cause) {
         if (!isOutputError(cause)) throw cause
         validationError = cause.message
         continue
       }
+      if (outlineKind !== null && promptVersionOf(inv.run) >= 7) priorOutline = JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id }).text) as unknown
       await this.deliver(inv, candidate.artifact)
       const reviewed = await this.reviewManuscript(inv, stageKey, candidate, context.requiredChecks)
-      const unfulfilled = target.kind === 'continuity' ? StageOutputSchemas.continuity.parse(result.structured).obligations.filter(item => item.status !== 'fulfilled') : []
+      const unfulfilled = target.kind === 'continuity' ? StageOutputSchemas.continuity.parse(structured).obligations.filter(item => item.status !== 'fulfilled') : []
       const incomplete = unfulfilled.length > 0
       const gate = this.aiToneGate(inv, reviewed)
       aiToneSpans = [...gate?.spans.keys() ?? []]
@@ -1138,7 +1160,7 @@ export class WritingRunner {
       if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0) return { candidate: reviewed, convergence: null }
       if (aiToneSpans.length > 0) { validationError = `${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`; repairMode = 'review' }
       else if (incomplete) { validationError = `Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`; repairMode = 'review' }
-      else if (reviewed.length?.blocking) { validationError = lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(result.structured), inv.run.executionLimits, promptVersionOf(inv.run)); repairMode = 'length' }
+      else if (reviewed.length?.blocking) { validationError = lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)); repairMode = 'length' }
       else { validationError = 'Resolve the blocking issues in the exact supplied review.'; repairMode = 'review' }
       feedback = this.feedback(reviewed)
     }
@@ -1294,6 +1316,19 @@ export class WritingRunner {
       }
     }
     throw new WritingError('review-blocked', `${label} repair limit was exhausted: ${validationError}`)
+  }
+
+  /**
+   * Ask for an outline patch and keep the call on the direct model path. The admitted outline is an input; the reply is
+   * only the changes. The caller applies them and stores the complete outline.
+   */
+  private async outlinePatchStage(inv: Invocation, key: string, kind: OutlineRepairKind, refs: readonly ArtifactRef[], prior: unknown, task: object, feedback: readonly ArtifactRef[]): Promise<CapturedStage> {
+    const allRefs = uniqueRefs([...refs, ...feedback])
+    const prompt = buildOutlineRepairPrompt({
+      novelId: inv.run.novelId, kind, prior, inputRefs: refs.map(inputRef), task,
+      inputs: allRefs.map(ref => ({ artifactId: ref.id, sha256: ref.sha256, kind: ref.kind, chars: ref.chars })),
+    })
+    return this.capture(inv, key, prompt, allRefs, OUTLINE_PATCH_OUTPUT_SCHEMA, [], undefined, 'stored', undefined, stageWritingRole(kind), true)
   }
 
   private async stage(inv: Invocation, key: string, kind: StagePromptKind, refs: readonly ArtifactRef[], task: object, feedback: readonly ArtifactRef[],

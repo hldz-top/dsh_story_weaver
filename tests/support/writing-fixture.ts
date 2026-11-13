@@ -20,6 +20,7 @@ import { WritingRunner, type StartWritingInput } from '../../src/writing-runner.
 import { registerWritingTools } from '../../src/tools.ts'
 import { registerResearchTools } from '../../src/research-tools.ts'
 import { researchNecessitySchema } from '../../src/research-planning.ts'
+import { OUTLINE_PATCH_REQUIREMENT } from '../../src/outline-repair.ts'
 import { StageOutputSchemas } from '../../src/stage-output.ts'
 import { settingsCollectionSchema } from '../../src/manuscript-records.ts'
 import { call } from './model.ts'
@@ -232,6 +233,9 @@ function generate(state: ChildState): object {
       return { ...base, dimensionCode, facts: [{ id: `fixture-${dimensionCode}`, statement: `本书是一部发生在虚构雾港的悬疑冒险小说。${revision}` }], contentMarkdown: `# 雾港故事设定\n\n守灯人林澜在雾港追查失踪船只，以已知的航标信号寻找线索。${revision}` }
     }
     case 'book-outline': {
+      if (state.data.requirements.includes(OUTLINE_PATCH_REQUIREMENT)) {
+        return { version: 1, changes: [{ op: 'set', path: 'ending', value: '林澜留下修好的航标，船队在黎明返航。' }] }
+      }
       // Versions before 7 publish a schema that requires targetWords and inject the acceptance range as a planning budget.
       const planWords = state.data.requirements.some(item => item.includes('chapter-total range'))
       return { ...base, contentMarkdown: `# 雾港航标\n\n林澜逐章查明航标的秘密，最终护送船队返航。${revision}`, ending: '林澜重燃港口灯塔，让船队安全返航。', characterArcs: [{ character: '林澜', development: '从独自怀疑转向依据证据与同伴合作。' }],
@@ -239,6 +243,9 @@ function generate(state: ChildState): object {
     }
     case 'chapter-outline': {
       const chapterNumber = required(task.chapterNumber, 'chapterNumber')
+      if (state.data.requirements.includes(OUTLINE_PATCH_REQUIREMENT)) {
+        return { version: 1, changes: [{ op: 'set', path: 'title', value: `第${chapterNumber}章 修好的航标` }] }
+      }
       const obligations = required(task.obligations, 'obligations')
       const planWords = state.data.requirements.some(item => item.includes('chapter-total range'))
       return { ...base, chapterNumber, title: `第${chapterNumber}章 雾港航标`, ...(planWords ? { targetWords: 4000 } : {}), throughLine: `林澜走向第${chapterNumber}处航标，确认灯光信号并帮助船只返航。${revision}`, constraints: ['保持林澜已知的信息边界。'], obligations,
