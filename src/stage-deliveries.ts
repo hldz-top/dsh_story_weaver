@@ -12,7 +12,7 @@ import { z } from 'zod'
 import { parseArtifactId, type Actor, type Artifact, type ArtifactId, type NovelId } from './contracts.ts'
 import { parseAttemptId, parseRunId, type RunId, type RunStore } from './run-store.ts'
 import type { WritingService } from './service.ts'
-import { projectArtifact } from './projection.ts'
+import { projectArtifact, projectDocument } from './projection.ts'
 import { StageOutputSchemas } from './stage-output.ts'
 import { writingActor } from './tools.ts'
 import { parseStoryStageDeliveries, type StoryStageDeliverySource, type StoryStageDeliveries } from './stage-delivery.ts'
@@ -111,6 +111,20 @@ export class StageDeliveries {
   private readonly pending = new Map<string, Promise<void>>()
   /** @param ctx - Existing native tools, Session store, projection and filesystem services. @param service - Artifact authority. @param runs - Run and raw-output authority. @param directory - Validated relative preview directory. */
   constructor(private readonly ctx: Context, private readonly service: WritingService, private readonly runs: RunStore, private readonly directory: string) {}
+
+  /**
+   * Write one direct-generation prompt or raw output into the current Session workspace.
+   * @param exec - Owning Story tool execution and cancellation.
+   * @param actor - Workspace resolved for that Session.
+   * @param runId - Durable writing run.
+   * @param attemptId - Prepared attempt that owns this text.
+   * @param role - `prompt` is the model-visible request; `output` is the aggregated reply.
+   * @param text - Exact UTF-8 text. A second write of the same bytes is accepted.
+   * @returns The verified file's display path.
+   */
+  async writeGenerationAudit(exec: ToolExecution, actor: Actor, runId: RunId, attemptId: string, role: 'prompt' | 'output', text: string): Promise<string> {
+    return projectDocument(this.ctx, exec, actor, `${this.directory}/generation-audit/${runId}/${attemptId}/${role}.txt`, text)
+  }
 
   /** @param exec - Actual owning Story tool execution. @param runId - Durable writing run. @param novelId - Run-owned novel. @param artifactId - Exact published version. @returns After its full preview and native delivery are durable. */
   async publishArtifact(exec: ToolExecution, runId: RunId, novelId: NovelId, artifactId: ArtifactId): Promise<void> {

@@ -65,6 +65,8 @@ export interface WritingFixtureStage {
   readonly readPages: number
   /** structured_output calls the native tool rejected in this child (schema-level), each followed by an in-turn corrected call. */
   readonly nativeRejections: number
+  /** Exact model-visible prompt, including inlined inputs when the stage calls ctx.llm directly. */
+  readonly prompt: string
 }
 /** Optional deterministic interventions affect model output, never bypass native tools or stores. */
 export interface WritingFixtureOptions {
@@ -104,11 +106,22 @@ function required<T>(value: T | undefined, label: string): T {
   return value
 }
 
-function readTask(request: GenerateOptions): z.infer<typeof promptData> {
+function promptText(request: GenerateOptions): string {
   const marker = '\n\nTASK_DATA\n\n'
   const prompts = request.messages.flatMap(message => message.content.flatMap(block => block.type === 'text' && block.text.includes(marker) ? [block.text] : []))
   if (prompts.length !== 1) throw new Error('Native writing child must have exactly one logged TASK_DATA prompt')
-  return promptData.parse(JSON.parse(prompts[0]!.slice(prompts[0]!.indexOf(marker) + marker.length)))
+  return prompts[0]!
+}
+
+function taskBody(prompt: string): string {
+  const marker = '\n\nTASK_DATA\n\n'
+  const body = prompt.slice(prompt.indexOf(marker) + marker.length)
+  const end = body.indexOf('\n\nHOST_INPUTS\n\n')
+  return end < 0 ? body : body.slice(0, end)
+}
+
+function readTask(request: GenerateOptions): z.infer<typeof promptData> {
+  return promptData.parse(JSON.parse(taskBody(promptText(request))))
 }
 
 function pendingResult(request: GenerateOptions, callId: string): unknown {
@@ -259,11 +272,49 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   let storedText: ((id: ArtifactId) => string) | undefined
   const maxReadChars = options.maxReadChars ?? 512
   const fixture = await useStageFixture(async request => {
+    if (request.purpose === 'story-writing-stage') {
+      const sessionId = required(request.sessionId, 'direct generation id')
+      const prompt = promptText(request)
+      const data = readTask(request)
+      const hostedJson = prompt.split('\n\nHOST_INPUTS\n\n')[1]?.split('\n\nOUTPUT_SCHEMA\n\n')[0]
+      if (hostedJson === undefined) throw new Error('Direct writing request has no HOST_INPUTS')
+      const hosted = z.array(z.object({
+        artifactId: artifactIdSchema, sha256: z.string(), kind: z.enum(artifactKinds), view: z.enum(['stored', 'prose', 'feed']), text: z.string(),
+      })).parse(JSON.parse(hostedJson))
+      const state: ChildState = {
+        sessionId, data, kind: data.kind, prompt,
+        task: data.kind === 'research' || data.kind === 'research-planning' || data.kind === 'review-citation-repair' ? null : taskSchema.parse(JSON.parse(data.task)),
+        sources: new Map(), requestCount: 1, readPages: 0, inputIndex: hosted.length, offset: 0, text: '', researchPhase: 0, planId: null, pending: null, nativeRejections: 0,
+      }
+      for (const input of hosted) {
+        state.sources.set(input.artifactId, { artifactId: input.artifactId, sha256: input.sha256, kind: input.kind, text: input.text, view: input.view, ...(input.view === 'prose' ? { stored: required(storedText, 'stored text lookup')(input.artifactId) } : {}) })
+      }
+      stages.set(sessionId, state)
+      options.onChildRequest?.(state, request)
+      if (options.pauseChild !== undefined) await options.pauseChild(state)
+      const injected = options.injectFinish?.(state)
+      if (injected !== undefined) return [{ type: 'finish' as const, reason: injected }]
+      let output: object
+      if (state.data.kind === 'research-planning') {
+        output = { mode: 'input-only', reason: 'The supplied premise defines this fictional output.', questions: [{ id: 'fixture-fiction', kind: 'creative', question: state.data.purpose, reason: 'This fixture is wholly fictional; its supplied story rules are authorial choices.' }], externalRequirements: [] }
+      } else if (state.data.kind === 'research' || state.data.kind === 'review-citation-repair') {
+        throw new Error('A tool stage cannot use the direct model path')
+      } else output = generate(state)
+      if (options.intervene !== undefined && state.nativeRejections === 0) output = options.intervene(state, output)
+      const json = JSON.stringify(output)
+      const mid = Math.max(1, Math.ceil(json.length / 2))
+      return [
+        { type: 'block-start' as const, index: 0, blockType: 'text' as const },
+        { type: 'text-delta' as const, index: 0, text: json.slice(0, mid) },
+        { type: 'text-delta' as const, index: 0, text: json.slice(mid) },
+        { type: 'finish' as const, reason: { kind: 'stop' as const } },
+      ]
+    }
     const sessionId = required(request.sessionId, 'native child Session ID')
     let state = stages.get(sessionId)
     if (state === undefined) {
       const data = readTask(request)
-      state = { sessionId, data, kind: data.kind, task: data.kind === 'research' || data.kind === 'research-planning' || data.kind === 'review-citation-repair' ? null : taskSchema.parse(JSON.parse(data.task)), sources: new Map(), requestCount: 0, readPages: 0, inputIndex: 0, offset: 0, text: '', researchPhase: 0, planId: null, pending: null, nativeRejections: 0 }
+      state = { sessionId, data, kind: data.kind, task: data.kind === 'research' || data.kind === 'research-planning' || data.kind === 'review-citation-repair' ? null : taskSchema.parse(JSON.parse(data.task)), sources: new Map(), requestCount: 0, readPages: 0, inputIndex: 0, offset: 0, text: '', researchPhase: 0, planId: null, pending: null, nativeRejections: 0, prompt: promptText(request) }
       stages.set(sessionId, state)
     }
     state.requestCount += 1

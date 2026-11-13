@@ -7,9 +7,10 @@ import { nativeStageOutputSchema } from './native-stage-schema.ts'
 import { AiToneReviewBlockedError, aiToneRepairInstruction, ImportRefusedError, ImportReviewBlockedError, SettingsIncompleteError, WritingError, parseArtifactId, parseRequestId, type Actor, type ArtifactId, type ArtifactRef, type ImportItem } from './contracts.ts'
 import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
+import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
 import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
-import { proseView } from './prose-view.ts'
+import { bodyFeed, proseView } from './prose-view.ts'
 import { aiToneHits, gradeAiTone } from './ai-tone.ts'
 import { buildResearchPrompt, validateResearchStageResult, RESEARCH_STAGE_OUTPUT_SCHEMA, researchStageTools, researchToolAuthorization, type ResearchStageRequest } from './research-stage.ts'
 import { buildResearchPlanningPrompt, researchNecessity, RESEARCH_PLANNING_OUTPUT_SCHEMA, type ResearchNecessity } from './research-planning.ts'
@@ -712,7 +713,7 @@ export class WritingRunner {
     const limits = this.service.researchLimits
     const settings = isSettingsOutputTarget(outputTarget)
     const necessity: ResearchNecessity | undefined = legacy ? undefined : await this.admitted(inv, 'Research planning', repair => repair === 0 ? `${key}/planning` : `${key}/planning/${repair}`,
-      async (stageKey, validationError) => researchNecessity((await this.capture(inv, stageKey, buildResearchPlanningPrompt({ ...request, outputTarget }, limits, validationError), refs, RESEARCH_PLANNING_OUTPUT_SCHEMA, ['story_read_artifact'])).structured, limits))
+      async (stageKey, validationError) => researchNecessity((await this.capture(inv, stageKey, buildResearchPlanningPrompt({ ...request, outputTarget }, limits, validationError), refs, RESEARCH_PLANNING_OUTPUT_SCHEMA, [], undefined, 'stored', undefined, true)).structured, limits))
     return this.admitted(inv, 'Research stage', repair => repair === 0 ? key : `${key}/repair/${repair}`, async (stageKey, validationError) => {
       const stored = settings ? this.runs.storedPrompt(inv.actor, inv.run.id, stageKey) : undefined
       if (stored !== undefined) {
@@ -783,7 +784,9 @@ export class WritingRunner {
       ], ...(settingsDimensionKind === undefined ? {} : { settingsDimensionKind }), ...(settingsCollectionKinds === undefined ? {} : { settingsCollectionKinds }),
       ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}), promptVersion,
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}) })
-    return this.capture(inv, key, prompt, allRefs, nativeStageOutputSchema(kind, promptVersion), ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter)
+    // Settings, outlines, body, continuity, and their repairs only write text. Review stays on a subagent.
+    const direct = kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity'
+    return this.capture(inv, key, prompt, allRefs, nativeStageOutputSchema(kind, promptVersion), direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, direct)
   }
 
   private feedChars(inv: Invocation, ref: ArtifactRef, chapterNumber: number): number {
@@ -801,8 +804,21 @@ export class WritingRunner {
    * its deadline is recorded unknown and retryAuthorized once, then replaced under the same key. A second consecutive
    * timeout leaves retryAuthorized false and fails closed. story_stop aborts the run signal and does not authorize that
    * replacement. An ungraded research execution and every non-timeout outcome settle in one pass.
+   * direct stays false for review, citation repair, and research execution, so those stay on a subagent.
+   * Text generation passes true and calls ctx.llm once with no tools.
    */
-  private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' | 'feed' = 'stored', feedChapter?: number): Promise<CapturedStage> {
+  private servedInputs(inv: Invocation, refs: readonly ArtifactRef[], readView: 'stored' | 'prose' | 'feed', feedChapter: number | undefined): DirectStageInput[] {
+    return refs.map(ref => {
+      const artifact = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: ref.id })
+      if (artifact.sha256 !== ref.sha256) throw new WritingError('revision-conflict', 'Stage input changed before generation')
+      const feed = readView === 'feed' && feedChapter !== undefined && (ref.kind === 'book-outline' || ref.kind === 'chapter-outline')
+      const text = readView === 'prose' ? proseView(artifact.kind, artifact.text) : feed ? bodyFeed(artifact.kind, artifact.text, feedChapter) : artifact.text
+      const view = readView === 'prose' ? 'prose' : feed ? 'feed' : 'stored'
+      return { artifactId: ref.id, sha256: ref.sha256, kind: ref.kind, view, text }
+    })
+  }
+
+  private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' | 'feed' = 'stored', feedChapter?: number, direct = false): Promise<CapturedStage> {
     const stageTimeoutMs = stageDeadlineMs(key, inv.run.executionLimits.stageTimeoutMs)
     const unknownRetryLimit = gradedStageOf(key) === undefined ? 0 : GRADED_STAGE_UNKNOWN_RETRIES
     let unknownRetries = 0
@@ -815,17 +831,26 @@ export class WritingRunner {
         return { attempt, childSessionId: attempt.childSessionId, structured: JSON.parse(this.runs.readOutput(inv.actor, inv.run.id, attempt.id).text) as unknown }
       }
       if (attempt.status !== 'prepared') throw new RunStoreError('attempt-state', 'The native stage is already running or requires explicit recovery')
+      if (direct && allowedTools.length > 0) throw new Error('A direct writing stage cannot advertise tools')
       let published = false
       let stopProse: (() => void) | undefined
       try {
-        const result = await executeStage(this.ctx, inv.exec, { attemptId: attempt.id, prompt, outputSchema, ...(authorizeTool === undefined ? {} : { authorizeTool }),
-          onStarted: async childSessionId => {
-            published = true
-            if (readView === 'prose') stopProse = this.service.serveProseTo(childSessionId)
-            else if (readView === 'feed' && feedChapter !== undefined) stopProse = this.service.serveBodyFeedTo(childSessionId, feedChapter)
-            attempt = await this.runs.associateChild(inv.actor, inv.run.id, attempt.id, childSessionId)
-          },
-        }, { ...inv.run.executionLimits, stageTimeoutMs, allowedTools }).finally(() => stopProse?.())
+        const result = direct
+          ? await executeDirectStage(this.ctx, inv.exec, {
+            attemptId: attempt.id, prompt, outputSchema, inputs: this.servedInputs(inv, refs, readView, feedChapter),
+            onStarted: async generationId => {
+              published = true
+              attempt = await this.runs.associateChild(inv.actor, inv.run.id, attempt.id, generationId)
+            },
+          }, { maxStageRequests: inv.run.executionLimits.maxStageRequests, stageTimeoutMs }, async (role, text) => { await this.deliveries.writeGenerationAudit(inv.exec, inv.actor, inv.run.id, attempt.id, role, text) })
+          : await executeStage(this.ctx, inv.exec, { attemptId: attempt.id, prompt, outputSchema, ...(authorizeTool === undefined ? {} : { authorizeTool }),
+            onStarted: async childSessionId => {
+              published = true
+              if (readView === 'prose') stopProse = this.service.serveProseTo(childSessionId)
+              else if (readView === 'feed' && feedChapter !== undefined) stopProse = this.service.serveBodyFeedTo(childSessionId, feedChapter)
+              attempt = await this.runs.associateChild(inv.actor, inv.run.id, attempt.id, childSessionId)
+            },
+          }, { ...inv.run.executionLimits, stageTimeoutMs, allowedTools }).finally(() => stopProse?.())
         const text = JSON.stringify(result.structured)
         if (text === undefined) throw new Error('Native stage returned no serializable structured output')
         attempt = await this.runs.saveOutput(inv.actor, inv.run.id, attempt.id, text)
@@ -834,12 +859,12 @@ export class WritingRunner {
         // A malformed structured_output call, or a turn that ended without structured output, is a completed model call
         // with a known, unusable result, not an uncertain outcome.
         const retryable = cause instanceof StageExecutionError && (cause.code === 'stage-malformed' || cause.code === 'stage-missing-result')
-        // A tool-scope refusal is a deterministic stage-boundary decision with no stage output, not an uncertain model outcome.
-        const toolScope = cause instanceof StageExecutionError && cause.code === 'stage-tool-scope'
+        // A tool-scope refusal or a failed session audit is a known local decision, not an uncertain model outcome.
+        const knownLocal = cause instanceof StageExecutionError && (cause.code === 'stage-tool-scope' || cause.code === 'stage-audit')
         // A provider refusal or an output-length cut-off is also a completed model call with a known, unusable result.
         // It is recorded with its explicit classification and not retried: an identical request would meet the same limit or policy.
         const kind = cause instanceof StageExecutionError ? failureKind(cause.code) : undefined
-        const outcome = (retryable || toolScope || kind !== undefined || !published) ? 'failed' as const : 'unknown' as const
+        const outcome = (retryable || knownLocal || kind !== undefined || !published) ? 'failed' as const : 'unknown' as const
         // A published graded deadline is an unknown model outcome. Authorize one replacement. Do not do that for a
         // timeout that never published a child, for research execution, or when story_stop has already aborted the run.
         const permitUnknownTimeout = !inv.exec.signal.aborted && unknownRetries < unknownRetryLimit && cause instanceof StageExecutionError && cause.code === 'stage-timeout' && outcome === 'unknown'
