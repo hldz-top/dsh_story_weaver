@@ -5,6 +5,7 @@ import { countStoryWords } from '../src/body-text.ts'
 import { parseArtifactId } from '../src/contracts.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { expect, it } from 'vitest'
+import { OUTLINE_PATCH_REQUIREMENT } from '../src/outline-repair.ts'
 import { StageOutputSchemas } from '../src/stage-output.ts'
 import { WritingRunner } from '../src/writing-runner.ts'
 import { useWritingFixture, type WritingFixtureStage } from './support/writing-fixture.ts'
@@ -651,10 +652,13 @@ it.each([
   expect(repairRequirements.some(item => item.includes('Preserve unaffected facts and passages'))).toBe(false)
 })
 
-it.each(['book-outline', 'body'] as const)('keeps the review repair line, and for generated stages the review message, when a %s review blocks', async reviewedKind => {
+it.each([
+  { kind: 'book-outline' as const, line: OUTLINE_PATCH_REQUIREMENT },
+  { kind: 'body' as const, line: reviewRepairLine },
+])('keeps the repair instruction and the review message when a $kind review blocks', async ({ kind, line }) => {
   let blocked = false
   const fixture = await useWritingFixture({ intervene(stage, output) {
-    if (blocked || stage.kind !== 'review' || stage.task?.reviewed === undefined || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== reviewedKind) return output
+    if (blocked || stage.kind !== 'review' || stage.task?.reviewed === undefined || stage.sources.get(stage.task.reviewed.artifactId)?.kind !== kind) return output
     blocked = true
     const review = output as { checks: { category: string; evidence: unknown[] }[] }
     return { ...review, issues: [{ id: 'conflict', category: 'consistency', severity: 'blocking', location: '首场', message: '人物约束与已接受设定矛盾。', evidence: review.checks[0]!.evidence }] }
@@ -662,12 +666,13 @@ it.each(['book-outline', 'body'] as const)('keeps the review repair line, and fo
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('completed')
-  const generated = [...fixture.stages.entries()].filter(([, stage]) => stage.kind === reviewedKind)
+  const generated = [...fixture.stages.entries()].filter(([, stage]) => stage.kind === kind)
   expect(generated).toHaveLength(2)
   const [repairId, repair] = generated[1]!
   const requirements = loggedRequirements(await loggedPrompt(fixture, repairId))
-  expect(requirements).toContain(reviewRepairLine)
+  expect(requirements).toContain(line)
   expect(requirements).not.toContain(lengthRepairLine)
+  if (kind === 'book-outline') expect(requirements).not.toContain(reviewRepairLine)
   expect(repair.task?.validationError).toBe('Resolve the blocking issues in the exact supplied review.')
 })
 
