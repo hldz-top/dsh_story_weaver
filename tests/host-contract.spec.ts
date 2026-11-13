@@ -8,8 +8,8 @@ const verifiedService = { startActivation() { return Promise.reject(new Error('m
 
 it('reads the official subagent package version and rejects every other release string', () => {
   expect(resolvedSubagentPackageVersion()).toBe(VERIFIED_DSH_SUBAGENT_VERSION)
-  expect(VERIFIED_DSH_SUBAGENT_VERSION).toBe('0.2.2-rc.2')
-  expect(() => assertVerifiedDshHost('0.2.2-rc.1', verifiedService, {})).toThrow(/0\.2\.2-rc\.2/)
+  expect(VERIFIED_DSH_SUBAGENT_VERSION).toBe('0.2.2-rc.3')
+  expect(() => assertVerifiedDshHost('0.2.2-rc.1', verifiedService, {})).toThrow(/0\.2\.2-rc\.3/)
   expect(() => assertVerifiedDshHost('0.2.0-rc.2', verifiedService, {})).toThrow(/package\.json export/)
   expect(() => assertVerifiedDshHost('', verifiedService, {})).toThrow(/unresolved/)
   expect(() => assertVerifiedDshHost(VERIFIED_DSH_SUBAGENT_VERSION, { start() { return undefined }, startActivation() { return undefined } }, {})).toThrow(/start must be absent/)

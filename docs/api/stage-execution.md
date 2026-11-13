@@ -3,7 +3,7 @@ description: "Native DSH child execution for a bounded writing-stage attempt."
 ---
 # Stage execution
 
-The executor uses the installed DSH 0.2.2-rc.2 native spawn, ToolRuntime, AgentLoop and JSONL Session persistence. Keyless integration tests verify stage execution; complete writing and browser validation remain separate acceptance work.
+The executor uses the installed DSH 0.2.2-rc.3 native spawn, ToolRuntime, AgentLoop and JSONL Session persistence. Keyless integration tests verify stage execution; complete writing and browser validation remain separate acceptance work.
 
 ## Ownership
 
@@ -11,7 +11,7 @@ The executor uses the installed DSH 0.2.2-rc.2 native spawn, ToolRuntime, AgentL
 
 `executeDirectStage` is the other path. Research planning, candidate generation (including the body and continuity), and their repairs only read already selected inputs and write text, so they call the host `ctx.llm` service once. The call inherits `agent.model.current()`, sends no tools, and streams one request. `BlockAssembler` aggregates the text. The runner writes the model-visible prompt and the raw reply under the current Session's preview directory before the stream and after a schema-valid reply. A generation id is stored on the attempt so provenance stays unique; no subagent Session is created. Review, citation repair, and research still use `executeStage` because they call `story_read_artifact` or research and web tools. A schema-invalid or undecodable reply is `stage-malformed`. A refusal, length cut-off, missing text, deadline, and a failed audit write stay distinct failures. The plugin does not register a provider adapter or an external gateway.
 
-The configured provider must be the deployment's verified in-process spawn provider on DSH 0.2.2-rc.2. DSH checks the requested output-schema and depth-limit capabilities before preparation. Spawn children are continuable activations. The executor requires the `subagent/start` event to resolve a live local Agent and rejects the stage when that Agent is absent, then disposes the activation. A remote provider can already have started before that check. Deployment validation must establish the provider type before live use.
+The configured provider must be the deployment's verified in-process spawn provider on DSH 0.2.2-rc.3. DSH checks the requested output-schema and depth-limit capabilities before preparation. Spawn children are continuable activations. The executor requires the `subagent/start` event to resolve a live local Agent and rejects the stage when that Agent is absent, then disposes the activation. A remote provider can already have started before that check. Deployment validation must establish the provider type before live use.
 
 ## Inputs and result
 
@@ -32,7 +32,7 @@ The configured provider must be the deployment's verified in-process spawn provi
 | `result.childSessionId` | The exact child Session containing the logged prompt, requests, tool calls and structured capture. |
 | `result.structured` | The value captured by the native structured-output tool after a completed child turn. Stage-specific domain parsing remains the caller's responsibility. |
 
-The executor passes no `agentOptions` override. DSH 0.2.2-rc.2 inherits the parent request's provider, model, and reasoning effort. `delivery: 'caller'` returns the result without injecting a `subagent-settled` notice or waking the parent; a local child still appends `subagent/catalog` on the parent Session. The startup `signal` cancels only before publication. After publication, cancellation calls `activation.dispose()`. The executor does not silently select another model, substitute a provider, accept plain assistant text as structured output, or replace a missing value with an empty object.
+The executor passes no `agentOptions` override. DSH 0.2.2-rc.3 inherits the parent request's provider, model, and reasoning effort. `delivery: 'caller'` returns the result without injecting a `subagent-settled` notice or waking the parent; a local child still appends `subagent/catalog` on the parent Session. The startup `signal` cancels only before publication. After publication, cancellation calls `activation.dispose()`. The executor does not silently select another model, substitute a provider, accept plain assistant text as structured output, or replace a missing value with an empty object.
 
 ## Writing-stage schema publication
 

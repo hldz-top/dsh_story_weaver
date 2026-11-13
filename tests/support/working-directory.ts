@@ -1,4 +1,4 @@
-/** Directory collaborator required by DSH 0.2.2-rc.2 local subagents. */
+/** Directory collaborator required by DSH 0.2.2-rc.3 local subagents. */
 import type { Context } from '@deepseek-ai/cordis'
 
 /**
