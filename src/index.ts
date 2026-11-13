@@ -79,7 +79,7 @@ export const Config: z<Config> = z.object({
 })
 
 export const name = 'dsh-story-weaver'
-export const inject = ['storageDomain', 'tools', 'fs', 'subagents', 'sessions', 'sessionPersistence', 'sessionProjections']
+export const inject = ['storageDomain', 'tools', 'fs', 'llm', 'subagents', 'sessions', 'sessionPersistence', 'sessionProjections']
 
 /**
  * Mount one writing service and its tools on the existing DSH capabilities.

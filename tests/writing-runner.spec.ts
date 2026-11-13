@@ -21,6 +21,8 @@ const reviewRepairLine = 'Repair the defects documented in the supplied prior ca
 const lengthRepairLine = 'Condense or expand across all scenes to reach the aim; preserve required events, established facts and scene identities rather than passage wording.'
 
 async function loggedPrompt(fixture: Awaited<ReturnType<typeof useWritingFixture>>, sessionId: SessionId): Promise<string> {
+  const stage = fixture.stages.get(sessionId)
+  if (stage !== undefined) return stage.prompt
   const handle = await fixture.ctx.sessionPersistence.open(sessionId, 'read')
   try {
     const { events } = await handle.read()
@@ -31,7 +33,10 @@ async function loggedPrompt(fixture: Awaited<ReturnType<typeof useWritingFixture
 }
 
 function loggedRequirements(prompt: string): string[] {
-  const data: { requirements: string[] } = JSON.parse(prompt.split('\n\nTASK_DATA\n\n')[1]!)
+  const raw = prompt.split('\n\nTASK_DATA\n\n')[1]
+  if (raw === undefined) throw new Error('Prompt has no TASK_DATA')
+  const end = raw.indexOf('\n\nHOST_INPUTS\n\n')
+  const data: { requirements: string[] } = JSON.parse(end < 0 ? raw : raw.slice(0, end))
   return data.requirements
 }
 
@@ -283,46 +288,40 @@ it('threads the host chapter-total range and settings kind-awareness correctly a
   const lines = rangeLines(3000, 5000)
   let checked = 0
   const seen = { counting: 0, aim: 0, notDefect: 0 }
-  for (const [sessionId, stage] of fixture.stages) {
+  for (const [, stage] of fixture.stages) {
     if (stage.kind === 'research' || stage.kind === 'research-planning') continue
     const reviewedKind = stage.task?.reviewed === undefined ? null : stage.sources.get(stage.task.reviewed.artifactId)?.kind ?? null
-    const handle = await fixture.ctx.sessionPersistence.open(sessionId, 'read')
-    try {
-      const { events } = await handle.read()
-      const message = events.find(event => event.type === 'user/message')
-      const block = message?.data.content.find(item => item.type === 'text')
-      if (block?.type !== 'text') throw new Error(`Child ${stage.kind} (${sessionId}) has no logged prompt text`)
-      // The acceptance range is a body check. Outline stages are not given the number as a planning budget, and they are not given an aim.
-      const expectChapterRange = stage.kind === 'body' || (stage.kind === 'review' && reviewedKind === 'body')
-      const label = `kind=${stage.kind} reviewedKind=${String(reviewedKind)}`
-      expect(block.text.includes('chapter-total range is 3000–5000'), label).toBe(expectChapterRange)
-      const isReview = stage.kind === 'review'
-      expect(block.text.includes('Story counting:'), label).toBe(expectChapterRange)
-      expect(block.text.includes('aim for about 3000'), label).toBe(stage.kind === 'body')
-      expect(block.text.includes('aim for about 4000'), label).toBe(false)
-      expect(block.text.includes('is not a length defect'), label).toBe(expectChapterRange && isReview)
-      if (expectChapterRange) expect(loggedRequirements(block.text), label).toContain(stage.kind === 'body' ? lines.body : lines.review)
-      if (stage.kind === 'chapter-outline') expect(block.text, label).not.toContain('pacing guidance for scene allocation')
-      if (stage.kind === 'review' && reviewedKind === 'chapter-outline') expect(block.text, label).not.toContain('task.measuredBeats')
-      if (stage.kind === 'review' && reviewedKind === 'body') expect(block.text, label).toContain('task.measuredBeats')
-      seen.counting += Number(block.text.includes('Story counting:'))
-      seen.aim += Number(block.text.includes('aim for about'))
-      seen.notDefect += Number(block.text.includes('is not a length defect'))
-      if (stage.kind === 'settings') {
-        expect(block.text).toContain('catalog classification, not a world-building dimension')
-        expect(block.text).toContain('Refer to research only by the question IDs')
-      }
-      if (stage.kind === 'review' && reviewedKind === 'settings-dimension') {
-        expect(block.text).toContain('For a classification dimension, completeness')
-        expect(block.text).toContain('dimensionKind')
-      }
-      if (stage.kind === 'review' && reviewedKind === 'settings') {
-        expect(block.text).toContain('Completeness for the assembled settings collection means each selected dimension')
-        expect(block.text).toContain('dimensionKinds')
-        expect(block.text).toContain('enum_single')
-      }
-      checked += 1
-    } finally { await handle.close() }
+    const text = stage.prompt
+    // The acceptance range is a body check. Outline stages are not given the number as a planning budget, and they are not given an aim.
+    const expectChapterRange = stage.kind === 'body' || (stage.kind === 'review' && reviewedKind === 'body')
+    const label = `kind=${stage.kind} reviewedKind=${String(reviewedKind)}`
+    expect(text.includes('chapter-total range is 3000–5000'), label).toBe(expectChapterRange)
+    const isReview = stage.kind === 'review'
+    expect(text.includes('Story counting:'), label).toBe(expectChapterRange)
+    expect(text.includes('aim for about 3000'), label).toBe(stage.kind === 'body')
+    expect(text.includes('aim for about 4000'), label).toBe(false)
+    expect(text.includes('is not a length defect'), label).toBe(expectChapterRange && isReview)
+    if (expectChapterRange) expect(loggedRequirements(text), label).toContain(stage.kind === 'body' ? lines.body : lines.review)
+    if (stage.kind === 'chapter-outline') expect(text, label).not.toContain('pacing guidance for scene allocation')
+    if (stage.kind === 'review' && reviewedKind === 'chapter-outline') expect(text, label).not.toContain('task.measuredBeats')
+    if (stage.kind === 'review' && reviewedKind === 'body') expect(text, label).toContain('task.measuredBeats')
+    seen.counting += Number(text.includes('Story counting:'))
+    seen.aim += Number(text.includes('aim for about'))
+    seen.notDefect += Number(text.includes('is not a length defect'))
+    if (stage.kind === 'settings') {
+      expect(text).toContain('catalog classification, not a world-building dimension')
+      expect(text).toContain('Refer to research only by the question IDs')
+    }
+    if (stage.kind === 'review' && reviewedKind === 'settings-dimension') {
+      expect(text).toContain('For a classification dimension, completeness')
+      expect(text).toContain('dimensionKind')
+    }
+    if (stage.kind === 'review' && reviewedKind === 'settings') {
+      expect(text).toContain('Completeness for the assembled settings collection means each selected dimension')
+      expect(text).toContain('dimensionKinds')
+      expect(text).toContain('enum_single')
+    }
+    checked += 1
   }
   // settings, its review, the collection review, book-outline/chapter-outline/body/continuity and each of their reviews.
   expect(checked).toBe(11)
@@ -339,24 +338,19 @@ it('tells every real logged research-planning and research child that a catalog-
   let checked = 0
   for (const [sessionId, stage] of fixture.stages) {
     if (stage.kind !== 'research' && stage.kind !== 'research-planning') continue
-    const handle = await fixture.ctx.sessionPersistence.open(sessionId, 'read')
-    try {
-      const { events } = await handle.read()
-      const message = events.find(event => event.type === 'user/message')
-      const block = message?.data.content.find(item => item.type === 'text')
-      if (block?.type !== 'text') throw new Error(`Child ${stage.kind} (${sessionId}) has no logged prompt text`)
-      if (stage.kind === 'research-planning') {
-        expect(block.text).toContain('When TASK_DATA.outputTarget.catalog is present, it is the complete definition of that settings dimension.')
-        expect(block.text).toContain('which label or labels to choose is a creative question')
-        expect(block.text).toContain('Never ask about the host program\'s internals')
-      } else {
-        expect(block.text).toContain('When TASK_DATA.purpose includes a settings catalog entry, that entry is the complete dimension definition')
-        expect(block.text).toContain('A question asking for the program\'s option list or other host program internals is not missing evidence')
-        expect(block.text).toContain('This does not cover supplied story facts, unread inputs or real-world facts')
-        expect(block.text).not.toContain('Resolve a question about available options')
-      }
-      checked += 1
-    } finally { await handle.close() }
+    const text = stage.kind === 'research-planning' ? stage.prompt : await loggedPrompt(fixture, sessionId)
+    if (stage.kind === 'research-planning') {
+      expect(text).toContain('HOST_INPUTS')
+      expect(text).toContain('When TASK_DATA.outputTarget.catalog is present, it is the complete definition of that settings dimension.')
+      expect(text).toContain('which label or labels to choose is a creative question')
+      expect(text).toContain('Never ask about the host program\'s internals')
+    } else {
+      expect(text).toContain('When TASK_DATA.purpose includes a settings catalog entry, that entry is the complete dimension definition')
+      expect(text).toContain('A question asking for the program\'s option list or other host program internals is not missing evidence')
+      expect(text).toContain('This does not cover supplied story facts, unread inputs or real-world facts')
+      expect(text).not.toContain('Resolve a question about available options')
+    }
+    checked += 1
   }
   expect(checked).toBeGreaterThan(0)
   expect(checked).toBe(expected)
@@ -716,9 +710,13 @@ it('fails a writing run clearly when a stage child could see a subagent dispatch
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
   expect(outcome.value.error).toContain('can see tools outside its allow list (subagent)')
-  expect(outcome.value.attempts).toHaveLength(1)
-  expect(outcome.value.attempts[0]).toMatchObject({ status: 'failed', output: null })
-  expect(fixture.childRequests).toHaveLength(0)
+  const planning = outcome.value.attempts.filter(item => item.key.endsWith('/research/planning'))
+  expect(planning).toHaveLength(1)
+  expect(planning[0]).toMatchObject({ status: 'succeeded' })
+  const research = outcome.value.attempts.filter(item => item.key.endsWith('/research') && !item.key.includes('/planning'))
+  expect(research).toHaveLength(1)
+  expect(research[0]).toMatchObject({ status: 'failed', output: null })
+  expect(fixture.childRequests.every(request => request.purpose === 'story-writing-stage')).toBe(true)
   expect(dispatched).toEqual([])
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })

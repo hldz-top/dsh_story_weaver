@@ -20,14 +20,19 @@ it('records a local research decision before author-defined fiction research and
     expect(decision.status).toBe('succeeded')
     const output = JSON.parse(fixture.runs.readOutput(fixture.actor, result.value.id, decision.id).text)
     expect(output).toMatchObject({ mode: 'input-only', externalRequirements: [] })
-    expect(advertised.get(decision.childSessionId!)).toEqual(['story_read_artifact', 'structured_output'])
+    expect(advertised.get(decision.childSessionId!)).toEqual([])
     const logged = fixture.childRequests.find(request => request.sessionId === decision.childSessionId)
+    expect(logged?.tools).toBeUndefined()
+    expect(logged?.purpose).toBe('story-writing-stage')
     const prompt = logged?.messages.flatMap(message => message.content).find(block => block.type === 'text' && block.text.includes('TASK_DATA'))
     if (prompt?.type !== 'text') throw new Error('Native planner prompt is not logged')
     expect(prompt.text).toContain('Author-declared genre, tone, realism level and fictional rules are authoritative choices.')
-    const data = JSON.parse(prompt.text.split('\n\nTASK_DATA\n\n')[1]!)
+    expect(prompt.text).toContain('HOST_INPUTS')
+    const task = prompt.text.split('\n\nTASK_DATA\n\n')[1]?.split('\n\nHOST_INPUTS\n\n')[0]
+    if (task === undefined) throw new Error('Planner prompt has no TASK_DATA')
+    const data = JSON.parse(task)
     expect(data).toMatchObject({ kind: 'research-planning', novelId: fixture.novel.id, briefArtifactId: fixture.novel.brief.id, outputTarget: { kind: expect.any(String) } })
-    if (decision === decisions[0]) expect({ taskKind: data.kind, targetKind: data.outputTarget.kind, tools: advertised.get(decision.childSessionId!), mode: output.mode, questionKinds: output.questions.map((question: { kind: string }) => question.kind) }).toMatchInlineSnapshot(`
+    if (decision === decisions[0]) expect({ taskKind: data.kind, targetKind: data.outputTarget.kind, tools: logged?.tools ?? null, mode: output.mode, questionKinds: output.questions.map((question: { kind: string }) => question.kind) }).toMatchInlineSnapshot(`
       {
         "mode": "input-only",
         "questionKinds": [
@@ -35,10 +40,7 @@ it('records a local research decision before author-defined fiction research and
         ],
         "targetKind": "settings",
         "taskKind": "research-planning",
-        "tools": [
-          "story_read_artifact",
-          "structured_output",
-        ],
+        "tools": null,
       }
     `)
   }

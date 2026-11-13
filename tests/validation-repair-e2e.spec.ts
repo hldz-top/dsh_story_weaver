@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { FinishReason } from '@deepseek-ai/dsh-llm'
-import { injections, isChapterStage, isSettings, next, pipeline, PIPELINE_STAGES, stageKeys, type Injection } from './support/validation-injections.ts'
+import { injections, isChapterStage, next, pipeline, PIPELINE_STAGES, stageKeys, type Injection } from './support/validation-injections.ts'
 
 describe('unified validation repair across the full 49-stage pipeline (offline fake provider)', () => {
   it('repairs every injected violation, one per kind across every stage kind, with a single replacement each, and completes', async () => {
@@ -64,8 +64,9 @@ describe('unified validation repair across the full 49-stage pipeline (offline f
   }, 300_000)
 
   it('lets the native structured_output schema reject a missing field in-turn, before host admission and without a repair attempt', async () => {
-    const missing: Injection = { id: 'settings-missing-field', stage: 'settings candidate', violation: 'native schema (missing contentMarkdown)', chapter: 1, match: stage => isSettings(stage, 'a1'),
-      mutate: ({ contentMarkdown: _content, ...output }) => output, replacement: next, message: /./ }
+    const missing: Injection = { id: 'review-missing-field', stage: 'settings review', violation: 'native schema (missing issues)', chapter: 1,
+      match: stage => stage.kind === 'review' && [...stage.sources.values()].some(source => source.kind === 'settings-dimension'),
+      mutate: ({ issues: _issues, ...output }) => output, replacement: next, message: /./ }
     const { run, fired } = await pipeline(0, [missing], 1)
     expect(run.error).toBeNull()
     expect(run.status).toBe('completed')
