@@ -1,11 +1,16 @@
 import { expect, it } from 'vitest'
 import { useWritingFixture } from './support/writing-fixture.ts'
 
-it('records a local research decision before author-defined fiction research and exposes no web tools', async () => {
+it('records a local research decision before author-defined fiction research and exposes official web tools only for settings', async () => {
   const advertised = new Map<string, string[]>()
+  const official: string[] = []
   const fixture = await useWritingFixture({ maxReadChars: 8192, onChildRequest(stage, request) {
     advertised.set(stage.sessionId, (request.tools ?? []).map(tool => tool.name))
   } })
+  fixture.ctx.on('tools/execute', (exec, next) => {
+    if (exec.name === 'web_search' || exec.name === 'web_fetch') official.push(exec.name)
+    return next()
+  })
   const result = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (result.status === 'rejected') throw result.reason
   expect(result.value.error).toBeNull()
@@ -38,8 +43,12 @@ it('records a local research decision before author-defined fiction research and
     `)
   }
   for (const stage of fixture.stages.values()) {
-    if (stage.kind === 'research') expect(advertised.get(stage.sessionId)).not.toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
+    if (stage.kind !== 'research' || stage.data.kind !== 'research') continue
+    const tools = advertised.get(stage.sessionId) ?? []
+    if (stage.data.purpose.startsWith('Establish the evidence needed for settings dimension')) expect(tools).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
+    else expect(tools).not.toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
   }
+  expect(official).toEqual(['web_search'])
   expect(fixture.service.listResearch(fixture.actor, fixture.novel.id).every(plan => plan.outcome === 'not-needed' && plan.reservedCalls.length === 0)).toBe(true)
 })
 

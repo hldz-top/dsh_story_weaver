@@ -197,6 +197,17 @@ export class RunStore {
     return runView(result)
   }
 
+  /** @param actor - Workspace owner. @param runId - Exact durable run. @param key - Stage attempt key. @returns The prompt frozen for that key, when an attempt exists. */
+  storedPrompt(actor: Actor, runId: RunId, key: string): string | undefined {
+    for (const [, record] of this.domain.table('novels').entries()) {
+      const run = record.runs.find(item => item.id === runId)
+      if (run === undefined) continue
+      this.own(actor, record)
+      return run.attempts.findLast(attempt => attempt.request.key === key)?.request.prompt
+    }
+    return undefined
+  }
+
   /** @param actor - Workspace owner. @param runId - Exact durable run. @returns Detached progress metadata. */
   get(actor: Actor, runId: RunId): WritingRun {
     for (const [, record] of this.domain.table('novels').entries()) {
