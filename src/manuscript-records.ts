@@ -14,6 +14,7 @@ export const manuscriptTargetSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('chapter-outline'), chapterNumber }),
   z.strictObject({ kind: z.literal('body'), chapterNumber }),
   z.strictObject({ kind: z.literal('continuity'), chapterNumber, bodyId: artifactIdSchema }),
+  z.strictObject({ kind: z.literal('continuity-snapshot'), chapterNumber, bodyId: artifactIdSchema, continuityId: artifactIdSchema }),
 ])
 /** Program-assembled selected dimensions, retaining their exact source content. */
 export const settingsCollectionSchema = z.strictObject({
@@ -21,7 +22,7 @@ export const settingsCollectionSchema = z.strictObject({
   dimensions: z.array(StageOutputSchemas.settings).nonempty(),
 })
 const reference = z.strictObject({
-  id: artifactIdSchema, kind: z.enum(['settings', 'book-outline', 'chapter-outline', 'body', 'continuity']),
+  id: artifactIdSchema, kind: z.enum(['settings', 'book-outline', 'chapter-outline', 'body', 'continuity', 'continuity-snapshot']),
   revision: z.number().int().positive(), sha256: z.string().regex(/^[a-f0-9]{64}$/),
   chars: z.number().int().nonnegative(), bytes: z.number().int().nonnegative(),
 })
@@ -45,6 +46,8 @@ export const appliedChapterSchema = z.strictObject({
   obligations: StageOutputSchemas.continuity.shape.obligations,
   wordBounds: z.strictObject({ minChapterWords: z.number().int().positive(), maxChapterWords: z.number().int().positive() })
     .refine(bounds => bounds.minChapterWords <= bounds.maxChapterWords, 'Chapter word bounds must be ordered'),
+  /** Reviewed compact snapshot for this applied pair. Absent on records written before snapshots; null until review attaches one. */
+  snapshot: reference.extend({ kind: z.literal('continuity-snapshot') }).nullable().optional(),
 })
 /** One retained candidate record. */
 export type ManuscriptRecord = z.infer<typeof manuscriptRecordSchema>

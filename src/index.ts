@@ -14,6 +14,7 @@ import { StageDeliveries, registerStageDeliveryProjection } from './stage-delive
 import type { ResearchLimits } from './contracts.ts'
 import { onQuoteRepair } from './evidence-quote.ts'
 import { assertVerifiedDshHost, resolvedSubagentPackageVersion } from './host-contract.ts'
+import { normalizeWritingModel } from './writing-model.ts'
 
 export { openWritingService, WritingService } from './service.ts'
 export * from './contracts.ts'
@@ -30,7 +31,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /** Explicit size bounds and a Session-relative directory for version previews. */
-export interface Config extends ResearchLimits, RunExecutionLimits {
+export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writingModel'> {
   maxRunAttempts: number
   maxArtifactBytes: number
   maxReadChars: number
@@ -43,10 +44,14 @@ export interface Config extends ResearchLimits, RunExecutionLimits {
   /** Body reviews on prompt versions 5 and 6 turn AI-tone findings quoting the body into blocking issues. Prompt version 7 records the same switch and reports a density grade instead of blocking. Frozen into each new run. Default true. */
   aiToneBlocking: boolean
   /**
-   * Writing-stage model route. `inherit` uses the parent Agent's configured model and subscription.
-   * `opencode-go` is rejected: OpenCode Go is a host subscription, and this plugin registers no adapter.
+   * Writing-stage model route. `inherit` uses the parent Agent's configured model and subscription for every stage.
+   * A map names planning, review and body. `opencode-go` is rejected: OpenCode Go is a host subscription, and this plugin registers no adapter.
    */
-  writingModel: string
+  writingModel: string | { planning?: 'inherit' | { provider: string; model: string }; review?: 'inherit' | { provider: string; model: string }; body?: 'inherit' | { provider: string; model: string } }
+  /** When false, research is not run. Default false. Enable it to use the host's official retrieval. */
+  researchEnabled: boolean
+  /** Skip research when remaining native web-call slots are below this floor. Default 1. */
+  researchBudgetFloor: number
 }
 
 export const Config: z<Config> = z.object({
@@ -70,7 +75,9 @@ export const Config: z<Config> = z.object({
   allowIncompleteSettings: z.boolean().default(false),
   allowSettingsImport: z.boolean().default(false),
   aiToneBlocking: z.boolean().default(true),
-  writingModel: z.string().default('inherit'),
+  writingModel: z.any().default('inherit'),
+  researchEnabled: z.boolean().default(false),
+  researchBudgetFloor: z.number().default(1),
   maxResearchQuestions: z.number().default(12),
   maxResearchCalls: z.number().default(12),
   maxResearchSources: z.number().default(24),
@@ -104,14 +111,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.stageTimeoutMs > 2_147_483_647) throw new Error('stageTimeoutMs exceeds the supported timer range')
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
-  if (config.writingModel === 'opencode-go') throw new Error('writingModel opencode-go is not provided by this plugin. OpenCode Go is a host subscription. Set writingModel to inherit so writing stages use the parent model and subscription.')
-  if (config.writingModel !== 'inherit') throw new Error('writingModel must be inherit so writing stages use the configured parent model and subscription')
+  const writingModel = normalizeWritingModel(config.writingModel)
+  if (!Number.isSafeInteger(config.researchBudgetFloor) || config.researchBudgetFloor < 0) throw new Error('researchBudgetFloor must be a finite nonnegative integer')
+  if (typeof config.researchEnabled !== 'boolean') throw new Error('researchEnabled must be a boolean')
   assertVerifiedDshHost(resolvedSubagentPackageVersion(), ctx.get('subagents'), ctx.get('agents'))
   const executionLimits: RunExecutionLimits = { stageProvider: config.stageProvider, maxDelegationDepth: config.maxDelegationDepth,
     maxStageRequests: config.maxStageRequests, stageTimeoutMs: config.stageTimeoutMs, maxRepairAttempts: config.maxRepairAttempts,
     maxParallelStages: config.maxParallelStages, settingsCandidateCount,
     minChapterWords: config.minChapterWords, maxChapterWords: config.maxChapterWords,
-    aiToneBlocking: config.aiToneBlocking }
+    aiToneBlocking: config.aiToneBlocking, writingModel, researchEnabled: config.researchEnabled, researchBudgetFloor: config.researchBudgetFloor }
   const researchLimits: ResearchLimits = {
     maxResearchQuestions: config.maxResearchQuestions,
     maxResearchCalls: config.maxResearchCalls,

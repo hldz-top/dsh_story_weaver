@@ -38,6 +38,12 @@ const runSchema = {
     executionLimits: { type: 'object', required: true, additionalProperties: false, properties: {
       maxRepairAttempts: integer, maxParallelStages: integer, settingsCandidateCount: { type: 'integer' }, maxStageRequests: integer, stageTimeoutMs: integer,
       maxDelegationDepth: integer, minChapterWords: integer, maxChapterWords: integer, stageProvider: text, aiToneBlocking: { type: 'boolean' },
+      researchEnabled: { type: 'boolean' }, researchBudgetFloor: { type: 'integer' },
+      writingModel: { type: 'object', additionalProperties: false, properties: {
+        planning: { required: true, oneOf: [{ type: 'string', enum: ['inherit'] }, { type: 'object', additionalProperties: false, properties: { provider: text, model: text } }] },
+        review: { required: true, oneOf: [{ type: 'string', enum: ['inherit'] }, { type: 'object', additionalProperties: false, properties: { provider: text, model: text } }] },
+        body: { required: true, oneOf: [{ type: 'string', enum: ['inherit'] }, { type: 'object', additionalProperties: false, properties: { provider: text, model: text } }] },
+      } },
     } },
     attempts: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
       id: text, parentSessionId: text, key: text, inputRefs, status: { ...text, enum: ['prepared', 'running', 'succeeded', 'failed', 'unknown'] },
@@ -63,6 +69,7 @@ const manuscriptCandidate = { type: 'object', additionalProperties: false, prope
     { type: 'object', additionalProperties: false, properties: { kind: { ...text, enum: ['book-outline'] }, chapterCount: integer } },
     { type: 'object', additionalProperties: false, properties: { kind: { ...text, enum: ['chapter-outline', 'body'] }, chapterNumber: integer } },
     { type: 'object', additionalProperties: false, properties: { kind: { ...text, enum: ['continuity'] }, chapterNumber: integer, bodyId: text } },
+    { type: 'object', additionalProperties: false, properties: { kind: { ...text, enum: ['continuity-snapshot'] }, chapterNumber: integer, bodyId: text, continuityId: text } },
   ] },
   revisionOf: nullableText, artifact, inputRefs, childSessionId: nullableText, status: candidateStatus, stale: boolean, review: nullableArtifact, changedInputs: inputRefs,
   wordCount: { required: true, oneOf: [{ type: 'integer' }, { type: 'null' }] },
@@ -73,6 +80,7 @@ const appliedChapter = { type: 'object', additionalProperties: false, properties
   wordBounds: { type: 'object', required: true, additionalProperties: false, properties: { minChapterWords: integer, maxChapterWords: integer } },
   wordCount: integer, stale: boolean, changedInputs: inputRefs,
   obligations: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { id: text, status: { ...text, enum: ['open', 'fulfilled'] } } } },
+  snapshot: { required: true, oneOf: [artifactSchema, { type: 'null' }] },
 } } as const
 function settingsValue(candidate: SettingsCandidateView) {
   return { dimensionCode: candidate.dimensionCode, revisionOf: candidate.revisionOf, artifact: candidate.artifact, inputRefs: candidate.inputRefs.map(ref => ({ ...ref })),
@@ -169,7 +177,8 @@ export function registerRunTools(ctx: Context, service: WritingService, runner: 
       return { novelId, history: manuscript.history.map(manuscriptValue), heads: manuscript.heads.map(manuscriptValue),
         appliedChapters: manuscript.appliedChapters.map(chapter => ({ chapterNumber: chapter.chapterNumber, body: chapter.body, bodyReview: chapter.bodyReview,
           continuity: chapter.continuity, continuityReview: chapter.continuityReview, wordBounds: chapter.wordBounds, wordCount: chapter.wordCount,
-          stale: chapter.stale, changedInputs: chapter.changedInputs.map(ref => ({ ...ref })), obligations: chapter.obligations.map(obligation => ({ id: obligation.id, status: obligation.status })) })) }
+          stale: chapter.stale, changedInputs: chapter.changedInputs.map(ref => ({ ...ref })), obligations: chapter.obligations.map(obligation => ({ id: obligation.id, status: obligation.status })),
+          snapshot: chapter.snapshot ?? null })) }
     },
   })))
   ctx.effect(() => ctx.tools.register(defineStoryTool({

@@ -120,7 +120,7 @@ it.each(['json', 'sqlite'] as const)('%s persists a reviewed book plan with exac
   const target = { kind: 'book-outline' as const, chapterCount: 2 }
   const context = h.service.manuscriptInputs(actor, { novelId: novel.id, target, researchPlanId })
   expect(context.inputRefs.some(ref => ref.id === settings.artifact.id)).toBe(true)
-  expect(context.priorChapter).toBeNull()
+  expect(context.continuitySnapshots).toEqual([])
   const output = { version: 1, inputRefs: context.inputRefs.map(ref => ({ artifactId: ref.id, sha256: ref.sha256 })),
     contentMarkdown: 'The keeper solves the mystery.', ending: 'The key is recovered.', characterArcs: [{ character: 'Keeper', development: 'Faces the truth.' }],
     chapters: [{ chapterNumber: 1, title: 'The log', purpose: 'Recover the log.', targetWords: 3000, obligations: [{ id: 'log', description: 'The log is recovered.' }] },
@@ -175,7 +175,7 @@ it.each(['json', 'sqlite'] as const)('%s admits chapter one from an exact book o
   const { h, actor, novel, book, researchPlanId } = await appliedBook(backend)
   const target = { kind: 'chapter-outline' as const, chapterNumber: 1 }
   const context = h.service.manuscriptInputs(actor, { novelId: novel.id, target, researchPlanId })
-  expect(context.priorChapter).toBeNull()
+  expect(context.continuitySnapshots).toEqual([])
   expect(context.obligations).toEqual([{ id: 'log', description: 'The log is recovered.' }])
   expect(context.inputRefs.some(ref => ref.id === book.artifact.id)).toBe(true)
   expect(h.service.manuscriptResearchInputs(actor, { novelId: novel.id, target }).map(ref => ref.kind)).toEqual(['creative-brief', 'settings', 'book-outline'])
@@ -260,8 +260,14 @@ it.each(['json', 'sqlite'] as const)('%s applies body, actual continuity and obl
   const view = h.service.getManuscript(actor, novel.id)
   expect(view.appliedChapters).toEqual([applied])
   expect(view.history.filter(item => item.artifact.id === body.artifact.id || item.artifact.id === continuity.artifact.id).map(item => item.status)).toEqual(['applied', 'applied'])
+  const snapshotRefs = [body.artifact, continuity.artifact].map(ref => ({ artifactId: ref.id, sha256: ref.sha256 }))
+  const snapshot = await h.service.saveContinuitySnapshot(actor, { novelId: novel.id, requestId: parseRequestId('snapshot'), chapterNumber: 1,
+    bodyId: body.artifact.id, continuityId: continuity.artifact.id, childSessionId: child, snapshotThrough: 0,
+    output: { version: 1, inputRefs: snapshotRefs, chapterNumber: 1, characterStatus: [{ name: 'Keeper', status: 'Has the log.' }], unrecoveredForeshadowing: [], usedPlotBridges: [{ note: 'The log was recovered.' }] } })
+  const snapshotReview = await reviewVersion(h, actor, novel.id, snapshot, 'snapshot-review', 'Has the log.')
+  await h.service.attachContinuitySnapshot(actor, { novelId: novel.id, chapterNumber: 1, bodyId: body.artifact.id, continuityId: continuity.artifact.id, snapshotId: snapshot.artifact.id, reviewId: snapshotReview.reviewId })
   const next = h.service.manuscriptInputs(actor, { novelId: novel.id, researchPlanId, target: { kind: 'chapter-outline', chapterNumber: 2 } })
-  expect(next.priorChapter).toEqual({ body: body.artifact, continuity: continuity.artifact })
+  expect(next.continuitySnapshots.map(ref => ref.id)).toEqual([snapshot.artifact.id])
   expect(next.obligations).toEqual([{ id: 'key', description: 'The key is recovered.' }])
 })
 
@@ -365,12 +371,18 @@ it.each(['candidate-child', 'review-child', 'body-adopted-without-pair'] as cons
   expect(() => h.service.getManuscript(actor, novel.id)).toThrow()
 })
 
-it('rejects planned content substituted for the previous applied continuity version', async () => {
-  const { h, actor, novel, researchPlanId, apply, outline } = await completedPair('json')
+it('rejects planned content substituted for a reviewed continuity snapshot', async () => {
+  const { h, actor, novel, researchPlanId, apply, outline, body, continuity } = await completedPair('json')
   await h.service.applyChapter(actor, apply)
+  const snapshotRefs = [body.artifact, continuity.artifact].map(ref => ({ artifactId: ref.id, sha256: ref.sha256 }))
+  const snapshot = await h.service.saveContinuitySnapshot(actor, { novelId: novel.id, requestId: parseRequestId('snapshot'), chapterNumber: 1,
+    bodyId: body.artifact.id, continuityId: continuity.artifact.id, childSessionId: child, snapshotThrough: 0,
+    output: { version: 1, inputRefs: snapshotRefs, chapterNumber: 1, characterStatus: [{ name: 'Keeper', status: 'Has the log.' }], unrecoveredForeshadowing: [], usedPlotBridges: [{ note: 'The log was recovered.' }] } })
+  const snapshotReview = await reviewVersion(h, actor, novel.id, snapshot, 'snapshot-review', 'Has the log.')
+  await h.service.attachContinuitySnapshot(actor, { novelId: novel.id, chapterNumber: 1, bodyId: body.artifact.id, continuityId: continuity.artifact.id, snapshotId: snapshot.artifact.id, reviewId: snapshotReview.reviewId })
   const target = { kind: 'chapter-outline' as const, chapterNumber: 2 }
   const context = h.service.manuscriptInputs(actor, { novelId: novel.id, target, researchPlanId })
-  const inputRefs = context.inputRefs.map(ref => ref.id === apply.continuityId
+  const inputRefs = context.inputRefs.map(ref => ref.id === snapshot.artifact.id
     ? { artifactId: outline.artifact.id, sha256: outline.artifact.sha256 } : { artifactId: ref.id, sha256: ref.sha256 })
   await expect(h.service.saveManuscriptCandidate(actor, { novelId: novel.id, requestId: parseRequestId('wrong-prior'), target, researchPlanId, childSessionId: child,
     output: { version: 1, inputRefs, chapterNumber: 2, title: 'The key', targetWords: 3000, throughLine: 'Find the key.', constraints: [], obligations: context.obligations,

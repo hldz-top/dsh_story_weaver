@@ -7,7 +7,7 @@ const brief = { artifactId: parseArtifactId('artifact_00000000-0000-4000-8000-00
 const candidate = { artifactId: parseArtifactId('artifact_00000000-0000-4000-8000-000000000002'), sha256: 'b'.repeat(64) }
 
 it('exposes every stage schema as strict model JSON without executing output transforms', () => {
-  expect(Object.keys(StageOutputSchemas)).toEqual(['settings', 'review', 'book-outline', 'chapter-outline', 'body', 'continuity'])
+  expect(Object.keys(StageOutputSchemas)).toEqual(['settings', 'review', 'book-outline', 'chapter-outline', 'body', 'continuity', 'continuity-snapshot'])
   for (const schema of Object.values(StageOutputSchemas)) {
     expect(z.toJSONSchema(schema, { io: 'input' })).toMatchObject({
       type: 'object', additionalProperties: false, required: expect.arrayContaining(['version', 'inputRefs']),

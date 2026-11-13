@@ -31,7 +31,7 @@ const artifactRef = z.strictObject({ id: artifactIdSchema, kind: z.enum(artifact
 const promptData = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('research'), novelId: novelIdSchema, briefArtifactId: artifactIdSchema, purpose: z.string(), inputs: z.array(artifactRef), requestId: requestIdSchema, necessity: researchNecessitySchema.optional() }),
   z.object({ kind: z.literal('research-planning'), novelId: novelIdSchema, briefArtifactId: artifactIdSchema, purpose: z.string(), inputs: z.array(artifactRef), requestId: requestIdSchema, outputTarget: z.record(z.string(), z.unknown()) }),
-  z.object({ kind: z.enum(['settings', 'review', 'book-outline', 'chapter-outline', 'body', 'continuity']), novelId: novelIdSchema, inputs: z.array(promptInput), task: z.string(), requirements: z.array(z.string()) }),
+  z.object({ kind: z.enum(['settings', 'review', 'book-outline', 'chapter-outline', 'body', 'continuity', 'continuity-snapshot']), novelId: novelIdSchema, inputs: z.array(promptInput), task: z.string(), requirements: z.array(z.string()) }),
   z.object({ kind: z.literal('review-citation-repair'), novelId: novelIdSchema, inputs: z.array(promptInput), items: z.array(z.object({ location: z.string(), claim: z.record(z.string(), z.unknown()), rejected: z.array(z.object({ artifactId: z.string(), quote: z.string(), hostReason: z.string() })) })) }),
 ])
 const taskSchema = z.object({
@@ -203,6 +203,7 @@ function quoteCandidate(candidate: WritingFixtureSource): string {
     case 'chapter-outline': return StageOutputSchemas['chapter-outline'].parse(value).throughLine
     case 'body': return StageOutputSchemas.body.parse(value).scenes[0]!.text.slice(0, 100)
     case 'continuity': return StageOutputSchemas.continuity.parse(value).summary
+    case 'continuity-snapshot': return StageOutputSchemas['continuity-snapshot'].parse(value).characterStatus[0]?.status ?? StageOutputSchemas['continuity-snapshot'].parse(value).usedPlotBridges[0]?.note ?? 'snapshot'
     default: throw new Error(`Unsupported fixture review target: ${candidate.kind}`)
   }
 }
@@ -257,6 +258,10 @@ function generate(state: ChildState): object {
       const characters = prior === null ? [] : prior.characters.filter(character => character.name !== '林澜')
       return { ...base, chapterNumber, summary: `第${chapterNumber}章结束时，林澜已核实航标并把证据写入日志。`, characters: [...characters, { name: '林澜', state: `已完成第${chapterNumber}处航标的核查，仍在雾港与同伴守灯。` }],
         timeline: [...inheritedTimeline, { event: `林澜完成第${chapterNumber}处航标调查。`, evidence }], obligations: required(task.obligations, 'obligations').map(item => ({ id: item.id, status: 'fulfilled', explanation: item.description, evidence })) }
+    }
+    case 'continuity-snapshot': {
+      const chapterNumber = required(task.chapterNumber, 'chapterNumber')
+      return { ...base, chapterNumber, characterStatus: [{ name: '林澜', status: `已完成第${chapterNumber}处航标核查。` }], unrecoveredForeshadowing: [], usedPlotBridges: [{ note: `第${chapterNumber}章使用了航标信号。` }] }
     }
   }
 }
@@ -367,7 +372,7 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   }
   await fixture.ctx.plugin(Present, new Present.Config())
   await registerStageDeliveryProjection(fixture.ctx)
-  const executionLimits: RunExecutionLimits = { stageProvider: 'stage-spawn', maxDelegationDepth: 2, maxStageRequests: 100, stageTimeoutMs: 10_000, maxParallelStages: 2, settingsCandidateCount: 1, maxRepairAttempts: 1, minChapterWords: 3000, maxChapterWords: 5000, ...options.executionLimits }
+  const executionLimits: RunExecutionLimits = { stageProvider: 'stage-spawn', maxDelegationDepth: 2, maxStageRequests: 100, stageTimeoutMs: 10_000, maxParallelStages: 2, settingsCandidateCount: 1, maxRepairAttempts: 1, minChapterWords: 3000, maxChapterWords: 5000, researchEnabled: true, researchBudgetFloor: 1, ...options.executionLimits }
   const service = await openWritingService(fixture.ctx.storageDomain, { maxArtifactBytes: 262_144, maxReadChars }, { maxResearchQuestions: 12, maxResearchCalls: 4, maxResearchSources: 8, maxEvidenceChars: 8192, maxResearchLogEvents: 2048 }, executionLimits)
   fixture.ctx.effect(() => () => service.close())
   const runs = await openRunStore(fixture.ctx.storageDomain, { maxAttempts: 256, maxOutputBytes: 262_144 })

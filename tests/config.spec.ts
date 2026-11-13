@@ -92,6 +92,8 @@ it('publishes the bounded native run defaults without overriding the model route
   expect(Object.hasOwn(config, 'provider')).toBe(false)
   expect(Object.hasOwn(config, 'model')).toBe(false)
   expect(config.writingModel).toBe('inherit')
+  expect(config.researchEnabled).toBe(false)
+  expect(config.researchBudgetFloor).toBe(1)
 })
 
 const positiveRunFields = ['maxDelegationDepth', 'maxStageRequests', 'stageTimeoutMs', 'maxParallelStages', 'settingsCandidateCount', 'maxRunAttempts'] as const
@@ -116,6 +118,8 @@ it.each([
   { override: { stageProvider: '  ' }, message: 'stageProvider must name a configured native in-process spawn provider' },
   { override: { writingModel: 'opencode-go' }, message: 'writingModel opencode-go is not provided by this plugin. OpenCode Go is a host subscription. Set writingModel to inherit so writing stages use the parent model and subscription.' },
   { override: { writingModel: 'pi-ai' }, message: 'writingModel must be inherit so writing stages use the configured parent model and subscription' },
+  { override: { writingModel: { body: { provider: 'opencode-go', model: 'strong' } } }, message: 'writingModel opencode-go is not provided by this plugin. OpenCode Go is a host subscription. Set writingModel to inherit so writing stages use the parent model and subscription.' },
+  { override: { researchBudgetFloor: -1 }, message: 'researchBudgetFloor must be a finite nonnegative integer' },
 ])('rejects an unsupported native runtime setting: $message', async ({ override, message }) => {
   const ctx = new Context()
   onTestFinished(async () => { await ctx.fiber.dispose() })

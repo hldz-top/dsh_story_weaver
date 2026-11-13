@@ -117,6 +117,27 @@ export type ChapterOutlineOutput = z.infer<typeof chapterOutlineSchema>
 export type BodyOutput = z.infer<typeof bodySchema>
 /** Proposed actual continuity; fulfilled obligations cite the reviewed body. */
 export type ContinuityOutput = z.infer<typeof continuitySchema>
+const snapshotNote = z.strictObject({ note: text })
+/**
+ * Compact facts extracted after a chapter is applied. Counts and note length are host limits, checked by
+ * {@link parseContinuitySnapshot}, so the published schema stays inside the native keyword subset.
+ */
+const continuitySnapshotSchema = inputsSchema.extend({
+  chapterNumber: z.number().int().positive(),
+  characterStatus: z.array(z.strictObject({ name: text, status: text })),
+  unrecoveredForeshadowing: z.array(snapshotNote),
+  usedPlotBridges: z.array(snapshotNote),
+})
+/** One reviewed chapter's compact continuity snapshot. */
+export type ContinuitySnapshotOutput = z.infer<typeof continuitySnapshotSchema>
+/** Host cap on character rows in one snapshot. */
+export const MAX_SNAPSHOT_CHARACTERS = 8
+/** Host cap on unrecovered notes and on used bridges. */
+export const MAX_SNAPSHOT_NOTES = 6
+/** Host cap on a character name, in Unicode code points. */
+export const MAX_SNAPSHOT_NAME_CHARS = 40
+/** Host cap on one status or note, in Unicode code points. */
+export const MAX_SNAPSHOT_NOTE_CHARS = 160
 /** An exact excerpt cited by a model output. */
 export type EvidenceCitation = z.infer<typeof citationSchema>
 /** Host-verified text available for exact quotation checks. */
@@ -128,7 +149,7 @@ export const chapterOutlineSchemaV1 = chapterOutlineSchemaLegacy.omit({ stateNot
 /** Model response schemas; use z.toJSONSchema(schema, { io: 'input' }) for the branded identifier parsers. */
 export const StageOutputSchemas = {
   settings: settingsSchema, review: reviewSchema, 'book-outline': bookOutlineSchema, 'chapter-outline': chapterOutlineSchema,
-  body: bodySchema, continuity: continuitySchema,
+  body: bodySchema, continuity: continuitySchema, 'continuity-snapshot': continuitySnapshotSchema,
 } as const
 
 function unique(values: readonly string[], label: string): void {
@@ -400,4 +421,31 @@ export function parseContinuityOutput(value: unknown, expected: {
     return obligation
   })
   return { ...output, timeline, obligations }
+}
+
+/**
+ * Admit one compact snapshot. The published schema stays unbounded; these caps keep the stored note usable.
+ * @param value - Model snapshot JSON.
+ * @param expected - Exact inputs and chapter number.
+ * @returns The detached snapshot.
+ */
+export function parseContinuitySnapshot(value: unknown, expected: { inputRefs: readonly StageInputRef[]; chapterNumber: number }): ContinuitySnapshotOutput {
+  const output = parseModelOutput(continuitySnapshotSchema, value, 'Continuity snapshot output')
+  matchingInputs(output.inputRefs, expected.inputRefs)
+  if (output.chapterNumber !== expected.chapterNumber) throw new StageValidationRejection(`Continuity snapshot does not match the requested chapter: got ${output.chapterNumber}, expected ${expected.chapterNumber}`)
+  if (output.characterStatus.length > MAX_SNAPSHOT_CHARACTERS) throw new StageValidationRejection(`Continuity snapshot lists ${output.characterStatus.length} characters; at most ${MAX_SNAPSHOT_CHARACTERS}`)
+  if (output.unrecoveredForeshadowing.length > MAX_SNAPSHOT_NOTES) throw new StageValidationRejection(`Continuity snapshot lists ${output.unrecoveredForeshadowing.length} unrecovered notes; at most ${MAX_SNAPSHOT_NOTES}`)
+  if (output.usedPlotBridges.length > MAX_SNAPSHOT_NOTES) throw new StageValidationRejection(`Continuity snapshot lists ${output.usedPlotBridges.length} used bridges; at most ${MAX_SNAPSHOT_NOTES}`)
+  unique(output.characterStatus.map(character => character.name), 'snapshot character')
+  for (const character of output.characterStatus) {
+    boundedNote(character.name, MAX_SNAPSHOT_NAME_CHARS, `character ${echo(character.name)}`)
+    boundedNote(character.status, MAX_SNAPSHOT_NOTE_CHARS, `status of ${echo(character.name)}`)
+  }
+  for (const note of [...output.unrecoveredForeshadowing, ...output.usedPlotBridges]) boundedNote(note.note, MAX_SNAPSHOT_NOTE_CHARS, 'snapshot note')
+  return output
+}
+
+function boundedNote(value: string, limit: number, label: string): void {
+  const chars = [...value].length
+  if (chars > limit) throw new StageValidationRejection(`Continuity snapshot ${label} is ${chars} characters; at most ${limit}`)
 }

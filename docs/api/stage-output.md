@@ -5,11 +5,11 @@ description: "Strict model-output schemas and version, evidence, scene, and obli
 
 ## Summary
 
-[stage-output.ts](../../src/stage-output.ts) parses decoded model JSON for settings, review, book outline, chapter outline, body, and continuity. Its exported TypeScript types and `StageOutputSchemas` define the fields. The host supplies expected versions and stage requirements; successful parsing returns a detached candidate without saving or applying it. [The writing specification](../specs/story-writing-plugin/spec.md) owns the complete review and application requirements.
+[stage-output.ts](../../src/stage-output.ts) parses decoded model JSON for settings, review, book outline, chapter outline, body, continuity, and continuity snapshots. Its exported TypeScript types and `StageOutputSchemas` define the fields. The host supplies expected versions and stage requirements; successful parsing returns a detached candidate without saving or applying it. [The writing specification](../specs/story-writing-plugin/spec.md) owns the complete review and application requirements.
 
 ## Model schemas and shared fields
 
-`StageOutputSchemas` exposes `settings`, `review`, `book-outline`, `chapter-outline`, `body`, and `continuity`. Generate a model response schema with `z.toJSONSchema(StageOutputSchemas.settings, { io: 'input' })`. The input form preserves the JSON representation of identifiers that become branded TypeScript values during parsing. Always run the matching parser after receiving the model value: generated JSON Schema does not enforce relationships with host inputs or verify quotations.
+`StageOutputSchemas` exposes `settings`, `review`, `book-outline`, `chapter-outline`, `body`, `continuity`, and `continuity-snapshot`. Generate a model response schema with `z.toJSONSchema(StageOutputSchemas.settings, { io: 'input' })`. The input form preserves the JSON representation of identifiers that become branded TypeScript values during parsing. Always run the matching parser after receiving the model value: generated JSON Schema does not enforce relationships with host inputs or verify quotations.
 
 Each parser accepts a decoded `unknown` value. It does not decode a JSON string, strip a Markdown fence, accept extra fields, insert defaults, or recover a partial result. All records are strict. Required prose is nonblank and preserves its original characters. The host owns configured artifact-byte limits for model outputs and source text; these parsers do not add deployment limits.
 

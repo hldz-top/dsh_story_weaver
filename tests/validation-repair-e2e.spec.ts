@@ -1,9 +1,9 @@
 /**
  * Offline end-to-end proof for the unified output-validation repair loop.
  *
- * The fake stage provider runs the complete 49-stage pipeline of the live prompt (settings roots a4, a5 and e1, which plan
- * a1, a2, a3, a4, a5 and e1; one settings-collection review; the book outline; three chapters of outline, body and
- * continuity, each with research and review). One violation of every kind is injected into the first attempt of at least
+ * The fake stage provider runs the complete 55-stage pipeline of the live prompt (settings roots a4, a5 and e1, which plan
+ * a1, a2, a3, a4, a5 and e1; one settings-collection review; the book outline; three chapters of outline, body,
+ * continuity and a reviewed continuity snapshot, each with research where the stage uses it and review). One violation of every kind is injected into the first attempt of at least
  * one stage of every stage kind (tests/support/validation-injections.ts). With maxRepairAttempts 1 each is repaired by
  * exactly one replacement and the run completes; the validation-repair-zero-*.spec.ts files show that with
  * maxRepairAttempts 0 each fails the run with its specific message.
@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest'
 import type { FinishReason } from '@deepseek-ai/dsh-llm'
 import { injections, isChapterStage, next, pipeline, PIPELINE_STAGES, stageKeys, type Injection } from './support/validation-injections.ts'
 
-describe('unified validation repair across the full 49-stage pipeline (offline fake provider)', () => {
+describe('unified validation repair across the full 55-stage pipeline (offline fake provider)', () => {
   it('repairs every injected violation, one per kind across every stage kind, with a single replacement each, and completes', async () => {
     const combined = injections.filter(item => item.solo !== true)
     const { fixture, run, fired } = await pipeline(1, combined)
@@ -37,7 +37,7 @@ describe('unified validation repair across the full 49-stage pipeline (offline f
       if (replacement !== attempt!.key) replacements.add(replacement)
       report.push(`${injection.stage} | ${injection.violation} | ${attempt!.key} -> ${replacement}`)
     }
-    // The live prompt plans exactly 49 stages; replacements only add attempt indices (candidate/n, review/n, research repair/n) to those stages.
+    // The live prompt plans exactly 55 stages; replacements only add attempt indices (candidate/n, review/n, research repair/n) to those stages.
     const logical = new Set(stageKeys(run.attempts).map(key => key.replace(/\/repair\/\d+$/u, '').replace(/\/citations$/u, '').replace(/\/(candidate|review)\/\d+/gu, '/$1')))
     expect([...logical], JSON.stringify([...logical])).toHaveLength(PIPELINE_STAGES)
     expect(replacements.size).toBe(combined.filter(item => item.finish === undefined).length)

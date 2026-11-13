@@ -24,6 +24,10 @@ export function parseAttemptId(value: unknown): AttemptId { return attemptIdSche
 const sessionIdSchema = z.string().min(1).transform(brandString<SessionId>)
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const limitsSchema = z.strictObject({ maxAttempts: positive, maxOutputBytes: positive })
+const writingModelChoiceSchema = z.union([
+  z.literal('inherit'),
+  z.strictObject({ provider: z.string().min(1), model: z.string().min(1) }).refine(route => route.provider !== 'opencode-go' && route.model !== 'opencode-go', 'OpenCode Go is not a plugin model route'),
+])
 const executionLimitsSchema = z.strictObject({
   maxRepairAttempts: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), maxParallelStages: positive,
   // How many candidates one settings dimension generates on its first pass. Absent on runs stored before the field
@@ -34,6 +38,14 @@ const executionLimitsSchema = z.strictObject({
   // Prompt version 5 and later only: whether AI-tone findings in a body review block. Recorded on every such run (begin fills
   // the default, on); absent on runs created before version 5, which keep advisory AI tone whatever the current config says.
   aiToneBlocking: z.boolean().exactOptional(),
+  /** Per-stage route captured for the run. Absent on runs stored before stage routing; those keep the parent model. */
+  writingModel: z.strictObject({
+    planning: writingModelChoiceSchema, review: writingModelChoiceSchema, body: writingModelChoiceSchema,
+  }).exactOptional(),
+  /** Absent on runs stored before the switch. Those runs researched. A present false skips research. */
+  researchEnabled: z.boolean().exactOptional(),
+  /** Skip external research when remaining native web calls are below this floor. Absent means 1. */
+  researchBudgetFloor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).exactOptional(),
 }).refine(value => value.minChapterWords <= value.maxChapterWords, 'Invalid chapter word range')
 /** Native execution and writing limits captured before a run; model selection stays with DSH. */
 export type RunExecutionLimits = z.infer<typeof executionLimitsSchema>
@@ -139,7 +151,7 @@ export class RunStoreError extends Error {
 }
 function fail(code: string, message: string): never { throw new RunStoreError(code, message) }
 /** One resume-compared limit whose captured value differs from the current deployment's. */
-export interface RunLimitMismatch { readonly key: string; readonly saved: number | boolean | null; readonly current: number | boolean }
+export interface RunLimitMismatch { readonly key: string; readonly saved: number | boolean | string | null; readonly current: number | boolean | string }
 /**
  * A resume refused because captured limits differ from the current config. Readable text first, then one JSON line
  * `{"code":"run-limits","mismatched":[{"key":...,"saved":...,"current":...}]}` naming every differing key.
