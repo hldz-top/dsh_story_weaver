@@ -145,14 +145,19 @@ it('renders full assembled settings and every book chapter obligation', () => {
   const book = { version: 1, inputRefs, contentMarkdown: 'A harbor mystery.', ending: 'The missing ship returns.', characterArcs: [{ character: 'Keeper', development: 'Learns to trust.' }],
     chapters: [{ chapterNumber: 1, title: 'Fog', purpose: 'Find the manifest.', targetWords: 4000, obligations: [{ id: 'manifest', description: 'Recover the hidden manifest.' }] }] }
   const markdown = artifactMarkdown(artifact('book-outline', JSON.stringify(book)))
-  for (const text of ['The missing ship returns.', 'Learns to trust.', 'Recover the hidden manifest.', '4000']) expect(markdown).toContain(text)
+  for (const text of ['The missing ship returns.', 'Learns to trust.', 'Recover the hidden manifest.']) expect(markdown).toContain(text)
+  expect(markdown).not.toContain('Target words')
+  expect(markdown).not.toContain('4000')
 })
 
 it('renders chapter plans, complete scene prose and actual continuity without dropping the last evidence', () => {
   const inputRefs = [{ artifactId, sha256: 'a'.repeat(64) }]
   const outline = { version: 1, inputRefs, chapterNumber: 1, title: 'Fog', targetWords: 4000, throughLine: 'Find the manifest.', constraints: ['The light remains off.'],
     scenes: [{ id: 'search', purpose: 'Locate the hidden log.', action: 'Search the tower.', obligationIds: ['manifest'] }], obligations: [{ id: 'manifest', description: 'Recover the manifest.' }] }
-  expect(artifactMarkdown(artifact('chapter-outline', JSON.stringify(outline)))).toContain('The light remains off.')
+  const chapterPlan = artifactMarkdown(artifact('chapter-outline', JSON.stringify(outline)))
+  expect(chapterPlan).toContain('The light remains off.')
+  expect(chapterPlan).not.toContain('Target words')
+  expect(chapterPlan).not.toContain('4000')
   const prose = '夜色沉沉。'.repeat(1000) + '\nEND-BODY'
   const body = { version: 1, inputRefs, chapterNumber: 1, scenes: [{ sceneId: 'search', text: prose }] }
   const chapter = artifactMarkdown(artifact('body', JSON.stringify(body)))

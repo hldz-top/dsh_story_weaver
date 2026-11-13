@@ -19,7 +19,7 @@ function lastLine(text: string | null | undefined): Record<string, unknown> {
 }
 
 describe('prompt version 5', () => {
-  it('is no longer the version new runs record', () => { expect(CURRENT_PROMPT_VERSION).toBe(6) })
+  it('is no longer the version new runs record', () => { expect(CURRENT_PROMPT_VERSION).toBe(7) })
 
   it('keeps every stage byte-identical to version 4 unless a body review has the switch on', () => {
     for (const kind of kinds) for (const reviewedKind of [undefined, ...kinds]) {
@@ -148,7 +148,15 @@ async function scripted(script: Script, options: WritingFixtureOptions = {}) {
   return { fixture, bodyTasks, reviewPrompts, counts: () => ({ bodies, reviews }) }
 }
 
-async function write(fixture: Awaited<ReturnType<typeof useWritingFixture>>): Promise<WritingRun> {
+async function write(fixture: Awaited<ReturnType<typeof useWritingFixture>>, version: 6 | 7 = 7): Promise<WritingRun> {
+  if (version === 6) {
+    const begun = await fixture.runs.begin(fixture.actor, { ...fixture.input, chapterCount: 1, throughChapter: 1, revision: null,
+      executionLimits: fixture.runner.limits, serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits } }, 6)
+    await fixture.runs.finish(fixture.actor, begun.id, 'stopped', 'Stored on prompt version 6.')
+    const outcome = await fixture.run(exec => fixture.runner.resume(exec, begun.id, false))
+    if (outcome.status === 'rejected') throw outcome.reason
+    return outcome.value
+  }
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   return outcome.value
@@ -160,10 +168,10 @@ function applied(fixture: Awaited<ReturnType<typeof useWritingFixture>>): boolea
   return fixture.service.getManuscript(fixture.actor, fixture.novel.id).appliedChapters.some(item => item.chapterNumber === 1)
 }
 
-describe('stop conditions (aiToneBlocking on, the default)', () => {
+describe('prompt version 6 still blocks AI tone when the run froze the switch on', () => {
   it('repairs a body whose review quotes AI tone, telling the writer the exact spans, then applies the clean repair', { timeout: 120_000 }, async () => {
     const { fixture, bodyTasks, reviewPrompts } = await scripted({ prefix: attempt => attempt === 0 ? '说白了，雾港的灯不是灯而是路标。' : '雾港的灯为船指路。', quotes: review => review === 0 ? ['说白了'] : [] })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(run).toMatchObject({ status: 'completed', promptVersion: 6, executionLimits: { aiToneBlocking: true } })
     expect(bodyTasks).toHaveLength(2)
     expect(lastLine(bodyTasks[1])).toEqual({ code: 'review-blocked', reason: 'ai-tone', spans: ['说白了'] })
@@ -175,7 +183,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   it('(a) records an AI-tone issue whose quote is not a verbatim body excerpt with a marker, without blocking', { timeout: 120_000 }, async () => {
     // The first quote is in the body but carries no marker; the second is in no input at all, so admission downgrades it.
     const { fixture, bodyTasks } = await scripted({ prefix: () => '', quotes: review => review === 0 ? ['林澜在第1章继续调查雾港', '说白了这句并不存在于正文'] : [] })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(run.status).toBe('completed')
     expect(bodyTasks).toHaveLength(1)
     expect(reviewBlocks(fixture, run)).toEqual([null])
@@ -187,7 +195,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   it('(b) stops for human review when a repair keeps a reported span, without spending the remaining repair attempts', { timeout: 120_000 }, async () => {
     // The kept 说白了 opens the paragraph, so only its right context identifies it; the edit is beyond that context.
     const { fixture, counts } = await scripted({ prefix: attempt => `说白了，雾港的灯塔今夜不亮，第${attempt}版。`, quotes: () => ['说白了'] }, { executionLimits: { maxRepairAttempts: 3 } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(run.status).toBe('failed')
     expect(lastLine(run.error)).toEqual({ code: 'review-blocked', reason: 'ai-tone-repeat', spans: ['说白了'] })
     expect(counts()).toEqual({ bodies: 2, reviews: 2 })
@@ -197,7 +205,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
 
   it('(b) stops for human review when the repaired body is unchanged and AI tone is reported again', { timeout: 120_000 }, async () => {
     const { fixture, counts } = await scripted({ prefix: () => '说白了，这不是灯，而是路标。', quotes: review => review === 0 ? ['说白了'] : ['不是灯，而是路标'] }, { executionLimits: { maxRepairAttempts: 3 } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(run.status).toBe('failed')
     expect(lastLine(run.error)).toMatchObject({ code: 'review-blocked', reason: 'ai-tone-repeat', spans: ['不是灯，而是路标'] })
     expect(counts()).toEqual({ bodies: 2, reviews: 2 })
@@ -207,7 +215,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   it('(c) ends review-blocked when repair attempts run out, never applying or passing the body', { timeout: 120_000 }, async () => {
     const markers = ['说白了', '说穿了', '先说结论']
     const { fixture, counts } = await scripted({ prefix: attempt => `${markers[attempt]}，雾港的灯第${attempt}次熄灭。`, quotes: review => [markers[review]!] }, { executionLimits: { maxRepairAttempts: 2 } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(run.status).toBe('failed')
     const line = lastLine(run.error)
     expect(line).toEqual({ code: 'review-blocked', reason: 'ai-tone-exhausted', spans: ['先说结论'] })
@@ -226,7 +234,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   ] as const) {
     it(`does not block ${label}`, { timeout: 120_000 }, async () => {
       const { fixture, bodyTasks } = await scripted({ prefix: () => prefix, quotes: review => review === 0 ? [quote] : [] })
-      const run = await write(fixture)
+      const run = await write(fixture, 6)
       expect(run.status).toBe('completed')
       expect(bodyTasks).toHaveLength(1)
       expect(reviewBlocks(fixture, run)).toEqual([null])
@@ -242,7 +250,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   ] as const) {
     it(`still blocks ${label}`, { timeout: 120_000 }, async () => {
       const { fixture, bodyTasks } = await scripted({ prefix: attempt => attempt === 0 ? prefix : '雨停了，他走了。', quotes: review => review === 0 ? [quote] : [] })
-      const run = await write(fixture)
+      const run = await write(fixture, 6)
       expect(run.status).toBe('completed')
       expect(bodyTasks).toHaveLength(2)
       expect(lastLine(bodyTasks[1])).toEqual({ code: 'review-blocked', reason: 'ai-tone', spans: [quote] })
@@ -252,7 +260,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   it('(b) treats a different instance with the same short marker text as new, not a repeat', { timeout: 120_000 }, async () => {
     const prefixes = ['雾起了。然而，灯灭了。', '雾起了，灯灭了。夜深了。然而，船到了。', '雾起了，灯灭了，船到了。']
     const { fixture, counts } = await scripted({ prefix: attempt => prefixes[attempt]!, quotes: review => review < 2 ? ['然而，'] : [] }, { executionLimits: { maxRepairAttempts: 2 } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(run.status).toBe('completed')
     expect(counts()).toEqual({ bodies: 3, reviews: 3 })
   })
@@ -261,7 +269,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
     // Both 然而， open a paragraph, so their left context is empty; only the right context identifies them.
     const prefixes = ['然而，灯灭了。\n然而，船到了。\n', '灯灭了。\n然而，船到了。\n', '灯灭了。\n船到了。\n']
     const { fixture, counts } = await scripted({ prefix: attempt => prefixes[attempt]!, quotes: review => [['然而，灯灭了'], ['然而，船到了'], []][review]! }, { executionLimits: { maxRepairAttempts: 2 } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(run.status).toBe('completed')
     expect(counts()).toEqual({ bodies: 3, reviews: 3 })
     expect(reviewBlocks(fixture, run)).toEqual(['ai-tone', 'ai-tone', null])
@@ -269,14 +277,14 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
 
   it('(b) recognises the same instance when the reviewer quotes it with a different length', { timeout: 120_000 }, async () => {
     const { fixture, counts } = await scripted({ prefix: () => '说白了，雾港的灯不亮。', suffix: attempt => `第${attempt}夜。`, quotes: review => [review === 0 ? '说白了' : '说白了，雾港'] }, { executionLimits: { maxRepairAttempts: 3 } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(lastLine(run.error)).toEqual({ code: 'review-blocked', reason: 'ai-tone-repeat', spans: ['说白了，雾港'] })
     expect(counts()).toEqual({ bodies: 2, reviews: 2 })
   })
 
   it('stops with reason ai-tone when no repair attempt is configured', { timeout: 120_000 }, async () => {
     const { fixture, counts } = await scripted({ prefix: () => '说白了，灯灭了。', quotes: () => ['说白了'] }, { executionLimits: { maxRepairAttempts: 0 } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(lastLine(run.error)).toEqual({ code: 'review-blocked', reason: 'ai-tone', spans: ['说白了'] })
     expect(counts().bodies).toBe(1)
     expect(applied(fixture)).toBe(false)
@@ -285,7 +293,7 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   it('keeps stop-line spans and the aiToneBlock record free of lone surrogates when emoji sit at the span cut', { timeout: 120_000 }, async () => {
     const quote = `说白了${'雾'.repeat(196)}😀😀`
     const { fixture } = await scripted({ prefix: () => `${quote}灯灭了。`, quotes: () => [quote] }, { executionLimits: { maxRepairAttempts: 0 } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     const spans = lastLine(run.error).spans as string[]
     expect(spans).toEqual([`说白了${'雾'.repeat(196)}😀`])
     const recorded = fixture.runs.get(fixture.actor, run.id).attempts.flatMap(attempt => attempt.aiToneBlock?.spans ?? [])
@@ -294,10 +302,32 @@ describe('stop conditions (aiToneBlocking on, the default)', () => {
   })
 })
 
-describe('aiToneBlocking off on version 5 behaves like version 4', () => {
+describe('prompt version 7 grades AI tone and does not block application', () => {
+  for (const [label, prefix, quote] of [
+    ['a single dash', '灯塔——终于亮了。', '灯塔——终于亮了'],
+    ['a single 、 enumeration', '船上有缆绳、铁锚、油灯。', '缆绳、铁锚、油灯'],
+    ['an opener', '说白了，雾港的灯灭了。', '说白了'],
+  ] as const) {
+    it(`applies the chapter when the review quotes ${label}`, { timeout: 120_000 }, async () => {
+      const { fixture, bodyTasks, reviewPrompts } = await scripted({ prefix: () => prefix, quotes: () => [quote] })
+      const run = await write(fixture)
+      expect(run).toMatchObject({ status: 'completed', promptVersion: 7, executionLimits: { aiToneBlocking: true } })
+      expect(bodyTasks).toHaveLength(1)
+      expect(reviewBlocks(fixture, run)).toEqual([null])
+      expect(applied(fixture)).toBe(true)
+      expect(reviewPrompts[0]).toContain('density-graded hint report')
+      expect(reviewPrompts[0]).not.toContain(BLOCKING_PHRASE)
+      const task = JSON.parse(reviewPrompts[0]!.split('\n\nTASK_DATA\n\n')[1]!).task as string
+      const markers = (JSON.parse(task) as { aiToneMarkers: { markers: { rule: string; grade: string }[] } }).aiToneMarkers.markers
+      expect(markers.some(marker => marker.grade === 'hint' || marker.grade === 'notice' || marker.grade === 'heavy')).toBe(true)
+    })
+  }
+})
+
+describe('aiToneBlocking off on version 6 keeps the advisory sentence', () => {
   it('keeps AI tone advisory and the version-4 review sentence', { timeout: 120_000 }, async () => {
     const { fixture, bodyTasks, reviewPrompts } = await scripted({ prefix: () => '说白了，灯灭了。', quotes: () => ['说白了'] }, { executionLimits: { aiToneBlocking: false } })
-    const run = await write(fixture)
+    const run = await write(fixture, 6)
     expect(run).toMatchObject({ status: 'completed', promptVersion: 6, executionLimits: { aiToneBlocking: false } })
     expect(bodyTasks).toHaveLength(1)
     expect(reviewPrompts[0]).toContain(ADVISORY_PHRASE)
@@ -344,7 +374,7 @@ describe('resume rules', () => {
   it('(3) refuses a current-version run whose recorded value differs from the current config, in the limit-mismatch style', async () => {
     const fixture = await useWritingFixture()
     const stopped = await begin(fixture, { ...fixture.runner.limits, aiToneBlocking: false })
-    expect(stopped).toMatchObject({ promptVersion: 6, executionLimits: { aiToneBlocking: false } })
+    expect(stopped).toMatchObject({ promptVersion: 7, executionLimits: { aiToneBlocking: false } })
     const outcome = await fixture.run(exec => fixture.runner.resume(exec, stopped.id, false))
     expect(outcome).toMatchObject({ status: 'rejected', reason: { code: 'run-limits', message: expect.stringContaining('Restore the captured writing and research limits before resuming') } })
     if (outcome.status !== 'rejected') throw new Error('Resume was not refused')

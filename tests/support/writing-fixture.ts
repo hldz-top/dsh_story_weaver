@@ -26,7 +26,7 @@ import { call } from './model.ts'
 import { useStageFixture } from './stage-fixture.ts'
 
 const inputRef = z.object({ artifactId: artifactIdSchema, sha256: z.string() })
-const promptInput = inputRef.extend({ kind: z.enum(artifactKinds), chars: z.number().int().nonnegative(), view: z.literal('prose').optional() })
+const promptInput = inputRef.extend({ kind: z.enum(artifactKinds), chars: z.number().int().nonnegative(), view: z.enum(['prose', 'feed']).optional() })
 const artifactRef = z.strictObject({ id: artifactIdSchema, kind: z.enum(artifactKinds), revision: z.number().int().positive(), sha256: z.string(), chars: z.number().int().nonnegative(), bytes: z.number().int().nonnegative() })
 const promptData = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('research'), novelId: novelIdSchema, briefArtifactId: artifactIdSchema, purpose: z.string(), inputs: z.array(artifactRef), requestId: requestIdSchema, necessity: researchNecessitySchema.optional() }),
@@ -46,11 +46,11 @@ const taskSchema = z.object({
 })
 const pageSchema = z.object({
   novelId: novelIdSchema, artifactId: artifactIdSchema, kind: z.enum(artifactKinds), revision: z.number(), sha256: z.string(),
-  offset: z.number(), nextOffset: z.number(), totalChars: z.number(), text: z.string(), eof: z.boolean(), view: z.enum(['stored', 'prose']),
+  offset: z.number(), nextOffset: z.number(), totalChars: z.number(), text: z.string(), eof: z.boolean(), view: z.enum(['stored', 'prose', 'feed']),
 })
 
 /** Exact source text accumulated only from completed native reader pages. */
-export interface WritingFixtureSource { readonly artifactId: ArtifactId; readonly sha256: string; readonly kind: (typeof artifactKinds)[number]; readonly text: string; readonly view?: 'stored' | 'prose'
+export interface WritingFixtureSource { readonly artifactId: ArtifactId; readonly sha256: string; readonly kind: (typeof artifactKinds)[number]; readonly text: string; readonly view?: 'stored' | 'prose' | 'feed'
   /** For a prose read, the exact stored text, looked up by the harness (not visible to the child) so tests can identify the source. */
   readonly stored?: string }
 /** One child has independent task, paging and model-request observations. */
@@ -205,12 +205,17 @@ function generate(state: ChildState): object {
       const dimensionCode = required(task.dimensionCode, 'dimensionCode')
       return { ...base, dimensionCode, facts: [{ id: `fixture-${dimensionCode}`, statement: `本书是一部发生在虚构雾港的悬疑冒险小说。${revision}` }], contentMarkdown: `# 雾港故事设定\n\n守灯人林澜在雾港追查失踪船只，以已知的航标信号寻找线索。${revision}` }
     }
-    case 'book-outline': return { ...base, contentMarkdown: `# 雾港航标\n\n林澜逐章查明航标的秘密，最终护送船队返航。${revision}`, ending: '林澜重燃港口灯塔，让船队安全返航。', characterArcs: [{ character: '林澜', development: '从独自怀疑转向依据证据与同伴合作。' }],
-      chapters: Array.from({ length: required(task.chapterCount, 'chapterCount') }, (_, index) => ({ chapterNumber: index + 1, title: `第${index + 1}章 雾港航标`, purpose: `林澜查明第${index + 1}处航标并记录证据。`, targetWords: 4000, obligations: [{ id: `signal-${index + 1}`, description: `林澜查明第${index + 1}处航标并记录证据。` }] })) }
+    case 'book-outline': {
+      // Versions before 7 publish a schema that requires targetWords and inject the acceptance range as a planning budget.
+      const planWords = state.data.requirements.some(item => item.includes('chapter-total range'))
+      return { ...base, contentMarkdown: `# 雾港航标\n\n林澜逐章查明航标的秘密，最终护送船队返航。${revision}`, ending: '林澜重燃港口灯塔，让船队安全返航。', characterArcs: [{ character: '林澜', development: '从独自怀疑转向依据证据与同伴合作。' }],
+        chapters: Array.from({ length: required(task.chapterCount, 'chapterCount') }, (_, index) => ({ chapterNumber: index + 1, title: `第${index + 1}章 雾港航标`, purpose: `林澜查明第${index + 1}处航标并记录证据。`, ...(planWords ? { targetWords: 4000 } : {}), obligations: [{ id: `signal-${index + 1}`, description: `林澜查明第${index + 1}处航标并记录证据。` }] })) }
+    }
     case 'chapter-outline': {
       const chapterNumber = required(task.chapterNumber, 'chapterNumber')
       const obligations = required(task.obligations, 'obligations')
-      return { ...base, chapterNumber, title: `第${chapterNumber}章 雾港航标`, targetWords: 4000, throughLine: `林澜走向第${chapterNumber}处航标，确认灯光信号并帮助船只返航。${revision}`, constraints: ['保持林澜已知的信息边界。'], obligations,
+      const planWords = state.data.requirements.some(item => item.includes('chapter-total range'))
+      return { ...base, chapterNumber, title: `第${chapterNumber}章 雾港航标`, ...(planWords ? { targetWords: 4000 } : {}), throughLine: `林澜走向第${chapterNumber}处航标，确认灯光信号并帮助船只返航。${revision}`, constraints: ['保持林澜已知的信息边界。'], obligations,
         scenes: [{ id: `chapter-${chapterNumber}-scene-1`, purpose: '在雾中确认航道并记录证据。', action: obligations.map(item => item.description).join(''), obligationIds: obligations.map(item => item.id) }] }
     }
     case 'body': {

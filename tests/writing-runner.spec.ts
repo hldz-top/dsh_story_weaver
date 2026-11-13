@@ -10,11 +10,10 @@ import { WritingRunner } from '../src/writing-runner.ts'
 import { useWritingFixture, type WritingFixtureStage } from './support/writing-fixture.ts'
 
 const countingSentence = 'Story counting: each Chinese character counts as one word, each ASCII word or number counts as one word, and punctuation and whitespace count as zero.'
-/** The range requirement per stage kind, computed from the configured bounds: only a body writing stage is given an aim, and only a review is told a host-measured count inside the range is not a length defect. */
+/** The range requirement for a new run: the body aims at the configured minimum, and only a body review is told a host-measured count inside the range is not a length defect. */
 function rangeLines(min: number, max: number) {
   return {
-    body: `The accepted chapter-total range is ${min}–${max} Story-counted words; aim for about ${Math.round((min + max) / 2)}. ${countingSentence}`,
-    outline: `The accepted chapter-total range is ${min}–${max} Story-counted words. ${countingSentence}`,
+    body: `The accepted chapter-total range is ${min}–${max} Story-counted words; aim for about ${min}. ${countingSentence}`,
     review: `The accepted chapter-total range is ${min}–${max} Story-counted words. ${countingSentence} A host-measured count inside this range is not a length defect.`,
   }
 }
@@ -281,7 +280,6 @@ it('threads the host chapter-total range and settings kind-awareness correctly a
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('completed')
-  const rangedKinds = new Set(['book-outline', 'chapter-outline', 'body'])
   const lines = rangeLines(3000, 5000)
   let checked = 0
   const seen = { counting: 0, aim: 0, notDefect: 0 }
@@ -294,17 +292,19 @@ it('threads the host chapter-total range and settings kind-awareness correctly a
       const message = events.find(event => event.type === 'user/message')
       const block = message?.data.content.find(item => item.type === 'text')
       if (block?.type !== 'text') throw new Error(`Child ${stage.kind} (${sessionId}) has no logged prompt text`)
-      // H1: the range applies only to stages that assemble chapter prose it measures, and reviews of those stages.
-      const expectChapterRange = rangedKinds.has(stage.kind)
-        || (stage.kind === 'review' && (reviewedKind === 'book-outline' || reviewedKind === 'chapter-outline' || reviewedKind === 'body'))
+      // The acceptance range is a body check. Outline stages are not given the number as a planning budget, and they are not given an aim.
+      const expectChapterRange = stage.kind === 'body' || (stage.kind === 'review' && reviewedKind === 'body')
       const label = `kind=${stage.kind} reviewedKind=${String(reviewedKind)}`
       expect(block.text.includes('chapter-total range is 3000–5000'), label).toBe(expectChapterRange)
-      // Fix 5 and N1: every range-bearing prompt states how the host counts, but only the body writing stage is given an aim (outlines keep their own per-chapter targets and reviews judge against them), and only a review is told a host-measured count inside the range is not a length defect. Settings and continuity prompts have none of it.
       const isReview = stage.kind === 'review'
       expect(block.text.includes('Story counting:'), label).toBe(expectChapterRange)
-      expect(block.text.includes('aim for about'), label).toBe(stage.kind === 'body')
+      expect(block.text.includes('aim for about 3000'), label).toBe(stage.kind === 'body')
+      expect(block.text.includes('aim for about 4000'), label).toBe(false)
       expect(block.text.includes('is not a length defect'), label).toBe(expectChapterRange && isReview)
-      if (expectChapterRange) expect(loggedRequirements(block.text), label).toContain(stage.kind === 'body' ? lines.body : isReview ? lines.review : lines.outline)
+      if (expectChapterRange) expect(loggedRequirements(block.text), label).toContain(stage.kind === 'body' ? lines.body : lines.review)
+      if (stage.kind === 'chapter-outline') expect(block.text, label).not.toContain('pacing guidance for scene allocation')
+      if (stage.kind === 'review' && reviewedKind === 'chapter-outline') expect(block.text, label).not.toContain('task.measuredBeats')
+      if (stage.kind === 'review' && reviewedKind === 'body') expect(block.text, label).toContain('task.measuredBeats')
       seen.counting += Number(block.text.includes('Story counting:'))
       seen.aim += Number(block.text.includes('aim for about'))
       seen.notDefect += Number(block.text.includes('is not a length defect'))
@@ -326,8 +326,8 @@ it('threads the host chapter-total range and settings kind-awareness correctly a
   }
   // settings, its review, the collection review, book-outline/chapter-outline/body/continuity and each of their reviews.
   expect(checked).toBe(11)
-  // The counting rule reached all six range-bearing prompts (three writing stages, three reviews), the aim only the body, the not-a-defect sentence only the three reviews.
-  expect(seen).toEqual({ counting: 6, aim: 1, notDefect: 3 })
+  // The counting rule and the not-a-defect sentence reach the body and its review. The aim reaches only the body.
+  expect(seen).toEqual({ counting: 2, aim: 1, notDefect: 1 })
 })
 
 it('tells every real logged research-planning and research child that a catalog-embedded kind names no predefined option list', async () => {
@@ -431,7 +431,21 @@ it('serves every review input as plain prose, never stored JSON, while other sta
   const bodyReview = reviews.find(stage => [...stage.sources.values()].some(source => source.kind === 'body' && source.artifactId === stage.task?.reviewed?.artifactId))!
   const bodySource = bodyReview.sources.get(bodyReview.task!.reviewed!.artifactId)!
   expect(bodySource.text).toBe(JSON.parse(bodySource.stored!).scenes.map((scene: { text: string }) => scene.text).join('\n\n'))
-  for (const stage of fixture.stages.values()) if (stage.kind === 'body' || stage.kind === 'continuity') for (const source of stage.sources.values()) expect(source.view).toBe('stored')
+  for (const stage of fixture.stages.values()) if (stage.kind === 'body' || stage.kind === 'continuity') for (const source of stage.sources.values()) {
+    const fed = stage.kind === 'body' && (source.kind === 'book-outline' || source.kind === 'chapter-outline')
+    expect(source.view, `${stage.kind} ${source.kind}`).toBe(fed ? 'feed' : 'stored')
+    if (source.kind === 'chapter-outline' && fed) {
+      expect(source.text).toContain('林澜走向第1处航标')
+      expect(source.text).not.toContain('保持林澜已知的信息边界')
+      expect(source.text).not.toContain('targetWords')
+      expect(source.text).not.toContain('%')
+    }
+    if (source.kind === 'book-outline' && fed) {
+      expect(source.text).toContain('林澜查明第1处航标并记录证据。')
+      expect(source.text).not.toContain('林澜逐章查明航标的秘密')
+      expect(source.text).not.toContain('%')
+    }
+  }
 })
 
 it('drops an unresolvable citation from an item that keeps other valid evidence and records the drop on the run attempt', async () => {
@@ -616,7 +630,7 @@ it.each([
   expect(firstRequirements).not.toContain(reviewRepairLine)
   expect(first.task?.validationError ?? null).toBeNull()
   const gap = direction === 'over' ? `${total - max} over the maximum` : `${min - total} under the minimum`
-  expect(repair.task?.validationError).toBe(`The host counted ${total} Story-counted words (accepted ${min}–${max}): ${gap}. Scene counts: chapter-1-scene-1 ${sceneCounts[0]}, chapter-1-scene-2 ${sceneCounts[1]}, chapter-1-scene-3 ${sceneCounts[2]}. Return the complete chapter at about ${Math.round((min + max) / 2)} words by ${direction === 'over' ? 'condensing' : 'expanding'} every scene proportionally; keep every required event, scene identity and the chapter's actual outcome.`)
+  expect(repair.task?.validationError).toBe(`The host counted ${total} Story-counted words (accepted ${min}–${max}): ${gap}. Scene counts: chapter-1-scene-1 ${sceneCounts[0]}, chapter-1-scene-2 ${sceneCounts[1]}, chapter-1-scene-3 ${sceneCounts[2]}. Return the complete chapter at about ${min} words by ${direction === 'over' ? 'condensing' : 'expanding'} every scene proportionally; keep every required event, scene identity and the chapter's actual outcome.`)
   const repairRequirements = loggedRequirements(await loggedPrompt(fixture, repairId))
   expect(repairRequirements).toContain(line)
   expect(repairRequirements).toContain(lengthRepairLine)

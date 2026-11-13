@@ -59,10 +59,10 @@ All citations must identify either the exact reviewed candidate or a declared in
 | `contentMarkdown` | Complete nonblank readable book plan. |
 | `ending` | Nonblank intended resolution. |
 | `characterArcs` | Nonempty array of `{ character, development }`, both nonblank. Character names are unique. |
-| `chapters` | Nonempty ordered array of `{ chapterNumber, title, purpose, targetWords, obligations }`. Numbers and word targets are positive integers; titles and purposes are nonblank. |
+| `chapters` | Nonempty ordered array of `{ chapterNumber, title, purpose, obligations }`. Chapter numbers are positive integers; titles and purposes are nonblank. |
 | `obligations` | Explicit array of `{ id, description }` for the chapter. Both strings are nonblank; an empty array does not invent mandatory events. |
 
-`targetWords` is a chapter-total planning value. The host compares it with its configured chapter range; the parser does not replace actual body counting with that estimate.
+Prompt versions before 7 also stored a required `targetWords` on each chapter. Admission still accepts that historical field. Version 7 does not publish it, and the Markdown preview does not render it. The host counts the assembled body; an outline word number is not an acceptance check.
 
 ## Chapter outline
 
@@ -72,7 +72,7 @@ All citations must identify either the exact reviewed candidate or a declared in
 | --- | --- |
 | `chapterNumber` | Positive integer matching the requested chapter. |
 | `title`, `throughLine` | Nonblank title and continuous line of action. |
-| `targetWords` | Positive integer chapter-total planning value, without a per-scene word ceiling. |
+| `targetWords` | Accepted when a version before 7 stored it. Version 7 does not publish the field, and the preview does not render it. It is not a per-scene ceiling and it does not replace the host body count. |
 | `constraints` | Explicit array of nonblank constraints; may be empty. |
 | `obligations` | `{ id, description }` entries with unique IDs matching the requested obligations. |
 | `scenes` | Nonempty ordered array of `{ id, purpose, action, obligationIds }`. IDs, purposes, and actions are nonblank. Scene IDs are unique; a scene cannot repeat the same obligation ID. One obligation may span multiple scenes. |

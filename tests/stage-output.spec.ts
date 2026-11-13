@@ -44,6 +44,8 @@ it('keeps chapter scene order and assigns every required obligation without inve
   }
   const expected = { inputRefs: [brief], chapterNumber: 2, obligationIds: ['recover-log'] }
   expect(parseChapterOutlineOutput(output, expected)).toEqual(output)
+  const { targetWords: _omitted, ...withoutTarget } = output
+  expect(parseChapterOutlineOutput(withoutTarget, expected)).toEqual(withoutTarget)
   expect(() => parseChapterOutlineOutput({ ...output, chapterNumber: 1 }, expected)).toThrow(/chapter/i)
   expect(() => parseChapterOutlineOutput({ ...output, scenes: [{ ...output.scenes[0], obligationIds: ['invented'] }, output.scenes[1]] }, expected)).toThrow(/obligation/i)
   expect(() => parseChapterOutlineOutput({ ...output, scenes: output.scenes.map(scene => ({ ...scene, obligationIds: [] })) }, expected)).toThrow(/obligation/i)
@@ -58,6 +60,8 @@ it('requires an ordered complete book plan with uniquely identified writing obli
   }
   const expected = { inputRefs: [brief], chapterCount: 2 }
   expect(parseBookOutlineOutput(output, expected)).toEqual(output)
+  const withoutTargets = { ...output, chapters: output.chapters.map(({ targetWords: _omitted, ...chapter }) => chapter) }
+  expect(parseBookOutlineOutput(withoutTargets, expected)).toEqual(withoutTargets)
   expect(() => parseBookOutlineOutput({ ...output, chapters: output.chapters.slice(1) }, expected)).toThrow(/chapter/i)
   expect(() => parseBookOutlineOutput({ ...output, chapters: [...output.chapters].reverse() }, expected)).toThrow(/chapter/i)
   expect(() => parseBookOutlineOutput({ ...output, chapters: [output.chapters[0], { ...output.chapters[1], obligations: output.chapters[0]!.obligations }] }, expected)).toThrow(/duplicate/i)

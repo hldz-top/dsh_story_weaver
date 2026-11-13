@@ -107,13 +107,13 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
     sections.push('# Book outline', style.text(outline.contentMarkdown), '## Ending', style.text(outline.ending))
     for (const arc of outline.characterArcs) sections.push('## Character arc', 'Character', style.text(arc.character), 'Development', style.text(arc.development))
     for (const chapter of outline.chapters) {
-      sections.push(`## Chapter ${chapter.chapterNumber}`, 'Title', style.text(chapter.title), 'Purpose', style.text(chapter.purpose), `Target words: ${chapter.targetWords}`)
+      sections.push(`## Chapter ${chapter.chapterNumber}`, 'Title', style.text(chapter.title), 'Purpose', style.text(chapter.purpose))
       for (const obligation of chapter.obligations) sections.push('Required event ID', style.text(obligation.id), 'Required event', style.text(obligation.description))
     }
     for (const input of outline.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
   } else if (artifact.kind === 'chapter-outline') {
     const outline = parseContent(StageOutputSchemas['chapter-outline'], artifact.text)
-    sections.push(`# Chapter ${outline.chapterNumber} outline`, 'Title', style.text(outline.title), `Target words: ${outline.targetWords}`, '## Through-line', style.text(outline.throughLine))
+    sections.push(`# Chapter ${outline.chapterNumber} outline`, 'Title', style.text(outline.title), '## Through-line', style.text(outline.throughLine))
     for (const constraint of outline.constraints) sections.push('## Constraint', style.text(constraint))
     for (const scene of outline.scenes) sections.push('## Scene', 'Scene ID', style.text(scene.id), 'Purpose', style.text(scene.purpose), 'Action', style.text(scene.action), 'Required event IDs', style.text(scene.obligationIds.join(', ')))
     for (const obligation of outline.obligations) sections.push('## Required event', 'ID', style.text(obligation.id), 'Description', style.text(obligation.description))
