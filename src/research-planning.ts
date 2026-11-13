@@ -4,6 +4,7 @@ import type { ResearchLimits } from './contracts.ts'
 import { researchQuestionSchema, researchQuestionViolation } from './research.ts'
 import { parseModelOutput, StageValidationRejection } from './stage-rejection.ts'
 import type { ResearchStageRequest } from './research-stage.ts'
+import { isSettingsOutputTarget } from './settings-retrieval.ts'
 
 const nonblank = z.string().refine(value => value.trim().length > 0 && value.isWellFormed())
 /** Native captured decision; every external question identifies a missing fact needed by this output. */
@@ -56,6 +57,14 @@ export function researchNecessity(value: unknown, limits: ResearchLimits): Resea
   return decision
 }
 
+/** Settings planning asks for official retrieval when a real-world fact would ground the dimension. Outline and body keep the stricter input-only preference. */
+function retrievalPolicy(request: ResearchPlanningRequest): string {
+  if (isSettingsOutputTarget(request.outputTarget)) {
+    return 'This output is a settings dimension. Do not prefer mode=input-only merely to avoid official retrieval. When a verifiable real-world fact would ground this dimension and the supplied inputs do not establish it, choose mode=external-required and name that missing fact, even if a fictional label could also be invented. Official retrieval uses the host tools web_search and web_fetch; do not request another provider. Choose mode=input-only only when no verifiable real-world fact would change this dimension. For every external question, identify its exact questionId, the unresolved outputDecision it affects, and the missingFact.'
+  }
+  return 'Choose mode=input-only when all required decisions can be resolved from the inputs or deliberate fiction; include the internal or creative questions and an empty externalRequirements list. Choose mode=external-required only for actual missing real-world facts. For every external question, identify its exact questionId, the unresolved outputDecision it affects, and the missingFact. A useful but optional reference is not a required question.'
+}
+
 /** Instruction appended only to a replacement planning capture; the first capture's prompt bytes stay unchanged so retained runs replay. */
 function planningRepairLines(validationError: string, limits: ResearchLimits): string[] {
   return [
@@ -74,7 +83,7 @@ export function buildResearchPlanningPrompt(request: ResearchPlanningRequest, li
     'Classify only questions required to produce this assigned output. Internal questions concern supplied facts; creative questions concern deliberate fictional choices; external questions concern verifiable real-world facts that this output actually needs and the supplied inputs do not establish.',
     'When TASK_DATA.outputTarget.catalog is present, it is the complete definition of that settings dimension. Its kind states only the output form: enum_single means one label, enum_multi a short set of labels, llm_free free-form facts. The catalog defines no predefined option list; which label or labels to choose is a creative question resolved from the brief and accepted dependencies. Never ask about the host program\'s internals, such as option lists, schemas, validation rules, counting implementation or tools; TASK_DATA and these instructions already fix them. Every internal question must be answerable from the supplied inputs.',
     'Author-declared genre, tone, realism level and fictional rules are authoritative choices. Resolve them from the inputs. Do not add mandatory market categories, genre taxonomy, convention surveys or optional background research to validate an already specified choice. A realistic setting alone does not require a publishing-category lookup. Never reclassify a required real-world uncertainty as creative to avoid evidence.',
-    'Choose mode=input-only when all required decisions can be resolved from the inputs or deliberate fiction; include the internal or creative questions and an empty externalRequirements list. Choose mode=external-required only for actual missing real-world facts. For every external question, identify its exact questionId, the unresolved outputDecision it affects, and the missingFact. A useful but optional reference is not a required question.',
+    retrievalPolicy(request),
     `Return reason, questions and externalRequirements. Each question needs a unique id, kind, question and reason. Maximum ${limits.maxResearchQuestions} questions and ${limits.maxEvidenceChars} combined Unicode characters across all decision text. The captured questions are frozen; retrieval cannot add more.`,
     ...(validationError === null ? [] : planningRepairLines(validationError, limits)),
     'TASK_DATA', JSON.stringify({ kind: 'research-planning', ...taskData }, null, 2),

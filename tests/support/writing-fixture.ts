@@ -8,7 +8,7 @@ import * as JsonStorage from '@deepseek-ai/dsh-storage-json'
 import * as SqliteStorage from '@deepseek-ai/dsh-storage-sqlite'
 import * as DomainStorage from '@deepseek-ai/dsh-storage-domain'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import WebRuntime from '@deepseek-ai/dsh-web'
+import WebRuntime, { type WebSearchProvider } from '@deepseek-ai/dsh-web'
 import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import * as Present from '@deepseek-ai/dsh-tool-present'
 import { StageDeliveries, registerStageDeliveryProjection } from '../../src/stage-deliveries.ts'
@@ -81,6 +81,10 @@ export interface WritingFixtureOptions {
   readonly correctNativeRejections?: boolean
   /** Awaited before this child's next tool or structured reply. The model signal still aborts the wait. */
   readonly pauseChild?: (stage: WritingFixtureStage) => Promise<void> | void
+  /** Replace the offline search provider. Default returns no sources. */
+  readonly webSearch?: WebSearchProvider['search']
+  /** When false, the host has no web_search or web_fetch registration. Default true. */
+  readonly registerWebTools?: boolean
 }
 interface ChildState extends WritingFixtureStage {
   nativeRejections: number
@@ -299,10 +303,12 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   else await fixture.ctx.plugin(SqliteStorage, { path: join(fixture.root, 'storage.sqlite'), journalMode: 'wal' })
   await fixture.ctx.plugin(DomainStorage, { backend })
   await fixture.ctx.plugin(LocalFileSystem, { cwd: fixture.root })
-  await fixture.ctx.plugin(WebRuntime, { searchProvider: 'writing-fixture-search', fetchProvider: 'writing-fixture-fetch' })
-  fixture.ctx.effect(() => fixture.ctx.web.registerSearchProvider({ id: 'writing-fixture-search', available: () => true, search: async () => ({ sources: [], truncated: false }) }))
-  fixture.ctx.effect(() => fixture.ctx.web.registerFetchProvider({ id: 'writing-fixture-fetch', available: () => true, fetch: async request => ({ url: request.url, statusCode: 200, body: { kind: 'text', content: 'Offline fixture reference.' }, truncated: false }) }))
-  await fixture.ctx.plugin(ToolWeb, { searchMaxQueries: 4, searchMaxResults: 8, searchTimeoutMs: 5000, fetchTimeoutMs: 5000, fetchMaxOutputChars: 10000 })
+  if (options.registerWebTools !== false) {
+    await fixture.ctx.plugin(WebRuntime, { searchProvider: 'writing-fixture-search', fetchProvider: 'writing-fixture-fetch' })
+    fixture.ctx.effect(() => fixture.ctx.web.registerSearchProvider({ id: 'writing-fixture-search', available: () => true, search: options.webSearch ?? (async () => ({ sources: [], truncated: false })) }))
+    fixture.ctx.effect(() => fixture.ctx.web.registerFetchProvider({ id: 'writing-fixture-fetch', available: () => true, fetch: async request => ({ url: request.url, statusCode: 200, body: { kind: 'text', content: 'Offline fixture reference.' }, truncated: false }) }))
+    await fixture.ctx.plugin(ToolWeb, { searchMaxQueries: 4, searchMaxResults: 8, searchTimeoutMs: 5000, fetchTimeoutMs: 5000, fetchMaxOutputChars: 10000 })
+  }
   await fixture.ctx.plugin(Present, new Present.Config())
   await registerStageDeliveryProjection(fixture.ctx)
   const executionLimits: RunExecutionLimits = { stageProvider: 'stage-spawn', maxDelegationDepth: 2, maxStageRequests: 100, stageTimeoutMs: 10_000, maxParallelStages: 2, settingsCandidateCount: 1, maxRepairAttempts: 1, minChapterWords: 3000, maxChapterWords: 5000, ...options.executionLimits }
