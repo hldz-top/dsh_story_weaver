@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { nativeStageOutputSchema } from './native-stage-schema.ts'
-import { AiToneReviewBlockedError, aiToneRepairInstruction, ImportRefusedError, ImportReviewBlockedError, SettingsIncompleteError, WritingError, parseArtifactId, parseRequestId, type Actor, type ArtifactRef, type ImportItem } from './contracts.ts'
+import { AiToneReviewBlockedError, aiToneRepairInstruction, ImportRefusedError, ImportReviewBlockedError, SettingsIncompleteError, WritingError, parseArtifactId, parseRequestId, type Actor, type ArtifactId, type ArtifactRef, type ImportItem } from './contracts.ts'
 import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
@@ -16,7 +16,7 @@ import { buildResearchPlanningPrompt, researchNecessity, RESEARCH_PLANNING_OUTPU
 import { attemptSettingsOfficialRetrieval, isSettingsOutputTarget, officialExcerptsFromPrompt, settingsLocalNecessity, storedResearchTask } from './settings-retrieval.ts'
 import { StageValidationRejection } from './stage-rejection.ts'
 import { missingRequiredSettings, planSettings } from './settings-plan.ts'
-import { settingsCatalog, type SettingsDimensionKind } from './settings-catalog.ts'
+import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
 import { EvidenceRejection, StageOutputSchemas, type BodyOutput, type ReviewCategory, type StageInputRef } from './stage-output.ts'
 import { countStoryWords } from './body-text.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
@@ -38,18 +38,83 @@ interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
 interface ActiveRun { readonly controller: AbortController; readonly done: Promise<WritingRun> }
 /** Why a candidate is regenerated: a host length finding asks for every scene to be rescaled, a blocked review or unmet obligation for its documented defects to be repaired. */
 type RepairMode = 'length' | 'review'
+/** One settings candidate slot after generation and review, before the dimension chooses which passing version to apply. */
+type ProducedSettings =
+  | { readonly kind: 'passing'; readonly candidate: SettingsCandidateView; readonly review: NonNullable<SettingsCandidateView['review']> }
+  | { readonly kind: 'blocked'; readonly candidate: SettingsCandidateView }
+  | { readonly kind: 'invalid'; readonly message: string }
+/** Stage classes with a fixed deadline and one unknown execution-timeout replacement. Research execution stays on stageTimeoutMs. */
+export type GradedStage = 'planning' | 'candidate' | 'review' | 'body' | 'repair'
 
-/** Review children use this deadline. Every other stage keeps the run's stageTimeoutMs. */
+/** Research planning. */
+export const PLANNING_STAGE_TIMEOUT_MS = 600_000
+/** Settings, outline and continuity candidate generation, including a dimension's extra first-pass slots. */
+export const CANDIDATE_STAGE_TIMEOUT_MS = 600_000
+/** Review children use this deadline. */
 export const REVIEW_STAGE_TIMEOUT_MS = 1_200_000
+/** Body generation, including a body replacement under the same candidate key family. */
+export const BODY_STAGE_TIMEOUT_MS = 1_800_000
+/** Research repair, citation repair, and a non-body candidate replacement. */
+export const REPAIR_STAGE_TIMEOUT_MS = 900_000
+/** Published unknown execution-timeout replacements for one graded stage. The next timeout fails closed. */
+export const GRADED_STAGE_UNKNOWN_RETRIES = 1
+
+const GRADED_STAGE_TIMEOUT_MS: Readonly<Record<GradedStage, number>> = {
+  planning: PLANNING_STAGE_TIMEOUT_MS,
+  candidate: CANDIDATE_STAGE_TIMEOUT_MS,
+  review: REVIEW_STAGE_TIMEOUT_MS,
+  body: BODY_STAGE_TIMEOUT_MS,
+  repair: REPAIR_STAGE_TIMEOUT_MS,
+}
 
 /**
- * How many settings dimensions in one dependency layer start together.
- * @param limits - Limits stored on the run. A missing candidate count is 1.
- * @returns The batch width, never above maxParallelStages and never below 1.
+ * How many independent settings dimensions in one dependency layer run together.
+ * @param limits - Limits stored on the run. Candidate count is not part of this width.
+ * @returns `maxParallelStages`. The deployment default is 3.
  */
-export function settingsLayerWidth(limits: Pick<RunExecutionLimits, 'maxParallelStages' | 'settingsCandidateCount'>): number {
-  const candidates = limits.settingsCandidateCount ?? 1
-  return Math.min(limits.maxParallelStages, candidates)
+export function dimensionWidth(limits: Pick<RunExecutionLimits, 'maxParallelStages'>): number {
+  return limits.maxParallelStages
+}
+
+/**
+ * How many candidates one settings dimension generates on its first pass.
+ * @param limits - Limits stored on the run. A missing count is 1.
+ * @returns The candidate count. It does not change {@link dimensionWidth}.
+ */
+export function settingsCandidatesPerDimension(limits: Pick<RunExecutionLimits, 'settingsCandidateCount'>): number {
+  return limits.settingsCandidateCount ?? 1
+}
+
+/**
+ * The deadline class of a stage key. Research execution (neither planning, candidate, review, body nor repair) is ungraded.
+ * @param key - Durable stage key.
+ * @returns The graded class, or undefined when the run's stageTimeoutMs still applies.
+ */
+export function gradedStageOf(key: string): GradedStage | undefined {
+  if (key.includes('/citations')) return 'repair'
+  if (key.includes('/review/')) return 'review'
+  if (key.includes('/planning')) return 'planning'
+  if (/(?:^|\/)body\/\d+\/candidate\//.test(key)) return 'body'
+  if (key.includes('/repair/')) return 'repair'
+  const candidate = /\/candidate\/(\d+)(?:\/|$)/.exec(key)
+  if (candidate === null) return undefined
+  return Number(candidate[1]) === 0 ? 'candidate' : 'repair'
+}
+
+/**
+ * Deadline for one stage key.
+ * @param key - Durable stage key.
+ * @param configuredMs - The run's stageTimeoutMs, used only for an ungraded stage.
+ * @returns The graded deadline, or `configuredMs` for research execution.
+ */
+export function stageDeadlineMs(key: string, configuredMs: number): number {
+  const graded = gradedStageOf(key)
+  return graded === undefined ? configuredMs : GRADED_STAGE_TIMEOUT_MS[graded]
+}
+
+/** @param base - Dimension or manuscript prefix. @param repair - Repair index. @param index - Slot within this pass. @param count - Slots in this pass. One slot keeps the historical key. */
+function settingsCandidateStageKey(base: string, repair: number, index: number, count: number): string {
+  return count === 1 ? `${base}/candidate/${repair}` : `${base}/candidate/${repair}/n/${index}`
 }
 
 /** Owns in-process execution; durable stores own versions and recovery receipts. */
@@ -406,7 +471,7 @@ export class WritingRunner {
         }
       }
       for (const layer of plan.layers) {
-        const width = settingsLayerWidth(inv.run.executionLimits)
+        const width = dimensionWidth(inv.run.executionLimits)
         for (let offset = 0; offset < layer.length; offset += width) {
           const results = await Promise.allSettled(layer.slice(offset, offset + width).map(code => this.dimension(inv, code, round, feedback)))
           const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason as unknown] : [])
@@ -438,30 +503,67 @@ export class WritingRunner {
     const research = await this.research(inv, `${key}/research`, uniqueRefs([brief, ...dependencies, ...(revision === undefined ? [] : [this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: revision.baseArtifactId })])]), `Establish the evidence needed for settings dimension ${code}: ${JSON.stringify(dimension)}`, { kind: 'settings', dimensionCode: code, catalog: dimension, revisionInstructions: revision?.instructions ?? null })
     const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, research.planId, revision?.baseArtifactId)
     const officialRetrieval = research.officialExcerpts
+    const candidateCount = settingsCandidatesPerDimension(inv.run.executionLimits)
     let feedback = crossFeedback
     let validationError: string | null = null
     for (let repair = 0; repair <= inv.run.executionLimits.maxRepairAttempts; repair++) {
-      const stageKey = `${key}/candidate/${repair}`
-      const stage = await this.stage(inv, stageKey, 'settings', refs, { dimensionCode: code, catalog: dimension, revisionInstructions: revision?.instructions, validationError, ...(officialRetrieval.length > 0 ? { officialRetrieval } : {}) }, feedback, dimension.kind)
-      let candidate: SettingsCandidateView
-      try {
-        candidate = await this.service.saveSettingsCandidate(inv.actor, { novelId: inv.run.novelId, requestId: requestId(inv.run, stageKey), dimensionCode: code,
-          researchPlanId: research.planId, childSessionId: stage.childSessionId, output: stage.structured, ...(revision === undefined ? {} : { revisionOf: revision.baseArtifactId }) })
-      } catch (cause) {
-        if (!isOutputError(cause)) throw cause
-        validationError = cause.message
-        continue
+      const slots = repair === 0 ? candidateCount : 1
+      const settled = await Promise.allSettled(Array.from({ length: slots }, (_, index) => this.writeSettingsCandidate(inv, {
+        code, dimension, refs, officialRetrieval, revision, feedback, validationError, researchPlanId: research.planId,
+        stageKey: settingsCandidateStageKey(key, repair, index, slots),
+      })))
+      if (inv.exec.signal.aborted) {
+        const rejected = settled.find((item): item is PromiseRejectedResult => item.status === 'rejected')
+        throw rejected === undefined ? inv.exec.signal.reason : rejected.reason
       }
-      candidate = await this.reviewLoop(inv, stageKey, candidate, ['completeness', 'consistency'], (review, reviewKey) =>
-        this.service.saveSettingsReview(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, requestId: requestId(inv.run, reviewKey),
-          expectedReviewId: null, childSessionId: review.childSessionId, output: review.structured }))
-      if (candidate.status !== 'blocked' && candidate.review !== null) {
-        await this.service.applySettingsCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, reviewId: candidate.review.id, expectedAppliedId: old?.artifact.id ?? null })
+      const produced = settled.flatMap(item => item.status === 'fulfilled' ? [item.value] : [])
+      const failures = settled.flatMap(item => item.status === 'rejected' ? [item.reason as unknown] : [])
+      // A failed slot stays a failure. Adopting a sibling would leave that attempt unfinished and could not complete the run.
+      if (failures.length === 1) throw failures[0]
+      if (failures.length > 1) throw new AggregateError(failures, 'A settings candidate set could not complete')
+      const passing = produced.find(item => item.kind === 'passing')
+      if (passing !== undefined) {
+        await this.service.applySettingsCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: passing.candidate.artifact.id, reviewId: passing.review.id, expectedAppliedId: old?.artifact.id ?? null })
         return
       }
-      feedback = [...crossFeedback, ...this.feedback(candidate)]
+      const blocked = produced.flatMap(item => item.kind === 'blocked' ? [item.candidate] : [])
+      if (blocked.length > 0) feedback = [...crossFeedback, ...blocked.flatMap(candidate => this.feedback(candidate))]
+      const invalid = produced.flatMap(item => item.kind === 'invalid' ? [item.message] : [])
+      if (invalid.length > 0) validationError = invalid.at(-1) ?? validationError
     }
     throw new WritingError('review-blocked', `Settings repair limit was exhausted for ${code}${validationError === null ? '' : `: ${validationError}`}`)
+  }
+
+  /** Generate and review one settings candidate. A host output rejection stays in the repair loop; every other failure rejects the slot. */
+  private async writeSettingsCandidate(inv: Invocation, input: {
+    readonly code: string
+    readonly dimension: SettingsDimension
+    readonly refs: readonly ArtifactRef[]
+    readonly officialRetrieval: readonly string[]
+    readonly revision: NonNullable<WritingRun['revision']> | undefined
+    readonly feedback: readonly ArtifactRef[]
+    readonly validationError: string | null
+    readonly researchPlanId: ArtifactId
+    readonly stageKey: string
+  }): Promise<ProducedSettings> {
+    const stage = await this.stage(inv, input.stageKey, 'settings', input.refs, {
+      dimensionCode: input.code, catalog: input.dimension, revisionInstructions: input.revision?.instructions, validationError: input.validationError,
+      ...(input.officialRetrieval.length > 0 ? { officialRetrieval: input.officialRetrieval } : {}),
+    }, input.feedback, input.dimension.kind)
+    let candidate: SettingsCandidateView
+    try {
+      candidate = await this.service.saveSettingsCandidate(inv.actor, { novelId: inv.run.novelId, requestId: requestId(inv.run, input.stageKey), dimensionCode: input.code,
+        researchPlanId: input.researchPlanId, childSessionId: stage.childSessionId, output: stage.structured, ...(input.revision === undefined ? {} : { revisionOf: input.revision.baseArtifactId }) })
+    } catch (cause) {
+      if (!isOutputError(cause)) throw cause
+      return { kind: 'invalid', message: cause.message }
+    }
+    candidate = await this.reviewLoop(inv, input.stageKey, candidate, ['completeness', 'consistency'], (review, reviewKey) =>
+      this.service.saveSettingsReview(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, requestId: requestId(inv.run, reviewKey),
+        expectedReviewId: null, childSessionId: review.childSessionId, output: review.structured }))
+    const review = candidate.review
+    if (candidate.status !== 'blocked' && review !== null) return { kind: 'passing', candidate, review }
+    return { kind: 'blocked', candidate }
   }
 
   private async standalone(inv: Invocation, target: Extract<GeneratedManuscriptTarget, { kind: 'book-outline' | 'chapter-outline' }>): Promise<void> {
@@ -681,9 +783,7 @@ export class WritingRunner {
       ], ...(settingsDimensionKind === undefined ? {} : { settingsDimensionKind }), ...(settingsCollectionKinds === undefined ? {} : { settingsCollectionKinds }),
       ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}), promptVersion,
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}) })
-    const review = kind === 'review'
-    return this.capture(inv, key, prompt, allRefs, nativeStageOutputSchema(kind, promptVersion), ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored',
-      review ? REVIEW_STAGE_TIMEOUT_MS : inv.run.executionLimits.stageTimeoutMs, review, feedChapter)
+    return this.capture(inv, key, prompt, allRefs, nativeStageOutputSchema(kind, promptVersion), ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter)
   }
 
   private feedChars(inv: Invocation, ref: ArtifactRef, chapterNumber: number): number {
@@ -697,12 +797,15 @@ export class WritingRunner {
    * the exact same key and byte-identical prompt, never a successor key: prepareAttempt already permits replacing a
    * latest 'failed' attempt, so this keeps a later resume's replay deterministic (it recomputes the same key first and
    * finds the eventual success, no duplicate paid call). At most maxRepairAttempts automatic retries follow the first
-   * execution; then the stage fails with an explicit exhaustion message. A review whose child exceeds its execution
-   * deadline is recorded unknown and retryAuthorized once, then replaced under the same key. A second consecutive
-   * review timeout leaves retryAuthorized false and fails closed. Every other outcome settles in one pass.
+   * execution; then the stage fails with an explicit exhaustion message. A graded stage whose published child exceeds
+   * its deadline is recorded unknown and retryAuthorized once, then replaced under the same key. A second consecutive
+   * timeout leaves retryAuthorized false and fails closed. story_stop aborts the run signal and does not authorize that
+   * replacement. An ungraded research execution and every non-timeout outcome settle in one pass.
    */
-  private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' | 'feed' = 'stored', stageTimeoutMs = inv.run.executionLimits.stageTimeoutMs, authorizeReviewTimeout = false, feedChapter?: number): Promise<CapturedStage> {
-    let reviewTimeoutRetries = 0
+  private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' | 'feed' = 'stored', feedChapter?: number): Promise<CapturedStage> {
+    const stageTimeoutMs = stageDeadlineMs(key, inv.run.executionLimits.stageTimeoutMs)
+    const unknownRetryLimit = gradedStageOf(key) === undefined ? 0 : GRADED_STAGE_UNKNOWN_RETRIES
+    let unknownRetries = 0
     for (let retry = 0; ; retry++) {
       inv.actor.signal?.throwIfAborted()
       if (this.service.getNovel(inv.actor, inv.run.novelId).brief.id !== inv.run.briefArtifactId) throw new WritingError('revision-conflict', 'Creative brief changed during writing')
@@ -737,15 +840,15 @@ export class WritingRunner {
         // It is recorded with its explicit classification and not retried: an identical request would meet the same limit or policy.
         const kind = cause instanceof StageExecutionError ? failureKind(cause.code) : undefined
         const outcome = (retryable || toolScope || kind !== undefined || !published) ? 'failed' as const : 'unknown' as const
-        // A published review deadline is an unknown model outcome. Authorize one replacement; do not do that for a
-        // timeout that never published a child, or for any non-review stage.
-        const permitReviewTimeout = authorizeReviewTimeout && cause instanceof StageExecutionError && cause.code === 'stage-timeout' && outcome === 'unknown' && reviewTimeoutRetries < 1
+        // A published graded deadline is an unknown model outcome. Authorize one replacement. Do not do that for a
+        // timeout that never published a child, for research execution, or when story_stop has already aborted the run.
+        const permitUnknownTimeout = !inv.exec.signal.aborted && unknownRetries < unknownRetryLimit && cause instanceof StageExecutionError && cause.code === 'stage-timeout' && outcome === 'unknown'
         const latest = this.runs.get(withoutSignal(inv.actor), inv.run.id).attempts.find(item => item.id === attempt.id)
         if (latest?.status === 'prepared' || latest?.status === 'running') {
-          try { await this.runs.failAttempt(withoutSignal(inv.actor), inv.run.id, attempt.id, { outcome, message: message(cause), ...(kind === undefined ? {} : { kind }), ...(permitReviewTimeout ? { retryAuthorized: true } : {}) }) }
+          try { await this.runs.failAttempt(withoutSignal(inv.actor), inv.run.id, attempt.id, { outcome, message: message(cause), ...(kind === undefined ? {} : { kind }), ...(permitUnknownTimeout ? { retryAuthorized: true } : {}) }) }
           catch (storageCause) { throw new AggregateError([cause, storageCause], 'Native stage failed and its outcome could not be recorded', { cause }) }
         }
-        if (permitReviewTimeout) { reviewTimeoutRetries += 1; continue }
+        if (permitUnknownTimeout) { unknownRetries += 1; continue }
         if (!retryable) throw cause
         if (retry < inv.run.executionLimits.maxRepairAttempts) continue
         const retries = inv.run.executionLimits.maxRepairAttempts

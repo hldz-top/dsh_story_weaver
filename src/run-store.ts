@@ -26,8 +26,8 @@ const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const limitsSchema = z.strictObject({ maxAttempts: positive, maxOutputBytes: positive })
 const executionLimitsSchema = z.strictObject({
   maxRepairAttempts: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), maxParallelStages: positive,
-  // How many settings dimensions in one dependency layer may start together. Absent on runs stored before the field
-  // existed; the runner then uses 1. A present value is still capped by maxParallelStages.
+  // How many candidates one settings dimension generates on its first pass. Absent on runs stored before the field
+  // existed; those runs generate one. Layer width stays maxParallelStages and does not read this value.
   settingsCandidateCount: positive.exactOptional(),
   maxStageRequests: positive, stageTimeoutMs: positive.max(2_147_483_647), maxDelegationDepth: positive,
   minChapterWords: positive, maxChapterWords: positive, stageProvider: z.string().min(1).refine(value => value.trim().length > 0),
