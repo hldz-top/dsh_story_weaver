@@ -581,8 +581,13 @@ export class WritingRunner {
     const brief = this.service.getNovel(inv.actor, inv.run.novelId).brief
     if (await this.reuseAppliedSettings(inv, plan, brief)) return
     this.stopOnStaleImport(inv)
-    const needed = this.settingsNeeded(inv, plan)
-    if (needed.length > 0) await this.draftSettings(inv, needed, brief)
+    const needed = new Set(this.settingsNeeded(inv, plan))
+    for (const layer of plan.layers) {
+      const batchCodes = layer.filter(code => needed.has(code) && !isOpenChecklistCode(code))
+      const openCodes = layer.filter(code => needed.has(code) && isOpenChecklistCode(code))
+      if (batchCodes.length > 0) await this.draftSettings(inv, batchCodes, brief)
+      for (const code of openCodes) await this.dimension(inv, code, 0, [])
+    }
     const selected = [...plan.selectedCodes]
     const collection = await this.service.assembleSettings(inv.actor, { novelId: inv.run.novelId, selectedCodes: inv.run.settingsRoots, requestId: requestId(inv.run, 'settings/collection/0') })
     await this.deliver(inv, collection.artifact)
@@ -728,7 +733,10 @@ export class WritingRunner {
   }
 
   private async repairSettings(inv: Invocation, plan: ReturnType<typeof planSettings>, issues: readonly SettingsConsistencyIssue[], brief: ArtifactRef): Promise<void> {
-    const named = plan.layers.flat().filter(code => issues.some(issue => issue.dimension === code))
+    const named = plan.layers.flat().filter(code => issues.some(issue => issue.dimension === code) && !isOpenChecklistCode(code))
+    for (const code of plan.layers.flat()) {
+      if (issues.some(issue => issue.dimension === code) && isOpenChecklistCode(code)) await this.dimension(inv, code, 1, [])
+    }
     const planId = await this.ensureSettingsResearch(inv, brief)
     const groups = planSettingsBatches(named, inv.run.limits.maxOutputBytes)
     for (const codes of groups) {
