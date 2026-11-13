@@ -53,7 +53,16 @@ const manuscriptFields = { manuscriptHistory: z.array(manuscriptRecordSchema), m
 const { revisionOf: _lineage, ...legacyManuscriptFields } = manuscriptRecordSchema.shape
 const legacyManuscriptRecordSchema = z.strictObject(legacyManuscriptFields).refine(record => record.artifact.kind === record.target.kind, 'Manuscript target and artifact kind must agree')
 const manuscriptNovelSchema = z.strictObject({ ...settingsNovelSchema.shape, recordVersion: z.literal(4), ...manuscriptFields, manuscriptHistory: z.array(legacyManuscriptRecordSchema) })
-const currentNovelSchema = z.strictObject({ ...settingsNovelSchema.shape, recordVersion: z.literal(5), ...manuscriptFields, settingsHistory: z.array(settingsRecordSchema) })
+/** Written after a settings layer passes. Absent on novels saved before snapshot reuse. */
+const settingsSnapshotSchema = z.strictObject({
+  briefSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  roots: z.array(z.string().regex(/^[a-z][a-z0-9]*$/)).nonempty(),
+  artifactId: artifactIdSchema,
+})
+const currentNovelSchema = z.strictObject({
+  ...settingsNovelSchema.shape, recordVersion: z.literal(5), ...manuscriptFields, settingsHistory: z.array(settingsRecordSchema),
+  settingsSnapshots: z.array(settingsSnapshotSchema).optional(),
+})
   .refine(record => new Set(record.settingsHeads.map(head => head.dimensionCode)).size === record.settingsHeads.length, 'Each settings dimension has at most one current head')
   .refine(record => new Set(record.manuscriptHeads.map(head => `${head.kind}:${head.chapterNumber}`)).size === record.manuscriptHeads.length, 'Manuscript head slots must be unique')
   .refine(record => new Set(record.appliedChapters.map(chapter => `${chapter.body.id}:${chapter.continuity.id}`)).size === record.appliedChapters.length, 'Applied chapter pairs must be unique')

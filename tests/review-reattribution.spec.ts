@@ -12,6 +12,21 @@ async function resumeVersion6(fixture: Awaited<ReturnType<typeof useWritingFixtu
   return fixture.run(exec => fixture.runner.resume(exec, begun.id, false))
 }
 
+/** Version 6 still copies quotes. A settings/0/ attempt keeps that resume on the per-dimension path, where those reviews still run. */
+async function resumeVersion6PerDimension(fixture: Awaited<ReturnType<typeof useWritingFixture>>, throughChapter: number) {
+  const begun = await fixture.runs.begin(fixture.actor, { ...fixture.input, throughChapter, revision: null,
+    executionLimits: fixture.runner.limits, serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits } }, 6)
+  const attempt = await fixture.runs.prepareAttempt(fixture.actor, begun.id, {
+    key: 'settings/0/seed', prompt: 'Already-started per-dimension settings path.',
+    inputRefs: [{ artifactId: fixture.novel.brief.id, sha256: fixture.novel.brief.sha256 }],
+    outputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  })
+  await fixture.runs.associateChild(fixture.actor, begun.id, attempt.id, fixture.parent.session.id)
+  await fixture.runs.saveOutput(fixture.actor, begun.id, attempt.id, '{}')
+  await fixture.runs.finish(fixture.actor, begun.id, 'stopped', 'Stored on prompt version 6.')
+  return fixture.run(exec => fixture.runner.resume(exec, begun.id, false))
+}
+
 /**
  * A correct, verbatim quote of the reviewed candidate labeled with another admitted input's id must be
  * reattributed by the host for every review stage, without spending a repair: with maxRepairAttempts 0
@@ -20,7 +35,7 @@ async function resumeVersion6(fixture: Awaited<ReturnType<typeof useWritingFixtu
 describe('mislabeled review quote source is reattributed in every review stage', () => {
   // In the fixture the settings and chapter-outline candidates open with a line also present in another input (brief / book outline),
   // so those two are the ambiguous case below; every other review kind has a unique quote.
-  it.each(['settings-dimension', 'book-outline', 'body', 'continuity'] as const)('%s review', async kind => {
+  it.each(['book-outline', 'body', 'continuity'] as const)('%s review', async kind => {
     let target: { reviewed: string, declared: string, quote: string } | undefined
     const fixture = await useWritingFixture({ executionLimits: { maxRepairAttempts: 0 }, intervene(stage, output) {
       if (stage.kind !== 'review' || target || reviewedKind(stage) !== kind) return output
@@ -63,7 +78,7 @@ describe('mislabeled review quote source is reattributed in every review stage',
       const [check, ...rest] = review.checks
       return { ...review, checks: [{ ...check!, evidence: [{ artifactId: research.artifactId, quote: QUOTE }] }, ...rest] }
     } })
-    const outcome = await resumeVersion6(fixture, 1)
+    const outcome = await resumeVersion6PerDimension(fixture, 1)
     if (outcome.status === 'rejected') throw outcome.reason
     expect(ids).toBeDefined()
     expect(outcome.value.error).toBeNull()
@@ -91,7 +106,7 @@ describe('mislabeled review quote source is reattributed in every review stage',
       target = { matches, declared: other.artifactId }
       return { ...review, checks: [{ ...check!, evidence: [{ ...evidence, artifactId: other.artifactId }, ...check!.evidence.slice(1)] }, ...rest] }
     } })
-    const outcome = await resumeVersion6(fixture, 1)
+    const outcome = kind === 'settings' ? await resumeVersion6PerDimension(fixture, 1) : await resumeVersion6(fixture, 1)
     if (outcome.status === 'rejected') throw outcome.reason
     expect(outcome.value.error).toBeNull()
     expect(outcome.value.status).toBe('completed')
@@ -106,7 +121,7 @@ describe('mislabeled review quote source is reattributed in every review stage',
 })
 
 describe('drop and downgrade apply in every review stage, with recorded events and no repair spent', () => {
-  it.each(['settings-dimension', 'settings', 'book-outline', 'chapter-outline', 'body', 'continuity'] as const)('%s review', async kind => {
+  it.each(['book-outline', 'chapter-outline', 'body', 'continuity'] as const)('%s review', async kind => {
     const INVENTED = '这句话从未出现在任何输入中。'
     let injected = false
     const fixture = await useWritingFixture({ executionLimits: { maxRepairAttempts: 0 }, intervene(stage, output) {

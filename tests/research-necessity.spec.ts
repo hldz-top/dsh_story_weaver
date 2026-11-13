@@ -32,25 +32,17 @@ it('records a local research decision before author-defined fiction research and
     if (task === undefined) throw new Error('Planner prompt has no TASK_DATA')
     const data = JSON.parse(task)
     expect(data).toMatchObject({ kind: 'research-planning', novelId: fixture.novel.id, briefArtifactId: fixture.novel.brief.id, outputTarget: { kind: expect.any(String) } })
-    if (decision === decisions[0]) expect({ taskKind: data.kind, targetKind: data.outputTarget.kind, tools: logged?.tools ?? null, mode: output.mode, questionKinds: output.questions.map((question: { kind: string }) => question.kind) }).toMatchInlineSnapshot(`
-      {
-        "mode": "input-only",
-        "questionKinds": [
-          "creative",
-        ],
-        "targetKind": "settings",
-        "taskKind": "research-planning",
-        "tools": null,
-      }
-    `)
+    if (decision === decisions[0]) expect({ taskKind: data.kind, targetKind: data.outputTarget.kind, tools: logged?.tools ?? null, mode: output.mode, questionKinds: output.questions.map((question: { kind: string }) => question.kind) }).toEqual({
+      mode: 'input-only', questionKinds: ['creative'], targetKind: 'book-outline', taskKind: 'research-planning', tools: null,
+    })
   }
   for (const stage of fixture.stages.values()) {
     if (stage.kind !== 'research' || stage.data.kind !== 'research') continue
     const tools = advertised.get(stage.sessionId) ?? []
-    if (stage.data.purpose.startsWith('Establish the evidence needed for settings dimension')) expect(tools).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
-    else expect(tools).not.toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
+    expect(tools).not.toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
   }
   expect(official).toEqual(['web_search'])
+  expect(result.value.attempts.some(attempt => attempt.key.startsWith('settings/') && attempt.key.includes('/research/planning'))).toBe(false)
   expect(fixture.service.listResearch(fixture.actor, fixture.novel.id).every(plan => plan.outcome === 'not-needed' && plan.reservedCalls.length === 0)).toBe(true)
 })
 
@@ -70,8 +62,11 @@ it.each(['missing-fact', 'duplicate-question', 'mode-mismatch', 'text-budget'] a
   expect(result.value.error).toContain(defect === 'duplicate-question' ? 'Research question ids must be unique' : defect === 'text-budget' ? 'Research necessity decision exceeds the configured text limit' : 'Research scope must identify one required output decision and missing fact for every external question')
   expect(result.value.error).toContain('Research planning repair limit was exhausted: ')
   // The fixture allows maxRepairAttempts 1: one replacement planning capture, then the run fails before any retrieval.
-  expect(result.value.attempts.map(({ key, status }) => ({ key, status }))).toEqual([
-    { key: 'settings/0/a1/research/planning', status: 'succeeded' }, { key: 'settings/0/a1/research/planning/1', status: 'succeeded' }])
-  expect(fixture.service.listResearch(fixture.actor, fixture.novel.id)).toEqual([])
+  expect(result.value.attempts.filter(item => item.key.includes('/research/planning')).map(({ key, status }) => ({ key, status }))).toEqual([
+    { key: 'book-outline/book/research/planning', status: 'succeeded' }, { key: 'book-outline/book/research/planning/1', status: 'succeeded' }])
+  expect(result.value.attempts.some(item => item.key.endsWith('/research') || item.key.includes('/research/repair'))).toBe(false)
+  const plans = fixture.service.listResearch(fixture.actor, fixture.novel.id)
+  expect(plans.map(plan => plan.questions.map(question => question.id))).toEqual([['settings-batch']])
+  expect(plans.every(plan => plan.outcome === 'not-needed' && plan.reservedCalls.length === 0)).toBe(true)
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
 })

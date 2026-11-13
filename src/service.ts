@@ -6,13 +6,14 @@ import { brandString } from '@deepseek-ai/dsh-brand'
 import type { Domain, DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { researchSelectedConclusions, type ResearchSelection, type ResearchSelectedFinding, type SelectedResearchObservation } from './research-selection.ts'
-import type { Actor, Artifact, ArtifactId, ArtifactKind, ArtifactRef, ArtifactRequest, ArtifactSlice, CreateNovelRequest, NovelId, NovelView, ReadArtifactRequest, ResearchCall, ResearchLimits, ResearchObservation, ResearchRequest, ResearchView, SaveBriefRequest, StartResearchRequest, WritingLimits } from './contracts.ts'
+import type { Actor, Artifact, ArtifactId, ArtifactKind, ArtifactRef, ArtifactRequest, ArtifactSlice, CreateNovelRequest, NovelId, NovelView, ReadArtifactRequest, RequestId, ResearchCall, ResearchLimits, ResearchObservation, ResearchRequest, ResearchView, SaveBriefRequest, StartResearchRequest, WritingLimits } from './contracts.ts'
 import { WritingError } from './contracts.ts'
 import { checkModelArtifactBytes } from './stage-rejection.ts'
 import { writingDomain, type NovelRecord, type ResearchRecord, type SettingsRecord } from './records.ts'
 import { parseSelectedFindings, researchEvidenceContentSchema, researchPlanContentSchema, researchQuestions } from './research.ts'
 
 import { settingsCatalog } from './settings-catalog.ts'
+import { canonicalSettingsRoots, sameSettingsRoots } from './settings-batch.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
 import { paragraphsOfStoredCandidate } from './candidate-paragraphs.ts'
 import { isOpenChecklistCode } from './open-dimension-checklist.ts'
@@ -816,6 +817,46 @@ export class WritingService {
     if (novel.settingsHeads.find(head => head.dimensionCode === candidate.dimensionCode)?.artifactId !== candidate.artifact.id) return false
     return !novel.manuscriptHistory.some(item => item.target.kind === 'settings' && item.inputRefs.some(ref => ref.artifactId === candidate.artifact.id)
       && item.reviewHistory.length > 0 && item.reviewHistory.at(-1)?.blocking === false)
+  }
+
+  /**
+   * Remember a passed settings collection for a later run with the same brief text and roots.
+   * @param actor - Owning workspace. @param novelId - Novel that holds the collection. @param snapshot - Content hash, requested roots, and the applied collection.
+   */
+  async saveSettingsSnapshot(actor: Actor, novelId: NovelId, snapshot: { readonly briefSha256: string; readonly roots: readonly string[]; readonly artifactId: ArtifactId }): Promise<void> {
+    actor.signal?.throwIfAborted()
+    const artifact = this.getArtifact(actor, { novelId, artifactId: snapshot.artifactId })
+    if (artifact.kind !== 'settings') throw new WritingError('invalid-input', 'Settings snapshot must name a settings collection')
+    const stored = { briefSha256: snapshot.briefSha256, roots: canonicalSettingsRoots(snapshot.roots), artifactId: snapshot.artifactId }
+    await this.domain.table('novels').update(novelId, current => {
+      actor.signal?.throwIfAborted()
+      const existing = current.settingsSnapshots ?? []
+      const rest = existing.filter(item => !(item.briefSha256 === stored.briefSha256 && sameSettingsRoots(item.roots, stored.roots)))
+      if (rest.length === existing.length - 1 && existing.some(item => item.briefSha256 === stored.briefSha256 && sameSettingsRoots(item.roots, stored.roots) && item.artifactId === stored.artifactId)) return current
+      return { ...current, settingsSnapshots: [...rest, stored] }
+    })
+  }
+
+  /**
+   * @param actor - Owning workspace. @param novelId - Novel to read. @param briefSha256 - Current brief content hash.
+   * @param roots - Requested roots; order does not matter. @returns The matching snapshot whose collection is still published, if any.
+   */
+  /** @param actor - Owning workspace. @param novelId - Novel. @param requestId - Candidate publication id. @returns The stored candidate when that request was already saved. */
+  findSettingsByRequest(actor: Actor, novelId: NovelId, requestId: RequestId): SettingsCandidateView | undefined {
+    const novel = this.record(actor, novelId)
+    const record = novel.settingsHistory.find(item => item.request.requestId === requestId)
+    return record === undefined ? undefined : this.settingsView(novel, record)
+  }
+
+  findSettingsSnapshot(actor: Actor, novelId: NovelId, briefSha256: string, roots: readonly string[]): { readonly briefSha256: string; readonly roots: readonly string[]; readonly artifactId: ArtifactId } | undefined {
+    const wanted = canonicalSettingsRoots(roots)
+    const found = (this.record(actor, novelId).settingsSnapshots ?? []).find(item => item.briefSha256 === briefSha256 && sameSettingsRoots(item.roots, wanted))
+    if (found === undefined) return undefined
+    try {
+      const artifact = this.getArtifact(actor, { novelId, artifactId: found.artifactId })
+      if (artifact.kind !== 'settings') return undefined
+    } catch { return undefined }
+    return found
   }
 
   /** @returns Completion after the domain has drained its queued writes. */

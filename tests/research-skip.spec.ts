@@ -39,7 +39,7 @@ function expectNoResearchChildren(fixture: Awaited<ReturnType<typeof useWritingF
 function expectSettingsOnlyRetrieval(fixture: Awaited<ReturnType<typeof useWritingFixture>>, official: readonly string[]): void {
   const searches = official.filter(call => call.startsWith('web_search:'))
   expect(searches.length).toBeGreaterThan(0)
-  expect(searches.every(call => call.includes('settings dimension'))).toBe(true)
+  expect(searches.every(call => call.includes('Settings for'))).toBe(true)
   for (const request of fixture.childRequests) {
     const text = promptText(request)
     if (text.includes('officialRetrieval')) expect(text).toContain('"kind": "settings"')
@@ -82,7 +82,7 @@ it.each([
   expect(run.error).toBeNull()
   expectNoResearchChildren(fixture)
   expect(fixture.service.getSettings(fixture.actor, fixture.novel.id).applied.some(item => item.dimensionCode === 'a1' && !item.stale)).toBe(true)
-  expect(official.some(call => call.startsWith('web_search:') && call.includes('settings dimension'))).toBe(true)
+  expect(official.some(call => call.startsWith('web_search:') && call.includes('Settings for'))).toBe(true)
   expect(settingsPrompt(fixture)).not.toContain('officialRetrieval')
 })
 
@@ -99,8 +99,8 @@ it('continues settings when research is disabled and official web tools are not 
 it('keeps a non-quota retrieval failure fail-close when research is disabled', async () => {
   const { fixture, run } = await runSkipped({ executionLimits: { researchEnabled: false }, webSearch: async () => { throw new Error('socket hang up') } })
   expect(run.status).toBe('failed')
-  expect(run.error).toContain('A settings layer could not complete')
   expect(run.error).toContain('socket hang up')
+  expect(run.attempts.some(attempt => attempt.key.startsWith('settings/batch/'))).toBe(false)
   expect(run.attempts.some(attempt => attempt.key.startsWith('settings/0/a1/candidate'))).toBe(false)
   expectNoResearchChildren(fixture)
   expect(fixture.service.getSettings(fixture.actor, fixture.novel.id).applied).toEqual([])

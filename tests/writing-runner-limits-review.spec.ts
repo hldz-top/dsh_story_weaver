@@ -44,7 +44,7 @@ it('rejects incompatible research admission limits before changing saved progres
   const entered = Promise.withResolvers<void>()
   let observing = true
   const fixture = await useWritingFixture({ maxReadChars: 8192, onChildRequest(stage) {
-    if (observing && stage.kind === 'settings') entered.resolve()
+    if (observing && stage.kind === 'book-outline') entered.resolve()
   } })
   const outcome = await fixture.run(async exec => {
     const writing = fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 })

@@ -14,12 +14,13 @@ import { useWritingFixture, type WritingFixtureOptions, type WritingFixtureStage
 const SLOW = 240_000
 type Fixture = Awaited<ReturnType<typeof useWritingFixture>>
 
-/** A blocking consistency issue on a settings-collection review, cited on the reviewed collection. */
+const BATCH_QUOTE = '本书是一部发生在虚构雾港的悬疑冒险小说。'
+/** A blocking conflict on the cross-dimension consistency review. */
 function blockCollection(stage: WritingFixtureStage, output: object): object {
-  const reviewed = stage.task?.reviewed?.artifactId
-  if (stage.kind !== 'review' || reviewed === undefined || stage.sources.get(reviewed)?.kind !== 'settings') return output
-  const review = output as { checks: { evidence: unknown[] }[]; issues: unknown[] }
-  return { ...review, issues: [{ id: 'drift', severity: 'blocking', category: 'consistency', location: 'Settings', message: 'Dimensions disagree.', evidence: review.checks[0]!.evidence }] }
+  if (stage.kind === 'settings' && stage.task?.batch === 'consistency') {
+    return { issues: [{ dimension: stage.task.codes?.[0] ?? 'a1', kind: 'conflict', quote: BATCH_QUOTE }] }
+  }
+  return output
 }
 
 async function written(roots: readonly string[], options: WritingFixtureOptions = {}) {
@@ -144,7 +145,7 @@ it('F3: without imports a blocking collection review still triggers cross-dimens
   if (result.status !== 'fulfilled') throw new Error(String(result.reason))
   expect(result.value.status).toBe('completed')
   expect(blocks).toBe(1)
-  expect(keys(blocked, result.value.id).some(key => key.startsWith('settings/1/a1/'))).toBe(true)
+  expect(keys(blocked, result.value.id).some(key => key.startsWith('settings/repair/'))).toBe(true)
 }, SLOW)
 
 it('F5: a released import still stops repair when a later collection review blocks (imported text is never silently regenerated)', async () => {

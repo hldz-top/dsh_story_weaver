@@ -37,6 +37,7 @@ const promptData = z.discriminatedUnion('kind', [
 const taskSchema = z.object({
   revisionInstructions: z.string().optional(), validationError: z.string().nullable().optional(),
   inputRefs: z.array(inputRef), dimensionCode: z.string().optional(), chapterNumber: z.number().int().positive().optional(),
+  batch: z.enum(['draft', 'consistency', 'repair']).optional(), codes: z.array(z.string()).optional(),
   chapterCount: z.number().int().positive().optional(), sceneIds: z.array(z.string()).optional(),
   obligations: z.array(z.object({ id: z.string(), description: z.string() })).optional(),
   requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style'])).optional(),
@@ -89,6 +90,10 @@ export interface WritingFixtureOptions {
   readonly webSearch?: WebSearchProvider['search']
   /** When false, the host has no web_search or web_fetch registration. Default true. */
   readonly registerWebTools?: boolean
+  /** Plugin flag for settings snapshot reuse. Default true. */
+  readonly reuseSettingsSnapshot?: boolean
+  /** Run-store raw output cap. Default 262144. */
+  readonly maxOutputBytes?: number
 }
 interface ChildState extends WritingFixtureStage {
   nativeRejections: number
@@ -218,6 +223,11 @@ function generate(state: ChildState): object {
   const revision = task.revisionInstructions === undefined ? '' : `修订要求：${task.revisionInstructions}`
   switch (state.data.kind) {
     case 'settings': {
+      if (task.batch === 'consistency') return { issues: [] }
+      if (task.batch === 'draft' || task.batch === 'repair') {
+        const codes = required(task.codes, 'codes')
+        return { dimensions: codes.map(code => ({ code, body: `# ${code}\n\n本书是一部发生在虚构雾港的悬疑冒险小说。守灯人林澜在雾港追查失踪船只，以已知的航标信号寻找线索。${revision}` })) }
+      }
       const dimensionCode = required(task.dimensionCode, 'dimensionCode')
       return { ...base, dimensionCode, facts: [{ id: `fixture-${dimensionCode}`, statement: `本书是一部发生在虚构雾港的悬疑冒险小说。${revision}` }], contentMarkdown: `# 雾港故事设定\n\n守灯人林澜在雾港追查失踪船只，以已知的航标信号寻找线索。${revision}` }
     }
@@ -380,11 +390,11 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   const executionLimits: RunExecutionLimits = { stageProvider: 'stage-spawn', maxDelegationDepth: 2, maxStageRequests: 100, stageTimeoutMs: 10_000, maxParallelStages: 2, settingsCandidateCount: 1, maxRepairAttempts: 1, minChapterWords: 3000, maxChapterWords: 5000, researchEnabled: true, researchBudgetFloor: 1, ...options.executionLimits }
   const service = await openWritingService(fixture.ctx.storageDomain, { maxArtifactBytes: 262_144, maxReadChars }, { maxResearchQuestions: 12, maxResearchCalls: 4, maxResearchSources: 8, maxEvidenceChars: 8192, maxResearchLogEvents: 2048 }, executionLimits)
   fixture.ctx.effect(() => () => service.close())
-  const runs = await openRunStore(fixture.ctx.storageDomain, { maxAttempts: 256, maxOutputBytes: 262_144 })
+  const runs = await openRunStore(fixture.ctx.storageDomain, { maxAttempts: 256, maxOutputBytes: options.maxOutputBytes ?? 262_144 })
   fixture.ctx.effect(() => () => runs.close())
   registerWritingTools(fixture.ctx, service, '.dsh-story')
   registerResearchTools(fixture.ctx, service)
-  const runner = new WritingRunner(fixture.ctx, service, runs, executionLimits, new StageDeliveries(fixture.ctx, service, runs, '.dsh-story'), { allowIncompleteSettings: options.allowIncompleteSettings ?? true })
+  const runner = new WritingRunner(fixture.ctx, service, runs, executionLimits, new StageDeliveries(fixture.ctx, service, runs, '.dsh-story'), { allowIncompleteSettings: options.allowIncompleteSettings ?? true, ...(options.reuseSettingsSnapshot === undefined ? {} : { reuseSettingsSnapshot: options.reuseSettingsSnapshot }) })
   fixture.ctx.effect(() => () => runner.close())
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
   const actor: Actor = { sessionId: fixture.parent.session.id, workspace: workspace.displayPath }

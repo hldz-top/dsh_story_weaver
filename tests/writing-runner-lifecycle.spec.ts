@@ -98,12 +98,9 @@ it('resumes its own interrupted cross-dimension repair without rejecting the res
   let blockedCollection = false
   const stalePublished = Promise.withResolvers<void>()
   const fixture = await useWritingFixture({ maxReadChars: 8192, intervene(stage, output) {
-    if (stage.kind !== 'review' || stage.task?.reviewed === undefined || blockedCollection) return output
-    if (stage.sources.get(stage.task.reviewed.artifactId)?.kind !== 'settings') return output
+    if (blockedCollection || stage.task?.batch !== 'consistency') return output
     blockedCollection = true
-    const review = output as { checks: { evidence: unknown[] }[] }
-    return { ...review, issues: [{ id: 'cross-dimension-conflict', category: 'consistency', severity: 'blocking', location: 'Selected dimensions',
-      message: 'Repair the selected dimensions together before accepting the collection.', evidence: review.checks[0]!.evidence }] }
+    return { issues: [{ dimension: 'a1', kind: 'conflict', quote: '本书是一部发生在虚构雾港的悬疑冒险小说。' }] }
   } })
   const apply = fixture.service.applySettingsCandidate.bind(fixture.service)
   let holdRepair = true
@@ -134,7 +131,7 @@ it('resumes its own interrupted cross-dimension repair without rejecting the res
     const resumed = fulfilled(await fixture.run(exec => fixture.runner.resume(exec, stopped.id, false)))
     expect(resumed.error).toBeNull()
     expect(resumed.status).toBe('completed')
-    expect([...fixture.stages.values()].filter(stage => !existingChildren.has(stage.sessionId) && stage.kind === 'settings' && stage.task?.dimensionCode === 'a1')).toEqual([])
+    expect([...fixture.stages.values()].filter(stage => !existingChildren.has(stage.sessionId) && stage.task?.batch === 'draft' && stage.task.codes?.includes('a1') === true)).toEqual([])
     expect(fixture.service.getSettings(fixture.actor, fixture.novel.id).applied.every(item => !item.stale)).toBe(true)
     expect(fixture.service.getManuscript(fixture.actor, fixture.novel.id).appliedChapters).toHaveLength(1)
     expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
