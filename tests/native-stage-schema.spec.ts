@@ -8,7 +8,7 @@ import { parseSettingsDimensionOutput, StageOutputSchemas } from '../src/stage-o
 import { call } from './support/model.ts'
 import { useStageFixture } from './support/stage-fixture.ts'
 
-const kinds: readonly StagePromptKind[] = ['settings', 'review', 'book-outline', 'chapter-outline', 'body', 'continuity']
+const kinds: readonly StagePromptKind[] = ['settings', 'review', 'book-outline', 'chapter-outline', 'body', 'continuity', 'continuity-snapshot']
 
 it.each(kinds)('publishes %s through the installed native object-schema validator', kind => {
   expect(() => assertObjectJsonSchema(nativeStageOutputSchema(kind))).not.toThrow()
@@ -28,6 +28,7 @@ const outputs = {
   body: { ...common, chapterNumber: 1, scenes: [{ sceneId: 'open-log', text: 'The keeper opens the log.' }] },
   continuity: { ...common, chapterNumber: 1, summary: 'The log is recovered.', characters: [{ name: 'The keeper', state: 'Holds the log.' }],
     timeline: [{ event: 'The log is opened.', evidence: [citation] }], obligations: [] },
+  'continuity-snapshot': { ...common, chapterNumber: 1, characterStatus: [{ name: 'The keeper', status: 'Holds the log.' }], unrecoveredForeshadowing: [], usedPlotBridges: [{ note: 'The log was opened.' }] },
 } satisfies Record<StagePromptKind, object>
 const execution: StageExecutionConfig = {
   stageProvider: 'stage-spawn', maxDelegationDepth: 2, allowedTools: [], maxStageRequests: 1, stageTimeoutMs: 5000,

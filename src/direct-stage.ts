@@ -31,10 +31,12 @@ export interface DirectStageRequest {
   readonly onStarted: (generationId: SessionIdentity) => Promise<void>
 }
 
-/** Finite limits for the single model call. The route stays the parent Agent's selection. */
+/** Finite limits for the single model call. An omitted model stays the parent Agent's selection. */
 export interface DirectStageConfig {
   readonly maxStageRequests: number
   readonly stageTimeoutMs: number
+  /** Explicit host provider and model for this stream. Omit to inherit the parent Agent. */
+  readonly model?: { readonly provider: string; readonly model: string }
 }
 
 const MALFORMED_RESPONSE_CODE = 'MALFORMED_RESPONSE'
@@ -115,7 +117,7 @@ function aggregatedText(assembler: BlockAssembler, signal: AbortSignal): string 
  * @param ctx - Host context whose llm service streams the parent Agent's selected model.
  * @param exec - Parent tool execution. Its Agent supplies the inherited route and its signal owns cancellation.
  * @param request - Stored instructions, inlined inputs, schema, and the durable receipt callback.
- * @param config - Positive request budget and deadline. Exactly one stream is sent.
+ * @param config - Positive request budget and deadline. Exactly one stream is sent. An omitted model inherits the parent Agent.
  * @param writeAudit - Persists the model-visible prompt and raw output on the current session.
  * @returns The parsed object and the generation receipt stored as the attempt's child identity.
  */
@@ -135,10 +137,20 @@ export async function executeDirectStage(ctx: Context, exec: ToolExecution, requ
     const digest = createHash('sha256').update(input.text).digest('hex')
     if (digest !== input.sha256) throw new StageExecutionError('stage-audit', `Direct stage input ${input.artifactId} does not match its stored digest`)
   }
-  const selection = parent.model.current()
-  if (selection === undefined || selection.provider.trim().length === 0 || selection.model.trim().length === 0) {
+  const inherited = parent.model.current()
+  const route = config.model
+  if (route !== undefined) {
+    if (route.provider.trim().length === 0 || route.model.trim().length === 0) {
+      throw new StageExecutionError('stage-config', 'Writing stage model needs a nonblank provider and model')
+    }
+    if (!ctx.llm.listProviders().some(provider => provider.id === route.provider)) {
+      throw new StageExecutionError('stage-config', `Writing stage model provider ${JSON.stringify(route.provider)} is not registered on this host. This plugin does not switch to another channel.`)
+    }
+  } else if (inherited === undefined || inherited.provider.trim().length === 0 || inherited.model.trim().length === 0) {
     throw new StageExecutionError('stage-config', 'Writing stages inherit the parent Agent model, and this Agent has no selected provider and model')
   }
+  const provider = route?.provider ?? inherited!.provider
+  const model = route?.model ?? inherited!.model
   const modelPrompt = directModelPrompt(request.prompt, request.inputs, request.outputSchema)
   const controller = new AbortController()
   const signal = AbortSignal.any([exec.signal, controller.signal])
@@ -162,8 +174,8 @@ export async function executeDirectStage(ctx: Context, exec: ToolExecution, requ
     const assembler = new BlockAssembler()
     try {
       for await (const chunk of ctx.llm.stream({
-        provider: selection.provider, model: selection.model,
-        ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+        provider, model,
+        ...(route === undefined && inherited?.reasoningEffort !== undefined ? { reasoningEffort: inherited.reasoningEffort } : {}),
         purpose: 'story-writing-stage', sessionId: generationId, system: SYSTEM, signal,
         messages: [{ role: 'user', content: [{ type: 'text', text: modelPrompt }] }],
       })) assembler.push(chunk as StreamChunk)

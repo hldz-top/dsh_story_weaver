@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { planSettings } from './settings-plan.ts'
 import { manuscriptTargetSchema, settingsCollectionSchema, type ManuscriptRecord } from './manuscript-records.ts'
-import { parseBodyOutput, parseBookOutlineOutput, parseChapterOutlineOutput, parseContinuityOutput, parseReviewOutput, StageOutputSchemas } from './stage-output.ts'
+import { parseBodyOutput, parseBookOutlineOutput, parseChapterOutlineOutput, parseContinuityOutput, parseContinuitySnapshot, parseReviewOutput, StageOutputSchemas } from './stage-output.ts'
 import { WritingError } from './contracts.ts'
 import { checkModelArtifactBytes, parseModelOutput } from './stage-rejection.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -38,12 +38,26 @@ export interface ManuscriptContext {
   readonly requiredChecks: readonly ReviewCategory[]
   readonly obligations: readonly { id: string; description: string }[]
   readonly sceneIds: readonly string[]
-  readonly priorChapter: { body: ArtifactRef<'body'>; continuity: ArtifactRef<'continuity'> } | null
+  /** Reviewed snapshots of applied chapters this stage may use. Empty when none are in scope. */
+  readonly continuitySnapshots: readonly ArtifactRef<'continuity-snapshot'>[]
+}
+/** Exact applied chapter a snapshot is extracted from. `snapshotThrough` is the highest earlier chapter whose snapshot may be read. */
+export interface SaveContinuitySnapshotRequest {
+  readonly novelId: NovelId; readonly requestId: RequestId; readonly chapterNumber: number
+  readonly bodyId: ArtifactId; readonly continuityId: ArtifactId; readonly childSessionId: SessionId
+  readonly output: unknown; readonly snapshotThrough?: number
+}
+/** Attach one passing snapshot to the applied chapter pair it describes. */
+export interface AttachContinuitySnapshotRequest {
+  readonly novelId: NovelId; readonly chapterNumber: number; readonly bodyId: ArtifactId; readonly continuityId: ArtifactId
+  readonly snapshotId: ArtifactId; readonly reviewId: ArtifactId
 }
 /** Exact generated version submitted by a native child run. */
 export interface SaveManuscriptCandidateRequest {
   readonly novelId: NovelId; readonly requestId: RequestId; readonly target: GeneratedManuscriptTarget
   readonly childSessionId: SessionId; readonly output: unknown; readonly researchPlanId: ArtifactId; readonly revisionOf?: ArtifactId
+  /** Highest earlier chapter whose reviewed snapshot may be an input. Omit to use every applied chapter before this one. */
+  readonly snapshotThrough?: number
 }
 /** One candidate, its latest review, and validity of its original inputs. */
 export interface ManuscriptCandidateView {
@@ -154,7 +168,7 @@ export class ManuscriptStore {
     actor.signal?.throwIfAborted()
     const novel = this.record(actor, request.novelId)
     const candidate = this.candidate(novel, request.candidateId)
-    if (candidate.target.kind === 'body' || candidate.target.kind === 'continuity') throw new WritingError('review-blocked', 'Body and continuity must apply together')
+    if (candidate.target.kind === 'body' || candidate.target.kind === 'continuity' || candidate.target.kind === 'continuity-snapshot') throw new WritingError('review-blocked', 'Body and continuity must apply together')
     this.passingReview(actor, novel, candidate, request.reviewId)
     if (candidate.applied) return this.view(actor, novel, candidate)
     const updated = await this.domain.table('novels').update(novel.id, current => {
@@ -165,7 +179,7 @@ export class ManuscriptStore {
       this.currentInputs(actor, current, active)
       const head = current.manuscriptHeads.find(item => `${item.kind}:${item.chapterNumber}` === slot(active.target))
       if ((head?.artifactId ?? null) !== request.expectedAppliedId || (active.revisionOf !== null && request.expectedAppliedId !== active.revisionOf)) throw new WritingError('revision-conflict', 'A different manuscript version is the current head')
-      if (active.target.kind === 'body' || active.target.kind === 'continuity') throw new WritingError('review-blocked', 'Body and continuity must apply together')
+      if (active.target.kind === 'body' || active.target.kind === 'continuity' || active.target.kind === 'continuity-snapshot') throw new WritingError('review-blocked', 'Body and continuity must apply together')
       return { ...current, manuscriptHistory: current.manuscriptHistory.map(item => item.artifact.id === active.artifact.id ? { ...item, applied: true } : item),
         manuscriptHeads: [...current.manuscriptHeads.filter(item => `${item.kind}:${item.chapterNumber}` !== slot(active.target)),
           { kind: active.target.kind, chapterNumber: 'chapterNumber' in active.target ? active.target.chapterNumber : null, artifactId: active.artifact.id }] }
@@ -174,14 +188,14 @@ export class ManuscriptStore {
   }
 
   /** @param actor - Owning workspace. @param request - Target before research planning. @returns Current source references without research evidence. */
-  manuscriptResearchInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; revisionOf?: ArtifactId }): readonly ArtifactRef[] {
-    return this.context(actor, this.record(actor, request.novelId), request.target, request.revisionOf).inputRefs
+  manuscriptResearchInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; revisionOf?: ArtifactId; snapshotThrough?: number }): readonly ArtifactRef[] {
+    return this.context(actor, this.record(actor, request.novelId), request.target, request.revisionOf, request.snapshotThrough).inputRefs
   }
 
   /** @param actor - Owning workspace. @param request - Exact novel and requested stage. @returns Admissible source versions and mechanical requirements. */
-  manuscriptInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; researchPlanId: ArtifactId; revisionOf?: ArtifactId }): ManuscriptContext {
+  manuscriptInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; researchPlanId: ArtifactId; revisionOf?: ArtifactId; snapshotThrough?: number }): ManuscriptContext {
     const novel = this.record(actor, request.novelId)
-    const context = this.context(actor, novel, request.target, request.revisionOf)
+    const context = this.context(actor, novel, request.target, request.revisionOf, request.snapshotThrough)
     const research = this.owner.getResearch(actor, { novelId: novel.id, planId: request.researchPlanId })
     if (research.stale || research.result === null || (research.outcome !== 'succeeded' && research.outcome !== 'not-needed')) throw new WritingError('research-incomplete', 'Manuscript generation requires adequate research for the current creative brief')
     const [brief, ...rest] = context.inputRefs
@@ -255,10 +269,84 @@ export class ManuscriptStore {
       return { ...current, manuscriptHistory: current.manuscriptHistory.map(item => item.artifact.id === pair.body.artifact.id || item.artifact.id === pair.continuity.artifact.id ? { ...item, applied: true } : item),
         appliedChapters: [...current.appliedChapters, { chapterNumber: pair.chapterNumber,
           body: { ...pair.body.artifact, kind: 'body' as const }, bodyReview: bodyReview.artifact,
-          continuity: { ...pair.continuity.artifact, kind: 'continuity' as const }, continuityReview: continuityReview.artifact, obligations: pair.output.obligations, wordBounds: { ...this.owner.manuscriptLimits } }] }
+          continuity: { ...pair.continuity.artifact, kind: 'continuity' as const }, continuityReview: continuityReview.artifact, obligations: pair.output.obligations, wordBounds: { ...this.owner.manuscriptLimits }, snapshot: null }] }
     })
     const saved = updated.appliedChapters.find(item => item.body.id === request.bodyId && item.continuity.id === request.continuityId)
     if (saved === undefined) throw new WritingError('corrupt-artifact', 'Applied chapter receipt is missing')
+    return this.chapterView(actor, updated, saved)
+  }
+
+  /**
+   * Inputs for one snapshot extraction: reviewed snapshots through `snapshotThrough`, then this chapter's applied body and continuity.
+   * @param actor - Owning workspace.
+   * @param request - Applied pair and the earlier-chapter ceiling.
+   * @returns Exact artifact references, with no research evidence.
+   */
+  continuitySnapshotInputs(actor: Actor, request: { novelId: NovelId; chapterNumber: number; bodyId: ArtifactId; continuityId: ArtifactId; snapshotThrough?: number }): ArtifactRef[] {
+    const novel = this.record(actor, request.novelId)
+    const through = request.snapshotThrough ?? request.chapterNumber - 1
+    const pair = this.appliedPair(novel, request.chapterNumber, request.bodyId, request.continuityId)
+    return [...this.leadingSnapshots(actor, novel, through, request.chapterNumber), pair.body, pair.continuity]
+  }
+
+  /** @param actor - Owning workspace. @param request - Native snapshot JSON for the exact applied chapter. @returns An unreviewed snapshot candidate. */
+  async saveContinuitySnapshot(actor: Actor, request: SaveContinuitySnapshotRequest): Promise<ManuscriptCandidateView> {
+    actor.signal?.throwIfAborted()
+    const novel = this.record(actor, request.novelId)
+    const target = { kind: 'continuity-snapshot' as const, chapterNumber: request.chapterNumber, bodyId: request.bodyId, continuityId: request.continuityId }
+    const receipt = (output: ReturnType<typeof parseContinuitySnapshot>) => digest([target, null, request.childSessionId, { ...output, inputRefs: [...output.inputRefs].sort((left, right) => left.artifactId < right.artifactId ? -1 : left.artifactId > right.artifactId ? 1 : 0) }])
+    const replay = novel.manuscriptHistory.find(item => item.request.requestId === request.requestId)
+    if (replay !== undefined) {
+      let replayHash = ''
+      try { replayHash = receipt(parseContinuitySnapshot(request.output, { inputRefs: replay.inputRefs, chapterNumber: request.chapterNumber })) } catch { /* different admission */ }
+      sameRequest(replay.request.hash, replayHash)
+      return this.view(actor, novel, replay)
+    }
+    const refs = this.continuitySnapshotInputs(actor, request).map(inputRef)
+    const output = parseContinuitySnapshot(request.output, { inputRefs: refs, chapterNumber: request.chapterNumber })
+    const hash = receipt(output)
+    checkModelArtifactBytes(JSON.stringify(output), this.owner.limits.maxArtifactBytes, 'continuity-snapshot output')
+    const artifact = this.artifact(novel.id, 'continuity-snapshot', JSON.stringify(output))
+    await this.domain.table('artifacts').put(artifact.id, artifact)
+    actor.signal?.throwIfAborted()
+    const updated = await this.domain.table('novels').update(novel.id, current => {
+      actor.signal?.throwIfAborted()
+      const duplicate = current.manuscriptHistory.find(item => item.request.requestId === request.requestId)
+      if (duplicate !== undefined) { sameRequest(duplicate.request.hash, hash); return current }
+      const actual = this.continuitySnapshotInputs(actor, request).map(inputRef)
+      if (!sameRefs(actual, output.inputRefs)) throw new WritingError('revision-conflict', 'Continuity snapshot inputs changed before candidate publication')
+      return { ...current, manuscriptHistory: [...current.manuscriptHistory, { artifact: reference(artifact), target, inputRefs: refs,
+        childSessionId: request.childSessionId, researchPlanId: null, request: { requestId: request.requestId, hash }, reviewHistory: [], applied: false, revisionOf: null }] }
+    })
+    const saved = updated.manuscriptHistory.find(item => item.request.requestId === request.requestId)
+    if (saved === undefined) throw new WritingError('corrupt-artifact', 'Continuity snapshot receipt is missing')
+    return this.view(actor, updated, saved)
+  }
+
+  /** @param actor - Owning workspace. @param request - Passing review of the snapshot for the exact applied pair. @returns The chapter with that snapshot attached. */
+  async attachContinuitySnapshot(actor: Actor, request: AttachContinuitySnapshotRequest): Promise<AppliedChapterView> {
+    actor.signal?.throwIfAborted()
+    const novel = this.record(actor, request.novelId)
+    const existing = novel.appliedChapters.find(item => item.body.id === request.bodyId && item.continuity.id === request.continuityId && item.snapshot?.id === request.snapshotId)
+    if (existing !== undefined) {
+      if (existing.chapterNumber !== request.chapterNumber) throw new WritingError('review-blocked', 'Applied chapter snapshot belongs to another chapter')
+      return this.chapterView(actor, novel, existing)
+    }
+    const snapshot = this.candidate(novel, request.snapshotId)
+    this.readySnapshot(actor, novel, snapshot, request)
+    const updated = await this.domain.table('novels').update(novel.id, current => {
+      actor.signal?.throwIfAborted()
+      const already = current.appliedChapters.find(item => item.body.id === request.bodyId && item.continuity.id === request.continuityId && item.snapshot?.id === request.snapshotId)
+      if (already !== undefined) return current
+      const active = this.candidate(current, request.snapshotId)
+      this.readySnapshot(actor, current, active, request)
+      const pair = this.appliedPair(current, request.chapterNumber, request.bodyId, request.continuityId)
+      if (pair.snapshot != null) throw new WritingError('revision-conflict', 'This applied chapter already has a reviewed continuity snapshot')
+      return { ...current, manuscriptHistory: current.manuscriptHistory.map(item => item.artifact.id === active.artifact.id ? { ...item, applied: true } : item),
+        appliedChapters: current.appliedChapters.map(item => item.body.id === pair.body.id && item.continuity.id === pair.continuity.id ? { ...item, snapshot: { ...active.artifact, kind: 'continuity-snapshot' as const } } : item) }
+    })
+    const saved = updated.appliedChapters.find(item => item.body.id === request.bodyId && item.continuity.id === request.continuityId)
+    if (saved?.snapshot?.id !== request.snapshotId) throw new WritingError('corrupt-artifact', 'Continuity snapshot was not attached')
     return this.chapterView(actor, updated, saved)
   }
 
@@ -287,18 +375,19 @@ export class ManuscriptStore {
       || !isDeepStrictEqual(chapter.obligations, pair.output.obligations)) throw new WritingError('corrupt-artifact', 'Applied chapter record differs from its reviewed immutable versions')
     const changes = [...this.changedInputs(actor, novel, pair.body), ...this.changedInputs(actor, novel, pair.continuity)]
     const changedInputs = [...new Map(changes.map(ref => [ref.artifactId, ref])).values()]
-    return structuredClone({ ...chapter, wordCount: pair.wordCount, stale: changedInputs.length > 0, changedInputs })
+    return structuredClone({ ...chapter, snapshot: chapter.snapshot ?? null, wordCount: pair.wordCount, stale: changedInputs.length > 0, changedInputs })
   }
 
-  private context(actor: Actor, novel: NovelRecord, requested: GeneratedManuscriptTarget, revisionOf?: ArtifactId): Omit<ManuscriptContext, 'researchPlanId'> {
+  private context(actor: Actor, novel: NovelRecord, requested: GeneratedManuscriptTarget, revisionOf?: ArtifactId, snapshotThrough?: number): Omit<ManuscriptContext, 'researchPlanId'> {
     const target = manuscriptTargetSchema.parse(requested)
-    if (target.kind === 'settings') throw new WritingError('invalid-input', 'This manuscript stage context is not yet available')
+    if (target.kind === 'settings' || target.kind === 'continuity-snapshot') throw new WritingError('invalid-input', 'This manuscript stage context is not yet available')
     const lineage = revisionOf === undefined ? [] : [this.revisionBase(actor, novel, target, revisionOf).artifact]
     const settings = this.head(actor, novel, 'settings', null)
     const brief = this.owner.getNovel(actor, novel.id).brief
     const refs: ArtifactRef[] = [brief, settings.artifact]
     this.owner.getArtifact(actor, { novelId: novel.id, artifactId: brief.id })
-    if (target.kind === 'book-outline') return { target, revisionOf: revisionOf ?? null, inputRefs: [...refs, ...lineage], requiredChecks: requiredChecks(target.kind), obligations: [], sceneIds: [], priorChapter: null }
+    const empty = { target, revisionOf: revisionOf ?? null, inputRefs: [...refs, ...lineage], requiredChecks: requiredChecks(target.kind), obligations: [], sceneIds: [], continuitySnapshots: [] as ArtifactRef<'continuity-snapshot'>[] }
+    if (target.kind === 'book-outline') return empty
     const book = this.head(actor, novel, 'book-outline', null)
     refs.push(book.artifact)
     const plan = StageOutputSchemas['book-outline'].parse(JSON.parse(this.owner.getArtifact(actor, { novelId: novel.id, artifactId: book.artifact.id }).text))
@@ -311,20 +400,9 @@ export class ManuscriptStore {
       const parsed = StageOutputSchemas['chapter-outline'].parse(JSON.parse(this.owner.getArtifact(actor, { novelId: novel.id, artifactId: outline.artifact.id }).text))
       sceneIds = parsed.scenes.map(scene => scene.id)
     }
-    let priorChapter: ManuscriptContext['priorChapter'] = null
-    if (target.chapterNumber > 1) {
-      const previous = novel.appliedChapters.findLast(item => item.chapterNumber === target.chapterNumber - 1)
-      if (previous === undefined) throw new WritingError('revision-conflict', 'The previous chapter must be applied before continuing')
-      this.chapterView(actor, novel, previous)
-      const body = this.candidate(novel, previous.body.id)
-      const continuity = this.candidate(novel, previous.continuity.id)
-      this.passingReview(actor, novel, body, previous.bodyReview.id)
-      this.passingReview(actor, novel, continuity, previous.continuityReview.id)
-      this.currentInputs(actor, novel, body)
-      this.currentInputs(actor, novel, continuity)
-      priorChapter = { body: previous.body, continuity: previous.continuity }
-      refs.push(previous.body, previous.continuity)
-    }
+    const through = snapshotThrough ?? target.chapterNumber - 1
+    const continuitySnapshots = this.leadingSnapshots(actor, novel, through, target.chapterNumber)
+    refs.push(...continuitySnapshots)
     if (target.kind === 'continuity') {
       const body = this.candidate(novel, target.bodyId)
       if (body.target.kind !== 'body' || body.target.chapterNumber !== target.chapterNumber) throw new WritingError('invalid-input', 'Continuity must identify the reviewed body of this chapter')
@@ -338,7 +416,7 @@ export class ManuscriptStore {
       if (!sameRefs(bodyInputs, refs.map(inputRef))) throw new WritingError('revision-conflict', 'Reviewed body uses different current chapter sources')
       refs.push(body.artifact, review.artifact)
     }
-    return { target, revisionOf: revisionOf ?? null, inputRefs: [...refs, ...lineage], requiredChecks: requiredChecks(target.kind), obligations: chapter.obligations, sceneIds, priorChapter }
+    return { target, revisionOf: revisionOf ?? null, inputRefs: [...refs, ...lineage], requiredChecks: requiredChecks(target.kind), obligations: chapter.obligations, sceneIds, continuitySnapshots }
   }
 
   private generatedOutput(actor: Actor, novel: NovelRecord, target: GeneratedManuscriptTarget, refs: readonly StageInputRef[], researchPlanId: ArtifactId, value: unknown, revisionOf: ArtifactId | null) {
@@ -370,49 +448,88 @@ export class ManuscriptStore {
     const chapter = plan.chapters.find(item => item.chapterNumber === target.chapterNumber)
     if (chapter === undefined) throw new WritingError('invalid-input', 'Requested chapter is outside its book plan')
     let sceneIds: string[] = []
-    const priorIndex = target.kind === 'chapter-outline' ? 4 : 5
+    let index = 4
     if (target.kind === 'body' || target.kind === 'continuity') {
       const outline = sources[4]
       if (outline?.kind !== 'chapter-outline') throw new WritingError('corrupt-artifact', 'Body requires its exact chapter outline')
       const chapterPlan = StageOutputSchemas['chapter-outline'].parse(JSON.parse(outline.text))
       if (chapterPlan.chapterNumber !== target.chapterNumber || !chapterPlan.inputRefs.some(ref => ref.artifactId === book.id)) throw new WritingError('corrupt-artifact', 'Body chapter outline belongs to a different chapter or book')
       sceneIds = chapterPlan.scenes.map(scene => scene.id)
+      index = 5
     }
-    const priorCount = target.chapterNumber === 1 ? 0 : 2
-    const bodyIndex = priorIndex + priorCount
-    const expectedCount = bodyIndex + (target.kind === 'continuity' ? 2 : 0)
-    if (sources.length !== expectedCount) throw new WritingError('corrupt-artifact', 'Chapter input roles are incomplete')
-    if (target.chapterNumber > 1) {
-      const previousBody = sources[priorIndex]
-      const previousContinuity = sources[priorIndex + 1]
-      if (previousBody?.kind !== 'body' || previousContinuity?.kind !== 'continuity'
-        || !novel.appliedChapters.some(item => item.chapterNumber === target.chapterNumber - 1 && item.body.id === previousBody.id && item.continuity.id === previousContinuity.id)) {
-        throw new WritingError('corrupt-artifact', 'Prior chapter sources were not applied together')
-      }
+    const snapshots: typeof sources = []
+    let previousSnapshot = 0
+    while (index < sources.length && sources[index]?.kind === 'continuity-snapshot') {
+      const snapshot = sources[index]!
+      const recorded = this.appliedSnapshot(novel, snapshot, target.chapterNumber)
+      if (recorded <= previousSnapshot) throw new WritingError('corrupt-artifact', 'Continuity snapshots are not in applied chapter order')
+      previousSnapshot = recorded
+      snapshots.push(snapshot)
+      index += 1
     }
     if (target.kind === 'continuity') {
-      const body = sources[bodyIndex]
-      const review = sources[bodyIndex + 1]
+      const body = sources[index]
+      const review = sources[index + 1]
       if (body?.kind !== 'body' || body.id !== target.bodyId || review?.kind !== 'review') throw new WritingError('corrupt-artifact', 'Continuity requires the exact reviewed body and its review')
       const bodyRecord = this.candidate(novel, body.id)
       if (bodyRecord.target.kind !== 'body' || bodyRecord.target.chapterNumber !== target.chapterNumber || !bodyRecord.reviewHistory.some(item => item.artifact.id === review.id)) throw new WritingError('corrupt-artifact', 'Continuity review does not belong to the requested chapter body')
       const bodyOutput = StageOutputSchemas.body.parse(JSON.parse(body.text))
       const bodyReview = this.reviewOutput(actor, novel, bodyRecord, JSON.parse(review.text))
       if (bodyReview.issues.some(issue => issue.severity === 'blocking')) throw new WritingError('review-blocked', 'Continuity body still has blocking issues')
-      const expectedBodySources = sources.slice(0, bodyIndex).filter(source => source.kind !== 'research-evidence').map(inputRef)
+      const expectedBodySources = sources.slice(0, index).filter(source => source.kind !== 'research-evidence').map(inputRef)
       const actualBodySources = bodyRecord.inputRefs.filter(ref => this.owner.getArtifact(actor, { novelId: novel.id, artifactId: ref.artifactId }).kind !== 'research-evidence')
       if (!sameRefs(actualBodySources, expectedBodySources)) throw new WritingError('corrupt-artifact', 'Continuity and body use different chapter source versions')
-      const evidenceSources = [{ artifactId: body.id, text: assembleBody(bodyOutput) }]
-      if (target.chapterNumber > 1) {
-        const previous = sources[priorIndex + 1]
-        if (previous === undefined) throw new WritingError('corrupt-artifact', 'Previous actual continuity is missing')
-        evidenceSources.push({ artifactId: previous.id, text: previous.text })
-      }
+      if (index + 2 !== sources.length) throw new WritingError('corrupt-artifact', 'Chapter input roles are incomplete')
+      const evidenceSources = [{ artifactId: body.id, text: assembleBody(bodyOutput) }, ...snapshots.map(snapshot => ({ artifactId: snapshot.id, text: snapshot.text }))]
       return { kind: 'continuity' as const, output: parseContinuityOutput(value, { inputRefs: refs, chapterNumber: target.chapterNumber,
         obligationIds: chapter.obligations.map(item => item.id), reviewedBodyId: body.id, evidenceSources }) }
     }
+    if (index !== sources.length) throw new WritingError('corrupt-artifact', 'Chapter input roles are incomplete')
     if (target.kind === 'body') return { kind: 'body' as const, output: parseBodyOutput(value, { inputRefs: refs, chapterNumber: target.chapterNumber, sceneIds }) }
     return { kind: 'chapter-outline' as const, output: parseChapterOutlineOutput(value, { inputRefs: refs, chapterNumber: target.chapterNumber, obligationIds: chapter.obligations.map(item => item.id) }) }
+  }
+
+  private leadingSnapshots(actor: Actor, novel: NovelRecord, through: number, chapterNumber: number): ArtifactRef<'continuity-snapshot'>[] {
+    if (!Number.isSafeInteger(through) || through < 0) throw new WritingError('invalid-input', 'snapshotThrough must be a nonnegative integer')
+    if (through >= chapterNumber) throw new WritingError('invalid-input', 'snapshotThrough must name an earlier chapter')
+    const refs: ArtifactRef<'continuity-snapshot'>[] = []
+    for (let number = 1; number <= through; number += 1) {
+      const applied = novel.appliedChapters.findLast(item => item.chapterNumber === number)
+      if (applied === undefined) throw new WritingError('revision-conflict', 'The previous chapter must be applied before continuing')
+      const view = this.chapterView(actor, novel, applied)
+      if (view.stale || view.snapshot == null) throw new WritingError('revision-conflict', `Applied chapter ${number} has no current reviewed continuity snapshot`)
+      refs.push(view.snapshot)
+    }
+    return refs
+  }
+
+  private appliedPair(novel: NovelRecord, chapterNumber: number, bodyId: ArtifactId, continuityId: ArtifactId) {
+    const pair = novel.appliedChapters.find(item => item.chapterNumber === chapterNumber && item.body.id === bodyId && item.continuity.id === continuityId)
+    if (pair === undefined) throw new WritingError('revision-conflict', 'Continuity snapshot requires the applied body and continuity of this chapter')
+    return pair
+  }
+
+  private readySnapshot(actor: Actor, novel: NovelRecord, snapshot: ManuscriptRecord, request: AttachContinuitySnapshotRequest): void {
+    if (snapshot.target.kind !== 'continuity-snapshot' || snapshot.target.chapterNumber !== request.chapterNumber
+      || snapshot.target.bodyId !== request.bodyId || snapshot.target.continuityId !== request.continuityId) {
+      throw new WritingError('review-blocked', 'Continuity snapshot does not describe this applied chapter')
+    }
+    const body = snapshot.inputRefs.at(-2)
+    const continuity = snapshot.inputRefs.at(-1)
+    if (body?.artifactId !== request.bodyId || continuity?.artifactId !== request.continuityId) throw new WritingError('review-blocked', 'Continuity snapshot inputs are not the applied chapter pair')
+    this.passingReview(actor, novel, snapshot, request.reviewId)
+    this.currentInputs(actor, novel, snapshot)
+    this.appliedPair(novel, request.chapterNumber, request.bodyId, request.continuityId)
+  }
+
+  private appliedSnapshot(novel: NovelRecord, source: { id: ArtifactId; text: string }, beforeChapter: number): number {
+    const record = this.candidate(novel, source.id)
+    if (record.target.kind !== 'continuity-snapshot' || !record.applied || record.target.chapterNumber >= beforeChapter) {
+      throw new WritingError('corrupt-artifact', 'Continuity snapshot is not from an earlier applied chapter')
+    }
+    const parsed = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(source.text))
+    if (parsed.chapterNumber !== record.target.chapterNumber) throw new WritingError('corrupt-artifact', 'Continuity snapshot chapter does not match its record')
+    return record.target.chapterNumber
   }
 
   private revisionBase(actor: Actor, novel: NovelRecord, target: GeneratedManuscriptTarget, revisionOf: ArtifactId): ManuscriptRecord {
@@ -482,6 +599,8 @@ export class ManuscriptStore {
       if (candidate.applied && (candidate.reviewHistory.length === 0 || candidate.reviewHistory.at(-1)?.blocking)) throw new Error('Applied manuscript has no passing review')
       if (candidate.applied && (candidate.target.kind === 'body' || candidate.target.kind === 'continuity')
         && !novel.appliedChapters.some(chapter => chapter.body.id === candidate.artifact.id || chapter.continuity.id === candidate.artifact.id)) throw new Error('Applied body or continuity has no atomic chapter application')
+      if (candidate.applied && candidate.target.kind === 'continuity-snapshot'
+        && !novel.appliedChapters.some(chapter => chapter.snapshot?.id === candidate.artifact.id)) throw new Error('Applied continuity snapshot is not attached to its chapter')
     } catch (cause) { throw new WritingError('corrupt-artifact', 'Manuscript review or adoption status cannot be verified', { cause }) }
   }
 
@@ -529,6 +648,24 @@ export class ManuscriptStore {
         if (candidate.request.hash !== digest(candidate.target)) throw new Error('Settings collection receipt differs from its selected dimensions')
         return { kind: 'settings' as const, output }
       }
+      if (candidate.target.kind === 'continuity-snapshot') {
+        if (candidate.researchPlanId !== null || candidate.childSessionId === null || candidate.revisionOf !== null) throw new Error('Continuity snapshot provenance is incomplete')
+        const output = parseContinuitySnapshot(value, { inputRefs: candidate.inputRefs, chapterNumber: candidate.target.chapterNumber })
+        const body = sources.at(-2)
+        const continuity = sources.at(-1)
+        if (body?.kind !== 'body' || body.id !== candidate.target.bodyId || continuity?.kind !== 'continuity' || continuity.id !== candidate.target.continuityId) throw new Error('Continuity snapshot sources are not its applied chapter')
+        if (!novel.appliedChapters.some(item => item.body.id === body.id && item.continuity.id === continuity.id)) throw new Error('Continuity snapshot chapter pair is not applied')
+        let previous = 0
+        for (const source of sources.slice(0, -2)) {
+          if (source.kind !== 'continuity-snapshot') throw new Error('Continuity snapshot inputs must be earlier snapshots, then the chapter pair')
+          const earlier = this.candidate(novel, source.id)
+          if (earlier.target.kind !== 'continuity-snapshot' || !earlier.applied || earlier.target.chapterNumber <= previous || earlier.target.chapterNumber >= candidate.target.chapterNumber) throw new Error('Continuity snapshot cites an unapplied or later snapshot')
+          previous = earlier.target.chapterNumber
+        }
+        const expectedHash = digest([candidate.target, null, candidate.childSessionId, { ...output, inputRefs: [...output.inputRefs].sort((left, right) => left.artifactId < right.artifactId ? -1 : left.artifactId > right.artifactId ? 1 : 0) }])
+        if (candidate.request.hash !== expectedHash) throw new Error('Continuity snapshot receipt differs from its publication')
+        return { kind: 'continuity-snapshot' as const, output }
+      }
       if (candidate.researchPlanId === null || candidate.childSessionId === null) throw new Error('Generated manuscript requires research and child-run provenance')
       if (candidate.revisionOf !== null && novel.manuscriptHistory.findIndex(item => item.artifact.id === candidate.revisionOf) >= novel.manuscriptHistory.indexOf(candidate)) throw new Error('Revision lineage must identify an earlier publication')
       const parsed = this.generatedOutput(actor, novel, candidate.target, candidate.inputRefs, candidate.researchPlanId, value, candidate.revisionOf)
@@ -551,11 +688,17 @@ export class ManuscriptStore {
       const upstream = novel.manuscriptHistory.find(item => item.artifact.id === ref.artifactId)
       if (upstream !== undefined) {
         if (this.changedInputs(actor, novel, upstream, path).length > 0) return true
-        if (upstream.target.kind === 'body' || upstream.target.kind === 'continuity') {
-          if (candidate.target.kind === 'continuity' && upstream.artifact.id === candidate.target.bodyId && !upstream.applied) return false
-          const chapterNumber = upstream.target.chapterNumber
-          const current = novel.appliedChapters.findLast(item => item.chapterNumber === chapterNumber)
-          return (upstream.target.kind === 'body' ? current?.body.id : current?.continuity.id) !== upstream.artifact.id
+        const target = upstream.target
+        const owner = candidate.target
+        if (target.kind === 'continuity-snapshot') {
+          const current = novel.appliedChapters.findLast(item => item.chapterNumber === target.chapterNumber)
+          return (current?.snapshot?.id ?? null) !== upstream.artifact.id
+        }
+        if (target.kind === 'body' || target.kind === 'continuity') {
+          if (owner.kind === 'continuity' && upstream.artifact.id === owner.bodyId && !upstream.applied) return false
+          if (owner.kind === 'continuity-snapshot' && (upstream.artifact.id === owner.bodyId || upstream.artifact.id === owner.continuityId) && !upstream.applied) return false
+          const current = novel.appliedChapters.findLast(item => item.chapterNumber === target.chapterNumber)
+          return (target.kind === 'body' ? current?.body.id : current?.continuity.id) !== upstream.artifact.id
         }
         return !novel.manuscriptHeads.some(head => head.artifactId === upstream.artifact.id)
       }
@@ -596,6 +739,7 @@ function requiredChecks(kind: ManuscriptKind): ReviewCategory[] {
   if (kind === 'settings') return ['completeness', 'consistency']
   if (kind === 'book-outline') return ['completeness', 'consistency', 'obligations']
   if (kind === 'body') return ['completeness', 'consistency', 'obligations', 'continuity', 'length']
+  if (kind === 'continuity-snapshot') return ['consistency', 'continuity']
   return ['completeness', 'consistency', 'obligations', 'continuity']
 }
 

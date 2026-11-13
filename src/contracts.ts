@@ -43,7 +43,7 @@ export interface ResearchLimits {
   readonly maxResearchLogEvents: number
 }
 /** Immutable documents published by the writing service. */
-export const artifactKinds = ['creative-brief', 'research-plan', 'research-evidence', 'settings-dimension', 'review', 'settings', 'book-outline', 'chapter-outline', 'body', 'continuity'] as const
+export const artifactKinds = ['creative-brief', 'research-plan', 'research-evidence', 'settings-dimension', 'review', 'settings', 'book-outline', 'chapter-outline', 'body', 'continuity', 'continuity-snapshot'] as const
 /** Stored artifact discriminator shared by tool and storage JSON validation. */
 export type ArtifactKind = typeof artifactKinds[number]
 /** Exact immutable document version. */

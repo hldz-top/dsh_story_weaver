@@ -16,7 +16,7 @@ import { settingsCatalog } from './settings-catalog.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
 import { parseSettingsDimensionOutput, parseReviewOutput, checkSettingsDimensionScope } from './stage-output.ts'
 import type { ApplySettingsCandidateRequest, ImportSettingsRequest, SaveSettingsReviewRequest, SaveSettingsCandidateRequest, SettingsCandidateView, SettingsView } from './settings.ts'
-import { ManuscriptStore, type AssembleSettingsRequest, type ManuscriptCandidateView, type ManuscriptView, type SaveManuscriptReviewRequest, type ApplyManuscriptCandidateRequest, type ManuscriptLimits, type ManuscriptContext, type GeneratedManuscriptTarget, type SaveManuscriptCandidateRequest, type ApplyChapterRequest, type AppliedChapterView } from './manuscript.ts'
+import { ManuscriptStore, type AssembleSettingsRequest, type ManuscriptCandidateView, type ManuscriptView, type SaveManuscriptReviewRequest, type ApplyManuscriptCandidateRequest, type ManuscriptLimits, type ManuscriptContext, type GeneratedManuscriptTarget, type SaveManuscriptCandidateRequest, type ApplyChapterRequest, type AppliedChapterView, type SaveContinuitySnapshotRequest, type AttachContinuitySnapshotRequest } from './manuscript.ts'
 
 function researchContent<T>(schema: z.ZodType<T>, text: string): T {
   try { return schema.parse(JSON.parse(text)) }
@@ -54,14 +54,20 @@ export class WritingService {
   applyManuscriptCandidate(actor: Actor, request: ApplyManuscriptCandidateRequest): Promise<ManuscriptCandidateView> { return this.manuscripts.applyManuscriptCandidate(actor, request) }
 
   /** @param actor - Owning workspace. @param request - Target requiring a research decision. @returns Current source versions before new research is planned. */
-  manuscriptResearchInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; revisionOf?: ArtifactId }): readonly ArtifactRef[] { return this.manuscripts.manuscriptResearchInputs(actor, request) }
+  manuscriptResearchInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; revisionOf?: ArtifactId; snapshotThrough?: number }): readonly ArtifactRef[] { return this.manuscripts.manuscriptResearchInputs(actor, request) }
   /** @param actor - Owning workspace. @param request - Target stage and exact novel. @returns Current admissible input versions and mechanical requirements. */
-  manuscriptInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; researchPlanId: ArtifactId; revisionOf?: ArtifactId }): ManuscriptContext { return this.manuscripts.manuscriptInputs(actor, request) }
+  manuscriptInputs(actor: Actor, request: { novelId: NovelId; target: GeneratedManuscriptTarget; researchPlanId: ArtifactId; revisionOf?: ArtifactId; snapshotThrough?: number }): ManuscriptContext { return this.manuscripts.manuscriptInputs(actor, request) }
   /** @param actor - Owning workspace. @param request - Native generated output with exact source versions. @returns A persisted unreviewed candidate. */
   saveManuscriptCandidate(actor: Actor, request: SaveManuscriptCandidateRequest): Promise<ManuscriptCandidateView> { return this.manuscripts.saveManuscriptCandidate(actor, request) }
 
   /** @param actor - Owning workspace. @param request - Exact reviewed body/continuity pair and expected prior pair. @returns The atomically applied chapter. */
   applyChapter(actor: Actor, request: ApplyChapterRequest): Promise<AppliedChapterView> { return this.manuscripts.applyChapter(actor, request) }
+  /** @param actor - Owning workspace. @param request - Applied chapter and earlier-snapshot ceiling. @returns Snapshot inputs, with no research evidence. */
+  continuitySnapshotInputs(actor: Actor, request: { novelId: NovelId; chapterNumber: number; bodyId: ArtifactId; continuityId: ArtifactId; snapshotThrough?: number }): ArtifactRef[] { return this.manuscripts.continuitySnapshotInputs(actor, request) }
+  /** @param actor - Owning workspace. @param request - Native snapshot for one applied chapter. @returns The unreviewed snapshot candidate. */
+  saveContinuitySnapshot(actor: Actor, request: SaveContinuitySnapshotRequest): Promise<ManuscriptCandidateView> { return this.manuscripts.saveContinuitySnapshot(actor, request) }
+  /** @param actor - Owning workspace. @param request - Passing snapshot review for the applied pair. @returns The chapter with the snapshot attached. */
+  attachContinuitySnapshot(actor: Actor, request: AttachContinuitySnapshotRequest): Promise<AppliedChapterView> { return this.manuscripts.attachContinuitySnapshot(actor, request) }
 
   /** @param actor - Host-admitted workspace. @param request - Initial title and brief. @returns The initial committed novel. */
   async createNovel(actor: Actor, request: CreateNovelRequest): Promise<NovelView> {
@@ -400,6 +406,66 @@ export class WritingService {
         : item) }
     })
     return this.researchView(updated, this.researchRecord(updated, request.planId))
+  }
+
+  /**
+   * Record a not-needed research plan without a model call or a web tool.
+   * Used when research is disabled or the remaining call budget is below the floor.
+   * @param actor - Owning workspace. The plan is owned by this Session.
+   * @param request - Current brief, idempotency key and the skip reason stored as the creative question.
+   * @returns The completed not-needed plan.
+   */
+  async recordInputOnlyResearch(actor: Actor, request: { novelId: NovelId; briefArtifactId: ArtifactId; requestId: StartResearchRequest['requestId']; reason: string }): Promise<ResearchView> {
+    actor.signal?.throwIfAborted()
+    const questions = researchQuestions([{ id: 'research-skipped', kind: 'creative', question: request.reason, reason: request.reason }], this.researchLimits)
+    const findings = [{ questionId: 'research-skipped', callIds: [] as string[], selections: [] as [], conclusion: request.reason, adequate: true }]
+    const startHash = createHash('sha256').update(JSON.stringify([request.briefArtifactId, questions])).digest('hex')
+    const completeHash = createHash('sha256').update(JSON.stringify(findings)).digest('hex')
+    const current = this.record(actor, request.novelId)
+    const replay = current.researchHistory.find(item => item.sessionId === actor.sessionId && item.startRequest.requestId === request.requestId)
+    if (replay !== undefined) {
+      this.sameRequest(replay.startRequest.hash, startHash)
+      if (replay.completeRequest === null || replay.outcome !== 'not-needed') throw new WritingError('request-conflict', 'Request id already started a different research plan')
+      this.sameRequest(replay.completeRequest.hash, completeHash)
+      return this.getResearch(actor, { novelId: current.id, planId: replay.plan.id })
+    }
+    this.currentResearchBrief(current, request.briefArtifactId)
+    this.getArtifact(actor, { novelId: current.id, artifactId: request.briefArtifactId })
+    if (this.activeResearch(actor) !== null) throw new WritingError('research-active', 'This Session already has an active research plan')
+    const startSeq = 0
+    const plan = this.artifact(current.id, 1, JSON.stringify({ version: 1, novelId: current.id, briefArtifactId: request.briefArtifactId, sessionId: actor.sessionId, startSeq, questions }), 'research-plan')
+    const evidence = this.artifact(current.id, 1, JSON.stringify({
+      version: 3, novelId: current.id, planId: plan.id, briefArtifactId: request.briefArtifactId, sessionId: actor.sessionId, startSeq,
+      outcome: 'not-needed', observations: [], findings: findings.map(finding => ({ ...finding, outcome: 'not-needed' as const })),
+    }), 'research-evidence')
+    researchContent(researchPlanContentSchema, plan.text)
+    researchContent(researchEvidenceContentSchema, evidence.text)
+    await this.domain.table('artifacts').put(plan.id, plan)
+    await this.domain.table('artifacts').put(evidence.id, evidence)
+    actor.signal?.throwIfAborted()
+    const updated = await this.domain.table('novels').update(current.id, record => {
+      actor.signal?.throwIfAborted()
+      const duplicate = record.researchHistory.find(item => item.sessionId === actor.sessionId && item.startRequest.requestId === request.requestId)
+      if (duplicate !== undefined) {
+        this.sameRequest(duplicate.startRequest.hash, startHash)
+        if (duplicate.completeRequest === null || duplicate.outcome !== 'not-needed') throw new WritingError('request-conflict', 'Request id already started a different research plan')
+        this.sameRequest(duplicate.completeRequest.hash, completeHash)
+        return record
+      }
+      this.currentResearchBrief(record, request.briefArtifactId)
+      if (record.researchHistory.some(item => item.sessionId === actor.sessionId && item.outcome === null && item.briefArtifactId === view(record).brief.id)) {
+        throw new WritingError('research-active', 'This Session already has an active research plan')
+      }
+      const entry: ResearchRecord = {
+        plan: reference(plan), result: reference(evidence), briefArtifactId: request.briefArtifactId, sessionId: actor.sessionId,
+        startSeq, questions, reservedCalls: [], outcome: 'not-needed',
+        startRequest: { requestId: request.requestId, hash: startHash }, completeRequest: { requestId: request.requestId, hash: completeHash },
+      }
+      return { ...record, researchHistory: [...record.researchHistory, entry] }
+    })
+    const stored = updated.researchHistory.find(item => item.sessionId === actor.sessionId && item.startRequest.requestId === request.requestId)
+    if (stored === undefined) throw new WritingError('corrupt-artifact', 'Skipped research plan receipt is missing')
+    return this.getResearch(actor, { novelId: updated.id, planId: stored.plan.id })
   }
 
   private researchView(novel: NovelRecord, record: ResearchRecord): ResearchView {

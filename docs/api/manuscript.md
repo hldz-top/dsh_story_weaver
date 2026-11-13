@@ -48,18 +48,18 @@ The immutable `settings` JSON contains `version: 1`, `selectedCodes` in canonica
 | `{ kind: 'body', chapterNumber }` | The exact applied chapter outline and its ordered scenes. |
 | `{ kind: 'continuity', chapterNumber, bodyId }` | This chapter's exact reviewed body with no blocking review issues and valid current length. |
 
-Chapter 1 has `priorChapter: null`. Chapter N greater than 1 requires the current, nonstale, atomically applied body and continuity of N−1. A chapter outline is never admitted as prior actual continuity. Continuity generation additionally receives the exact body and its latest review; its non-research sources must match those used by that body.
+Both calls accept optional `snapshotThrough`, the highest earlier chapter whose reviewed continuity snapshot may be read. Omit it to include every applied chapter before this one. A caller that is writing a parallel batch passes the last chapter applied before that batch, so unfinished siblings are not inputs. Each included chapter must already have a current reviewed snapshot. Book outlines do not read snapshots.
 
 | `ManuscriptContext` field | Meaning |
 | --- | --- |
 | `target` | Validated requested stage and scope. |
 | `researchPlanId` | Explicit adequate research plan used by this invocation. |
 | `revisionOf` | Exact applied outline retained as revision lineage, or `null` for ordinary generation. |
-| `inputRefs` | Exact full artifact references: brief, research evidence, assembled settings, then stage-specific book/chapter outlines and prior actual sources. Continuity also includes its reviewed body and body review. |
+| `inputRefs` | Exact full artifact references: brief, research evidence, assembled settings, then the book outline, this chapter's outline when needed, and reviewed continuity snapshots through `snapshotThrough`. Continuity also includes its reviewed body and body review. |
 | `requiredChecks` | Review categories required for this stage. |
 | `obligations` | This chapter's required IDs and descriptions from the exact book plan; empty for book generation. |
 | `sceneIds` | Ordered formal chapter-outline scene IDs for body or continuity stages; empty for book and chapter-outline generation. |
-| `priorChapter` | Exact preceding applied `body` and `continuity` references, or `null`. |
+| `continuitySnapshots` | Reviewed snapshots of earlier applied chapters in chapter order, or an empty list. |
 
 <a id="candidates"></a>
 ## Candidate publication
@@ -68,7 +68,9 @@ Chapter 1 has `priorChapter: null`. Chapter N greater than 1 requires the curren
 
 Input ID/hash equality is unordered and rejects duplicates; ordered scenes, chapters, and substantive arrays retain their defined order. Request receipts canonicalize input-reference order and parsed JSON fields while preserving substantive array order. An identical recorded retry returns the same artifact with its current review/application/staleness view, including after upstream changes. Conflicting reuse of a request ID is rejected. Publication rechecks current sources inside the serialized novel update.
 
-A short or long body remains complete and repairable. Its view reports a blocking length finding; no text is truncated or relabeled as complete. Continuity output can preserve an open obligation with a nonblank explanation and empty evidence, but that obligation will block chapter application. Fulfilled obligations must quote the actual reviewed body. Continuity evidence sources are actual body text and the preceding applied continuity, not planned book or chapter events.
+A short or long body remains complete and repairable. Its view reports a blocking length finding; no text is truncated or relabeled as complete. Continuity output can preserve an open obligation with a nonblank explanation and empty evidence, but that obligation will block chapter application. Fulfilled obligations must quote the actual reviewed body. Continuity evidence sources are actual body text and the continuity snapshots supplied as inputs, not planned book or chapter events.
+
+`saveContinuitySnapshot` stores one compact snapshot for an applied body and continuity pair. `attachContinuitySnapshot` requires its latest review to pass and then records that snapshot on the applied chapter. A blocking review is not attached. The snapshot lists character status, unrecovered foreshadowing and used plot bridges. It is not a narrative-state graph.
 
 <a id="reviews"></a>
 ## Review and standalone adoption

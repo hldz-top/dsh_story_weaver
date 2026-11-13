@@ -84,7 +84,7 @@ it('writes three reviewed chapters through native research and stages before com
   expect(events.flatMap(event => event.data.files.map(file => file.path)).sort()).toEqual(delivered.map(item => item.path).sort())
   expect(fixture.service.listResearch(fixture.actor, fixture.novel.id)).toHaveLength(11)
   expect(fixture.service.getSettings(fixture.actor, fixture.novel.id).history).toHaveLength(1)
-  expect(manuscript.history).toHaveLength(11)
+  expect(manuscript.history).toHaveLength(14)
   expect(manuscript.history.every(candidate => candidate.review !== null)).toBe(true)
   expect(delivered.map(item => item.source.kind === 'artifact' ? item.source.artifactId : item.source.attemptId).sort()).toEqual(expected.map(item => item.id).sort())
   for (const item of delivered) {
@@ -150,7 +150,8 @@ it('stops after repeated blocking body reviews without starting continuity or th
   expect(outcome.value.status).toBe('failed')
   expect(outcome.value.error).toContain('Repair limit was exhausted')
   expect(fixture.service.getManuscript(fixture.actor, fixture.novel.id).appliedChapters).toEqual([])
-  expect([...fixture.stages.values()].some(stage => stage.kind === 'continuity' || stage.task?.chapterNumber === 2)).toBe(false)
+  expect([...fixture.stages.values()].some(stage => stage.kind === 'continuity' || stage.kind === 'continuity-snapshot')).toBe(false)
+  expect([...fixture.stages.values()].some(stage => stage.kind === 'body' && stage.task?.chapterNumber === 3)).toBe(false)
 })
 
 it('retries a malformed chapter body response under the same key and completes the run', async () => {
@@ -323,8 +324,8 @@ it('threads the host chapter-total range and settings kind-awareness correctly a
     }
     checked += 1
   }
-  // settings, its review, the collection review, book-outline/chapter-outline/body/continuity and each of their reviews.
-  expect(checked).toBe(11)
+  // settings, its review, the collection review, book-outline/chapter-outline/body/continuity/snapshot and each of their reviews.
+  expect(checked).toBe(13)
   // The counting rule and the not-a-defect sentence reach the body and its review. The aim reaches only the body.
   expect(seen).toEqual({ counting: 2, aim: 1, notDefect: 1 })
 })

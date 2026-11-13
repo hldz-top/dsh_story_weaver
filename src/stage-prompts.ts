@@ -16,7 +16,7 @@ export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7
 export const CURRENT_PROMPT_VERSION: PromptVersion = 7
 
 /** Business purpose of one independently executed stage. */
-export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity'
+export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
 /** Bounded reader metadata for one exact immutable input version. */
 export interface StagePromptInput { readonly artifactId: ArtifactId; readonly sha256: string; readonly kind: string; readonly chars: number; readonly view?: 'prose' | 'feed' }
 /** Host-selected stage and quoted task data; the native child publishes its output schema. */
@@ -76,6 +76,9 @@ const stageInstructions: Record<StagePromptKind, readonly string[]> = {
     'Use only the previous applied final continuity as the state base. For the first chapter, use the host-supplied initial state. Derive the complete next state and each delta from the actual reviewed body, retaining exact quoted prose evidence. Planned chapter events are not facts and must not be merged first or counted twice.',
     'Track character location, knowledge, condition and relationships; consequential world facts, time, possessions, unresolved threads and required-event outcomes as requested by the schema. Preserve unchanged established facts and stable identities. Mark an obligation completed only when the actual prose supports that outcome. No-change conclusions require observed evidence and a reason; missing reads are not no changes.',
     'Repair only the reviewed defects and preserve unaffected state. Do not apply this candidate, publish the chapter or begin the next chapter: the host independently reviews the exact continuity version and publishes it with the reviewed body under current input-version checks.',
+  ],
+  'continuity-snapshot': [
+    'Extract one compact continuity snapshot from the applied chapter body and its reviewed continuity. Return only characterStatus, unrecoveredForeshadowing and usedPlotBridges. Each status or note is one short sentence the applied prose supports. Carry an unrecovered note forward from a supplied earlier snapshot only when this chapter does not recover it. Do not invent a narrative-state graph, a foreshadowing ledger, or a fact the prose does not show.',
   ],
 }
 
@@ -142,6 +145,7 @@ const REVIEW_BY_KIND: Partial<Record<StagePromptKind, string>> = {
   'chapter-outline': 'A scene.action that names the choice, motive and cost is complete even if the wording is plain. Missing required obligations are blocking. A vague but present plan is an advisory style note naming the scene id to sharpen.',
   body: 'A consistency issue quotes a choice that uses knowledge, a motive or a physical fact the accepted settings and prior continuity deny. A continuity issue quotes the prior applied fact and the sentence that breaks it. An obligations issue names the required event and shows the prose does not perform it. AI-tone issues stay category style and severity advisory, as the AI-tone instruction states.',
   continuity: 'Block when a new fact or a fulfilled obligation is not supported by the reviewed body, or when the chapter drops or alters a fact it does not change. A plain summary is not a block.',
+  'continuity-snapshot': 'Block a character status, unrecovered note, or used bridge that the applied body and continuity do not support. Do not ask for a narrative-state graph or a foreshadowing ledger. A compact note the prose supports is complete.',
 }
 
 /** @param request - The stage being prompted. @returns Version-6 sentences for that stage, or none before version 6. */
@@ -158,6 +162,8 @@ function qualityParagraphs(request: StagePromptRequest): readonly string[] {
       return [BODY_MOTIVE]
     case 'continuity':
       return [CONTINUITY_MOTIVE]
+    case 'continuity-snapshot':
+      return []
     case 'review': {
       const specific = request.reviewedKind === undefined ? undefined : REVIEW_BY_KIND[request.reviewedKind]
       return specific === undefined ? [REVIEW_ACTION] : [REVIEW_ACTION, specific]

@@ -94,6 +94,7 @@ function artifactDescription(service: WritingService, actor: Actor, artifact: Ar
     case 'chapter-outline': label = `Chapter ${StageOutputSchemas['chapter-outline'].parse(JSON.parse(artifact.text)).chapterNumber} outline`; break
     case 'body': label = `Chapter ${StageOutputSchemas.body.parse(JSON.parse(artifact.text)).chapterNumber} body`; break
     case 'continuity': label = `Chapter ${StageOutputSchemas.continuity.parse(JSON.parse(artifact.text)).chapterNumber} continuity`; break
+    case 'continuity-snapshot': label = `Chapter ${StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(artifact.text)).chapterNumber} continuity snapshot`; break
     case 'review': {
       const review = StageOutputSchemas.review.parse(JSON.parse(artifact.text))
       const reviewed = service.getArtifact(actor, { novelId: artifact.novelId, artifactId: review.reviewed.artifactId })

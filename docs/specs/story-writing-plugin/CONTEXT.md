@@ -40,6 +40,8 @@ This glossary defines the novel-writing terms used by the [plugin specification]
 
 **Continuity state**: The established story facts after an applied chapter: actual events, character state, chronology and outstanding obligations. Chapter plans do not establish these facts.
 
+**Continuity snapshot**: A compact reviewed note taken after a chapter is applied: character status, unrecovered foreshadowing and used plot bridges. Later chapters read these notes. The snapshot is not a narrative-state graph and it is not applied until its own review passes.
+
 **Needs update**: An existing output whose upstream inputs have changed. Its history remains readable while its suitability for subsequent writing requires review.
 
 **Writing run**: One requested sequence of writing work with an explicit target stage or chapter range. A run can finish, pause, stop or fail without erasing earlier applied chapters.

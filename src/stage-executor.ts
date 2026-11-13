@@ -17,13 +17,15 @@ export interface StageRequest {
   readonly authorizeTool?: (execution: ToolExecution) => Promise<void>
 }
 
-/** Deployment-owned finite execution limits; the model route remains inherited. */
+/** Deployment-owned finite execution limits. An omitted model inherits the parent Agent. */
 export interface StageExecutionConfig {
   readonly stageProvider: string
   readonly maxDelegationDepth: number
   readonly allowedTools: readonly string[]
   readonly maxStageRequests: number
   readonly stageTimeoutMs: number
+  /** Explicit host provider and model for this child. Omit to inherit the parent route. */
+  readonly model?: { readonly provider: string; readonly model: string }
 }
 
 /** Validated native structured capture and the Session containing its evidence. */
@@ -92,6 +94,9 @@ export async function executeStage(ctx: Context, exec: ToolExecution, request: S
     throw new StageExecutionError('stage-config', 'maxDelegationDepth must be a non-negative safe integer')
   }
   if (config.stageProvider.trim().length === 0) throw new StageExecutionError('stage-config', 'stageProvider must name an in-process spawn provider')
+  if (config.model !== undefined && !ctx.llm.listProviders().some(provider => provider.id === config.model?.provider)) {
+    throw new StageExecutionError('stage-config', `Writing stage model provider ${JSON.stringify(config.model.provider)} is not registered on this host. This plugin does not switch to another channel.`)
+  }
   assertObjectJsonSchema(request.outputSchema)
   const controller = new AbortController()
   const signal = AbortSignal.any([exec.signal, controller.signal])
@@ -191,6 +196,7 @@ export async function executeStage(ctx: Context, exec: ToolExecution, request: S
       provider: config.stageProvider, label: request.attemptId, parent,
       prompt: [{ type: 'text', text: request.prompt }], signal, delivery: 'caller',
       outputSchema: request.outputSchema, maxDepth: config.maxDelegationDepth,
+      ...(config.model === undefined ? {} : { agentOptions: { provider: config.model.provider, model: config.model.model } }),
     })
     if (childId === undefined) childId = activation.childId
     if (childAgent === undefined) {

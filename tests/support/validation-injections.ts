@@ -1,9 +1,9 @@
 /**
  * Shared injections and driver for the offline end-to-end proof for the unified output-validation repair loop.
  *
- * The fake stage provider runs the complete 49-stage pipeline of the live prompt (settings roots a4, a5 and e1, which plan
+ * The fake stage provider runs the complete 55-stage pipeline of the live prompt (settings roots a4, a5 and e1, which plan
  * a1, a2, a3, a4, a5 and e1; one settings-collection review; the book outline; three chapters of outline, body and
- * continuity, each with research and review). One violation of every kind is injected into the first attempt of at least
+ * continuity, each with research and review, plus a reviewed continuity snapshot after each applied chapter). One violation of every kind is injected into the first attempt of at least
  * one stage of every stage kind. With maxRepairAttempts 1 each is repaired by exactly one replacement and the run
  * completes; with maxRepairAttempts 0 each fails the run with its specific message.
  */
@@ -15,7 +15,7 @@ import { useWritingFixture, type WritingFixtureStage } from './writing-fixture.t
 export type Output = Record<string, any>
 export interface Injection {
   readonly id: string
-  /** Stage kind as counted in the 49-stage plan. */
+  /** Stage kind as counted in the 55-stage plan. */
   readonly stage: string
   readonly violation: string
   /** Highest chapter the run must reach for this stage to execute (0 = before any chapter). */
@@ -35,7 +35,7 @@ export interface Injection {
 }
 
 export const LIVE_ROOTS = ['a4', 'a5', 'e1']
-export const PIPELINE_STAGES = 49
+export const PIPELINE_STAGES = 55
 
 const planningTarget = (stage: WritingFixtureStage): Record<string, unknown> | undefined => stage.data.kind === 'research-planning' ? stage.data.outputTarget : undefined
 const researchPurpose = (stage: WritingFixtureStage): string => stage.data.kind === 'research' ? stage.data.purpose : ''
@@ -189,7 +189,7 @@ export async function pipeline(maxRepairAttempts: number, selected: readonly Inj
   return { fixture, run: outcome.value, fired }
 }
 
-/** Stage keys counted by the live 49-stage plan: every research, candidate and review key, without local planning captures. */
+/** Stage keys counted by the live 55-stage plan: every research, candidate and review key, without local planning captures. */
 export function stageKeys(attempts: readonly { key: string }[]): string[] {
   return [...new Set(attempts.map(attempt => attempt.key))].filter(key => !/\/planning(\/\d+)?$/u.test(key))
 }
