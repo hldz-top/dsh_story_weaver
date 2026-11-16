@@ -84,6 +84,28 @@ it('publishes optional name_note on version 9 continuity and keeps versions 1–
   for (const kind of kinds) expect(JSON.stringify(nativeStageOutputSchema(kind, 10)), kind).toBe(JSON.stringify(nativeStageOutputSchema(kind, 9)))
 })
 
+it('publishes category pov on version 12 reviews and keeps versions 1–11 without it', () => {
+  for (const promptVersion of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] as const) {
+    expect(JSON.stringify(nativeStageOutputSchema('review', promptVersion)), String(promptVersion)).not.toContain('"pov"')
+  }
+  for (const kind of kinds) {
+    expect(JSON.stringify(nativeStageOutputSchema(kind, 11)), kind).toBe(JSON.stringify(nativeStageOutputSchema(kind, 10)))
+    if (kind === 'review') continue
+    expect(JSON.stringify(nativeStageOutputSchema(kind, 12)), kind).toBe(JSON.stringify(nativeStageOutputSchema(kind, 11)))
+  }
+  const current = nativeStageOutputSchema('review')
+  expect(JSON.stringify(current)).toContain('"pov"')
+  expect(JSON.stringify(current)).toContain('Required when this issue is the pov-limited check')
+  expect(JSON.stringify(nativeStageOutputSchema('review', 11))).not.toContain('pov-limited')
+  expect(validateJsonSchemaValue(current, paragraphReview)).toEqual([])
+  expect(validateJsonSchemaValue(nativeStageOutputSchema('review', 11), { ...paragraphReview, checks: [...paragraphReview.checks, { category: 'pov', summary: 'Narration stays with the viewpoint.', evidence: paragraphReview.checks[0]!.evidence }] })).not.toEqual([])
+  expect(JSON.stringify(nativeStageOutputSchema('chapter-outline', 11))).toBe(JSON.stringify(nativeStageOutputSchema('chapter-outline', 10)))
+  expect(JSON.stringify(nativeStageOutputSchema('chapter-outline'))).not.toContain('povHeuristic')
+  expect(JSON.stringify(nativeStageOutputSchema('continuity'))).toContain('name_note')
+  expect(JSON.stringify(nativeStageOutputSchema('continuity-snapshot'))).not.toContain('name_note')
+  expect(JSON.stringify(nativeStageOutputSchema('continuity-snapshot'))).not.toContain('povHeuristic')
+})
+
 it('publishes version 7 outlines without targetWords and keeps it required through version 6', () => {
   for (const kind of ['book-outline', 'chapter-outline'] as const) {
     expect(JSON.stringify(nativeStageOutputSchema(kind))).not.toContain('targetWords')

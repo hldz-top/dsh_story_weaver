@@ -16,10 +16,12 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * same published stage schemas. Once a body has been admitted, a later repair asks for a patch of the changed fields
  * or paragraphs. Versions 1–9 still ask for the complete body, so a resume rebuilds those repair prompts byte for byte.
  * Version 11, for new runs only, tells a body review that task.metrics is advisory. Versions 1–10 stay frozen.
+ * Version 12, for new runs only, adds the body-review `pov-limited` sentence and publishes category `pov`.
+ * Versions 1–11 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 11
+export const CURRENT_PROMPT_VERSION: PromptVersion = 12
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
@@ -150,6 +152,10 @@ const SETTINGS_CLASSIFICATION_BOUND = 'Stay inside the label, its grounds and th
 const SETTINGS_READER = 'contentMarkdown is reader-facing prose: use natural language, and do not put catalog codes, JSON field names, or mechanical ratios such as sentence-length percentages into it. Do not lock later plot to fixed chapter numbers; name an opening chapter only when the brief or an accepted dependency already does.'
 const BOOK_MOTIVE = 'In each characterArcs.development, state the person’s starting want, the pressure that changes it, and where they stand at the ending. Each chapter.purpose names what the protagonist wants in that chapter and the concrete risk of its required events. Obligations are events later prose must perform, not themes. Make the writing guidance specific to this story. Do not imitate a named author.'
 const CHAPTER_MOTIVE = 'Each scene.action names who chooses, what they want in that moment, and the cost or revelation of the choice. throughLine is that chain of choices: what the protagonist sets out to do and how the chapter ends. Do not schedule an event that contradicts previous applied continuity or what a character can know. Carry an obligation in this chapter only when the book outline assigns it here; a later due date is a reminder, not an event this chapter must perform. stateNotes may record only positions and physicality already fixed by settings or prior continuity.'
+/**
+ * Version 12 body reviews only. The fixed check is unconditional. The host hint is advisory and does not block. The version-11 metrics sentence stays.
+ */
+const POV_LIMITED_REVIEW = 'A body review always includes the fixed check pov-limited, category pov, whether or not the creative brief mentions a limited point of view. Narration may state only what the viewpoint character can perceive. Another character\'s inner thoughts and unspoken judgments are violations. The viewpoint is the main POV named by the chapter outline or the settings; if none is named, infer it from the body. A missing or undeterminable viewpoint is not a failure and must not reject the chapter. A violation is an issue with id pov-limited, category pov, severity blocking, and paragraphId copied from task.paragraphs. When task.povHeuristic is present, those hints are advisory and need confirmation; a hint is not by itself a failure, and the host does not block or return the chapter because of it. Despite the general REVIEW_ACTION rule, pov-limited issues use category pov and are blocking, not style or advisory. Each such issue must set its own paragraphId.'
 const BODY_MOTIVE = 'Show the viewpoint character’s present want inside the choice: what they notice, what they do, and the cost already established by settings or prior applied continuity. Continue from the previous scene’s ending and close on a situation the next scene can pick up. Do not summarize the outline, announce a narrator thesis, repeat an explanation already shown, stack metaphors, drift the time of day, season, or elapsed time, or grant knowledge, tools or injuries the accepted sources do not support.'
 const CONTINUITY_MOTIVE = 'For a character the reviewed prose actually changes, record location, knowledge, condition and relationships only as that prose supports them. Each timeline.event states what the prose shows, with a quote from the reviewed body. Leave a fact unchanged when the chapter does not touch it. Mark an obligation fulfilled only when the prose performs it, not when a character merely intends it.'
 const REVIEW_ACTION = 'Write each issue.message as one repair step: the location, the exact conflict or omission, and the smallest change that fixes it. A successful check.summary names the evidence that satisfied it. Do not request a full rewrite or a change to an accepted upstream source. A speculative risk, or a sentence that only might be read a certain way, is not a blocking issue. Open a blocking category only for a missing required event, a settings or persona contradiction (including a spatial impossibility or a non-physical thing written as an object), a cross-chapter continuity conflict, or a chapter-length violation the host already measured in task.measuredWordCount or task.measuredLength. Metaphor stacking, a narrator thesis, and a repeated sentence skeleton are category style and severity advisory: name the cited sentence and the smallest rewrite. Anything else, including thin motivation, plain wording and taste, is category style and severity advisory.'
@@ -168,8 +174,11 @@ const REVIEW_BY_KIND: Partial<Record<StagePromptKind, string>> = {
 
 /** @param request - The stage being prompted. @returns Version-8 review constraints, or none before version 8 and for every other stage. */
 function reviewConstraintLines(request: StagePromptRequest): readonly string[] {
-  if ((request.promptVersion ?? 1) < 8 || request.kind !== 'review') return []
-  return [REVIEW_BRIEF_ONLY, REVIEW_CHINESE]
+  const version = request.promptVersion ?? 1
+  if (version < 8 || request.kind !== 'review') return []
+  const lines = [REVIEW_BRIEF_ONLY, REVIEW_CHINESE]
+  if (version >= 12 && request.reviewedKind === 'body') return [...lines, POV_LIMITED_REVIEW]
+  return lines
 }
 
 /** Version 11 body reviews. The figures are host measurements. A keyword miss only reminds; it does not veto the draft. */
@@ -291,7 +300,8 @@ function stageLines(request: StagePromptRequest): readonly string[] {
   if (request.kind === 'settings') return settingsInstructions(request.settingsDimensionKind)
   if (request.kind === 'review') return reviewInstructions(request)
   const lines = stageInstructions[request.kind]
-  if (request.kind === 'chapter-outline' && (request.promptVersion ?? 1) >= 7) return lines.map(line => line === CHAPTER_PACING ? CHAPTER_PACING_V7 : line)
+  const version = request.promptVersion ?? 1
+  if (request.kind === 'chapter-outline' && version >= 7) return lines.map(line => line === CHAPTER_PACING ? CHAPTER_PACING_V7 : line)
   return lines
 }
 

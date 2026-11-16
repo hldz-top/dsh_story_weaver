@@ -42,7 +42,7 @@ const taskSchema = z.object({
   batch: z.enum(['draft', 'consistency', 'repair']).optional(), codes: z.array(z.string()).optional(),
   chapterCount: z.number().int().positive().optional(), sceneIds: z.array(z.string()).optional(),
   obligations: z.array(z.object({ id: z.string(), description: z.string() })).optional(),
-  requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style'])).optional(),
+  requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style', 'pov'])).optional(),
   reviewed: inputRef.optional(), bodyId: artifactIdSchema.optional(),
   measuredWordCount: z.number().nullable().optional(),
   measuredLength: z.object({ status: z.enum(['within-range', 'too-short', 'too-long']), blocking: z.boolean() }).nullable().optional(),

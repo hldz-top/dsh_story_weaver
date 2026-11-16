@@ -31,7 +31,11 @@ const paragraphCitationSchema = z.strictObject({
   paragraphId: z.string().regex(/^p[1-9][0-9]*$/u),
   problem: text,
 })
+/** Published on prompt versions before 12. Version 12 adds `pov` in {@link reviewCategorySchemaV11}. */
 const reviewCategorySchema = z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style'])
+/** Version 12 review publication. Admission also accepts `pov` so a stored version-12 review reads back. */
+const reviewCategorySchemaV11 = z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style', 'pov'])
+const paragraphIdSchema = z.string().regex(/^p[1-9][0-9]*$/u)
 const issueShape = {
   id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchema,
   location: text, message: text, evidence: z.array(citationSchema).nonempty(),
@@ -66,6 +70,21 @@ export const reviewParagraphSchemaV8 = reviewParagraphSchema.extend({
   })),
 })
 /**
+ * Prompt version 12 review publication. Adds category `pov` and optional `paragraphId`.
+ * A `pov-limited` issue must set `paragraphId`. Versions before 12 keep {@link reviewParagraphSchemaV8}.
+ */
+export const reviewParagraphSchemaV11 = inputsSchema.extend({
+  reviewed: inputRefSchema,
+  checks: z.array(z.strictObject({ category: reviewCategorySchemaV11, summary: text, evidence: z.array(paragraphCitationSchema).nonempty() })).nonempty(),
+  issues: z.array(z.strictObject({
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchemaV11,
+    location: text, message: text,
+    paragraphId: paragraphIdSchema.optional().describe('Required when this issue is the pov-limited check. One id from task.paragraphs.'),
+    briefQuote: text.optional().describe('Verbatim excerpt of the creative brief. Required when this blocking issue is completeness or obligations.'),
+    evidence: z.array(paragraphCitationSchema).nonempty(),
+  })),
+})
+/**
  * Host marker on an issue none of whose evidence can be found in any admitted input: the issue is kept, made advisory,
  * and keeps its original citations so the marker can be re-verified on every readback. Never part of the model schema.
  */
@@ -78,9 +97,15 @@ const storedChecklistSchema = z.strictObject({
     id: text, status: z.enum(['pass', 'fail', 'na']), paragraphId: z.string().regex(/^p[1-9][0-9]*$/u).optional(),
   })).nonempty(),
 })
-/** The admitted (stored) review: the quote schema, host downgrade markers, and an optional open-dimension checklist. */
-const admittedReviewSchema = reviewSchema.extend({
-  issues: z.array(z.strictObject({ ...issueShape, briefQuote: text.optional(), hostDowngrade: hostDowngradeSchema.optional() })),
+/** The admitted (stored) review. Category `pov` and optional `paragraphId` read back; versions before 11 do not publish them. */
+const admittedReviewSchema = inputsSchema.extend({
+  reviewed: inputRefSchema,
+  checks: z.array(z.strictObject({ category: reviewCategorySchemaV11, summary: text, evidence: z.array(citationSchema).nonempty() })).nonempty(),
+  issues: z.array(z.strictObject({
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchemaV11,
+    location: text, message: text, paragraphId: paragraphIdSchema.optional(), evidence: z.array(citationSchema).nonempty(),
+    briefQuote: text.optional(), hostDowngrade: hostDowngradeSchema.optional(),
+  })),
   checklist: storedChecklistSchema.optional(),
 })
 /** Admission-only review constraints. Readback of a stored review does not repeat them. */
@@ -89,6 +114,8 @@ export interface ReviewAdmission {
   readonly chinese: true
   /** Creative-brief text. A blocking completeness or obligations issue must quote it verbatim. */
   readonly briefText: string
+  /** Version 12 body reviews require the fixed `pov` check. Omitted on every earlier version and on readback. */
+  readonly povLimited?: true
 }
 const obligationSchema = z.strictObject({ id: text, description: text })
 const targetWords = z.number().int().positive()
@@ -171,8 +198,8 @@ const continuitySchema = inputsSchema.extend({
 export type StageInputRef = z.infer<typeof inputRefSchema>
 /** Generated candidate for one selected settings dimension; application is host-owned. */
 export type SettingsDimensionOutput = z.infer<typeof settingsSchema>
-/** Substantive review categories; the host specifies those required for the stage. */
-export type ReviewCategory = z.infer<typeof reviewCategorySchema>
+/** Substantive review categories. `pov` is published and required only for a version-12 body review. */
+export type ReviewCategory = z.infer<typeof reviewCategorySchemaV11>
 /** Review findings tied to an exact candidate and quoted source versions. */
 export type ReviewOutput = z.infer<typeof admittedReviewSchema>
 /** Ordered book structure, character development, ending, and chapter obligations. */
@@ -504,9 +531,18 @@ export function parseReviewOutput(value: unknown, expected: {
   unique(output.checks.map(check => check.category), 'review check category')
   unique(output.issues.map(issue => issue.id), 'review issue ID')
   unique(expected.evidenceSources.map(source => source.artifactId), 'evidence source')
-  const missingChecks = expected.requiredChecks.filter(category => !output.checks.some(check => check.category === category))
-  if (missingChecks.length > 0) throw new StageValidationRejection(`Review is missing a required check: ${missingChecks.join(', ')} (required: ${expected.requiredChecks.join(', ')})`)
+  const requiredChecks = expected.admission?.povLimited === true && !expected.requiredChecks.includes('pov')
+    ? [...expected.requiredChecks, 'pov' as const]
+    : expected.requiredChecks
+  const missingChecks = requiredChecks.filter(category => !output.checks.some(check => check.category === category))
+  if (missingChecks.length > 0) throw new StageValidationRejection(`Review is missing a required check: ${missingChecks.join(', ')} (required: ${requiredChecks.join(', ')})`)
   for (const issue of output.issues) {
+    if (issue.category === 'pov' || (expected.admission?.povLimited === true && (issue.id === 'pov-limited' || issue.id.startsWith('pov-limited-')))) {
+      if (issue.category !== 'pov' || (issue.id !== 'pov-limited' && !issue.id.startsWith('pov-limited-'))) {
+        throw new StageValidationRejection(`A pov-limited issue must use category pov and an id of pov-limited. Issue ${echo(issue.id)} is ${issue.category}.`)
+      }
+      if (issue.paragraphId === undefined) throw new StageValidationRejection(`A pov-limited issue must set paragraphId to one id from task.paragraphs. Issue ${echo(issue.id)} has none.`)
+    }
     if (issue.hostDowngrade !== undefined) {
       if (issue.severity !== 'advisory') throw new StageValidationRejection(`A host-downgraded issue must be advisory: issue ${echo(issue.id)} is ${issue.severity}`)
       continue

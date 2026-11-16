@@ -26,6 +26,7 @@ import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
 import { measureChapterMetrics, type PreviousChapterSnapshot } from './review-metrics.ts'
 import { extractRequiredEvents, missingRequiredEvents, requiredEventRepairInstruction, type MissingRequiredEvent } from './required-events.ts'
+import { povHeuristicReport, viewpointName, type PovHeuristicReport } from './pov-limited.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
 import { applyOutlinePatch, buildOutlineRepairPrompt, OUTLINE_PATCH_OUTPUT_SCHEMA, outlineRepairUsesPatch, type OutlineRepairKind } from './outline-repair.ts'
 import { applyBodyPatch, BODY_PATCH_OUTPUT_SCHEMA, bodyPatchSchemaError, bodyRepairAfterRejectedPatch, bodyRepairUsesPatch, buildBodyRepairPrompt } from './body-repair.ts'
@@ -1222,17 +1223,19 @@ export class WritingRunner {
     throw new WritingError('review-blocked', `Repair limit was exhausted for ${key}${validationError === null ? '' : `: ${validationError}`}`)
   }
 
-  /** Prompt version 8 model reviews. Earlier runs and host-synthesized reviews omit it. */
-  private reviewAdmission(inv: Invocation): { readonly admission?: ReviewAdmission } {
+  /** Prompt version 8 model reviews. Earlier runs and host-synthesized reviews omit it. Version 12 body reviews also require pov-limited. */
+  private reviewAdmission(inv: Invocation, povLimited = false): { readonly admission?: ReviewAdmission } {
     if (promptVersionOf(inv.run) < 8) return {}
     const brief = this.service.getNovel(inv.actor, inv.run.novelId).brief
-    return { admission: { chinese: true, briefText: this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: brief.id }).text } }
+    return { admission: { chinese: true, briefText: this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: brief.id }).text, ...(povLimited ? { povLimited: true as const } : {}) } }
   }
 
   private async reviewManuscript(inv: Invocation, key: string, candidate: ManuscriptCandidateView, requiredChecks: readonly ReviewCategory[]): Promise<ManuscriptCandidateView> {
-    return this.reviewLoop(inv, key, candidate, requiredChecks, (result, reviewKey) => this.service.saveManuscriptReview(inv.actor, {
+    const povLimited = promptVersionOf(inv.run) >= 12 && candidate.target.kind === 'body'
+    const checks = povLimited && !requiredChecks.includes('pov') ? [...requiredChecks, 'pov' as const] : requiredChecks
+    return this.reviewLoop(inv, key, candidate, checks, (result, reviewKey) => this.service.saveManuscriptReview(inv.actor, {
       novelId: inv.run.novelId, candidateId: candidate.artifact.id, expectedReviewId: null,
-      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv) }))
+      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv, povLimited) }))
   }
 
   /**
@@ -1293,6 +1296,7 @@ export class WritingRunner {
     const openCode = promptVersion >= 7 && 'dimensionCode' in candidate && isOpenChecklistCode(candidate.dimensionCode) ? candidate.dimensionCode : undefined
     const stored = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id })
     const paragraphs = promptVersion >= 7 ? paragraphsOfStoredCandidate(stored.kind, stored.text) : undefined
+    const povHeuristic = promptVersion >= 12 && reviewedKind === 'body' ? this.bodyPovHeuristic(inv, candidate, paragraphs) : undefined
     return this.stage(inv, key, 'review', refs, { reviewed: inputRef(candidate.artifact), requiredChecks, validationError,
       ...(paragraphs === undefined ? {} : { paragraphs }),
       ...(openCode === undefined ? {} : { checklistItems: openChecklistItems(openCode) }),
@@ -1303,6 +1307,7 @@ export class WritingRunner {
       ...this.reviewMetrics(inv, reviewedKind, stored.text, refs),
       // Version 3 body reviews also get host-detected AI-tone markers in narration (advisory evidence only).
       ...('aiTone' in candidate && candidate.aiTone !== null && promptVersionOf(inv.run) >= 3 ? { aiToneMarkers: promptVersionOf(inv.run) >= 7 ? gradeAiTone(candidate.aiTone) : candidate.aiTone } : {}),
+      ...(povHeuristic === undefined ? {} : { povHeuristic }),
       ...(settingsDimensionKind === undefined ? {} : { dimensionKind: settingsDimensionKind }),
       ...(settingsCollectionKinds === undefined ? {} : { dimensionKinds: settingsCollectionKinds }) },
       [candidate.artifact], settingsDimensionKind, settingsCollectionKinds, reviewedKind, undefined,
@@ -1677,6 +1682,31 @@ export class WritingRunner {
     const body = StageOutputSchemas.body.safeParse(structured)
     if (!body.success) throw new WritingError('corrupt-artifact', 'Admitted chapter body cannot be read for the required-event check')
     return missingRequiredEvents(assembleBody(body.data), extractRequiredEvents({ briefText, obligations }))
+  }
+
+  /**
+   * Advisory `pov-limited` hints for a version-12 body review. The caller does not invoke this before version 12.
+   * A missing viewpoint or a chapter with no other-mind excerpt omits the task field. This never rejects the chapter.
+   */
+  private bodyPovHeuristic(inv: Invocation, candidate: SettingsCandidateView | ManuscriptCandidateView, paragraphs: readonly { readonly id: string; readonly text: string }[] | undefined): PovHeuristicReport | undefined {
+    if (!('target' in candidate) || candidate.target.kind !== 'body') return undefined
+    const novelId = inv.run.novelId
+    const texts: string[] = []
+    for (const ref of candidate.inputRefs) {
+      try {
+        const artifact = this.service.getArtifact(inv.actor, { novelId, artifactId: ref.artifactId })
+        if (artifact.kind === 'chapter-outline' || artifact.kind === 'settings' || artifact.kind === 'settings-dimension') texts.push(artifact.text)
+      } catch { return undefined }
+    }
+    let prose: string
+    try {
+      const stored = this.service.getArtifact(inv.actor, { novelId, artifactId: candidate.artifact.id })
+      const body = StageOutputSchemas.body.safeParse(JSON.parse(stored.text) as unknown)
+      if (!body.success) return undefined
+      prose = assembleBody(body.data)
+    } catch { return undefined }
+    const report = povHeuristicReport({ prose, viewpoint: viewpointName(texts), ...(paragraphs === undefined ? {} : { paragraphs }) })
+    return report.hints.length === 0 ? undefined : report
   }
 
   private feedback(candidate: SettingsCandidateView | ManuscriptCandidateView): ArtifactRef[] {
