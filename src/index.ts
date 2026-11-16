@@ -53,6 +53,11 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
    */
   metricsBlocking: boolean
   /**
+   * Version 15 foreshadowing ledger on continuity. Default true. Not stored on the run and not a field of story_writing.json.
+   * False keeps the version-14 continuity prompt and schema. A rejected plant list does not fail the chapter.
+   */
+  plantLedger: boolean
+  /**
    * Lowest AI-tone grade a poison repair will touch on prompt version 13. `heavy` repairs only heavy poisons; a notice
    * is recorded and a hint is ignored. Frozen into each new version-13 run. Default `heavy`. It does not fail a chapter.
    */
@@ -96,6 +101,7 @@ export const Config: z<Config> = z.object({
   allowSettingsImport: z.boolean().default(false),
   aiToneBlocking: z.boolean().default(true),
   metricsBlocking: z.boolean().default(false),
+  plantLedger: z.boolean().default(true),
   aiToneRepairFloor: z.union([z.const('hint'), z.const('notice'), z.const('heavy')]).default('heavy'),
   writingModel: z.any().default('inherit'),
   researchEnabled: z.boolean().default(false),
@@ -133,6 +139,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.stageTimeoutMs > 2_147_483_647) throw new Error('stageTimeoutMs exceeds the supported timer range')
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
   if (typeof config.metricsBlocking !== 'boolean') throw new Error('metricsBlocking must be a boolean')
+  if (typeof config.plantLedger !== 'boolean') throw new Error('plantLedger must be a boolean')
   if (!AI_TONE_REPAIR_FLOORS.includes(config.aiToneRepairFloor)) throw new Error('aiToneRepairFloor must be hint, notice, or heavy')
   if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
@@ -174,7 +181,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
   deliveryProjection = await registerStageDeliveryProjection(ctx)
-  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot })
+  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot, plantLedger: config.plantLedger })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)
   registerWritingTools(ctx, service, config.previewDirectory)

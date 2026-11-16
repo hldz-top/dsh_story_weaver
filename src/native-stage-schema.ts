@@ -2,7 +2,7 @@
 import { assertObjectJsonSchema, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
-import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, continuitySchemaLegacy, reviewParagraphSchema, reviewParagraphSchemaV8, reviewParagraphSchemaV11, reviewParagraphSchemaV13, StageOutputSchemas } from './stage-output.ts'
+import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, continuitySchemaLegacy, continuitySchemaV14, continuitySnapshotSchemaV14, reviewParagraphSchema, reviewParagraphSchemaV8, reviewParagraphSchemaV11, reviewParagraphSchemaV13, StageOutputSchemas } from './stage-output.ts'
 import { CURRENT_PROMPT_VERSION, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 
 const nativeFields = new Set(['type', 'required', 'additionalProperties', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -71,11 +71,12 @@ export function projectNativeStageSchema(schema: object): ObjectJsonSchema {
  * Version 10 publishes the same schemas as version 9. Version 11 publishes the same schemas as version 10.
  * Advisory review metrics are task data, not output fields. Version 12 reviews add category `pov` and optional `paragraphId`.
  * Version 13 adds optional `poison` on each review issue. Version 14 publishes the same schemas as version 13.
- * Version 15 is the gate for later optional fields. Until a check publishes one, version 15 uses the version-14 schema.
- * Continuity and continuity snapshots stay on the version-9 schema through version 14.
+ * Version 15 publishes optional `plants` on continuity and the continuity snapshot when the plant ledger is on.
+ * `plantLedger: false` republishes the version-14 continuity schemas. Versions 1–14 never publish `plants`.
  * @returns An object-root schema; the caller must still run canonical admission.
  */
-export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION): ObjectJsonSchema {
+export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION, options?: { readonly plantLedger?: boolean }): ObjectJsonSchema {
+  const plantsOn = promptVersion >= 15 && options?.plantLedger !== false
   const schema = kind === 'book-outline'
     ? promptVersion >= 7 ? bookOutlineSchemaV7 : bookOutlineSchemaLegacy
     : kind === 'chapter-outline'
@@ -86,7 +87,9 @@ export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: Pr
           : kind === 'review' && promptVersion >= 8 ? reviewParagraphSchemaV8
             : kind === 'review' && promptVersion >= 7 ? reviewParagraphSchema
               : kind === 'continuity' && promptVersion < 9 ? continuitySchemaLegacy
-                : StageOutputSchemas[kind]
+                : kind === 'continuity' && !plantsOn ? continuitySchemaV14
+                  : kind === 'continuity-snapshot' && !plantsOn ? continuitySnapshotSchemaV14
+                    : StageOutputSchemas[kind]
   return projectNativeStageSchema(z.toJSONSchema(schema, { io: 'input' }))
 }
 

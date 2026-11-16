@@ -65,6 +65,11 @@ export interface StagePromptRequest {
    * Ignored before version 13 and for every other stage.
    */
   readonly aiToneRepairFloor?: AiToneRepairFloor
+  /**
+   * Version 15 plant ledger. False omits the plant sentences and keeps the version-14 continuity prompt.
+   * Omitted means on. Ignored before version 15. Not stored on the run.
+   */
+  readonly plantLedger?: boolean
 }
 
 /** Versions 1–6. Version 7 drops the scene-allocation clause; the per-scene ceiling rule stays, because that is the host rule already in this sentence. */
@@ -186,6 +191,9 @@ const CHAPTER_MOTIVE = 'Each scene.action names who chooses, what they want in t
 const POV_LIMITED_REVIEW = 'A body review always includes the fixed check pov-limited, category pov, whether or not the creative brief mentions a limited point of view. Narration may state only what the viewpoint character can perceive. Another character\'s inner thoughts and unspoken judgments are violations. The viewpoint is the main POV named by the chapter outline or the settings; if none is named, infer it from the body. A missing or undeterminable viewpoint is not a failure and must not reject the chapter. A violation is an issue with id pov-limited, category pov, severity blocking, and paragraphId copied from task.paragraphs. When task.povHeuristic is present, those hints are advisory and need confirmation; a hint is not by itself a failure, and the host does not block or return the chapter because of it. Despite the general REVIEW_ACTION rule, pov-limited issues use category pov and are blocking, not style or advisory. Each such issue must set its own paragraphId.'
 const BODY_MOTIVE = 'Show the viewpoint character’s present want inside the choice: what they notice, what they do, and the cost already established by settings or prior applied continuity. Continue from the previous scene’s ending and close on a situation the next scene can pick up. Do not summarize the outline, announce a narrator thesis, repeat an explanation already shown, stack metaphors, drift the time of day, season, or elapsed time, or grant knowledge, tools or injuries the accepted sources do not support.'
 const CONTINUITY_MOTIVE = 'For a character the reviewed prose actually changes, record location, knowledge, condition and relationships only as that prose supports them. Each timeline.event states what the prose shows, with a quote from the reviewed body. Leave a fact unchanged when the chapter does not touch it. Mark an obligation fulfilled only when the prose performs it, not when a character merely intends it.'
+/** Version 15, and only when the plant ledger is on. Versions 1–14 do not receive these sentences. */
+const CHAPTER_PLANTS = 'When task.plantHints is present, each entry is an advisory reminder that a foreshadowing plant has stayed open for several chapters, or that a plant list was replaced by the previous ledger. It is not a required event and it does not block the outline.'
+const CONTINUITY_PLANTS = 'Carry forward every open plant from the previous continuity snapshot in optional plants. Keep its id, text, and plantedChapter, and set status to open or paid. A new plant must give plantedChapter as this chapter. Do not pay a plant that is already paid. Omit plants when nothing is open and this chapter plants nothing. A plant list the host cannot keep is replaced by the previous open ledger and does not fail the chapter.'
 const REVIEW_ACTION = 'Write each issue.message as one repair step: the location, the exact conflict or omission, and the smallest change that fixes it. A successful check.summary names the evidence that satisfied it. Do not request a full rewrite or a change to an accepted upstream source. A speculative risk, or a sentence that only might be read a certain way, is not a blocking issue. Open a blocking category only for a missing required event, a settings or persona contradiction (including a spatial impossibility or a non-physical thing written as an object), a cross-chapter continuity conflict, or a chapter-length violation the host already measured in task.measuredWordCount or task.measuredLength. Metaphor stacking, a narrator thesis, and a repeated sentence skeleton are category style and severity advisory: name the cited sentence and the smallest rewrite. Anything else, including thin motivation, plain wording and taste, is category style and severity advisory.'
 /** Version 8. The host rejects a blocking completeness or obligations issue whose briefQuote is not a verbatim brief excerpt. */
 const REVIEW_BRIEF_ONLY = 'The creative brief is the only source of requirements. A blocking completeness or obligations issue must set briefQuote to one verbatim excerpt of the creative brief that states that requirement. Do not add a scene, event, or obligation the brief does not state. A genre premise is not a demand for a scene the brief never names. Consistency, continuity, and a host-measured length finding are not a new requirement and do not use briefQuote to invent one.'
@@ -227,11 +235,11 @@ function qualityParagraphs(request: StagePromptRequest): readonly string[] {
     case 'book-outline':
       return [BOOK_MOTIVE, REVISION_SCOPE]
     case 'chapter-outline':
-      return [CHAPTER_MOTIVE, REVISION_SCOPE]
+      return (request.promptVersion ?? 1) >= 15 && request.plantLedger !== false ? [CHAPTER_MOTIVE, CHAPTER_PLANTS, REVISION_SCOPE] : [CHAPTER_MOTIVE, REVISION_SCOPE]
     case 'body':
       return [BODY_MOTIVE]
     case 'continuity':
-      return [CONTINUITY_MOTIVE]
+      return (request.promptVersion ?? 1) >= 15 && request.plantLedger !== false ? [CONTINUITY_MOTIVE, CONTINUITY_PLANTS] : [CONTINUITY_MOTIVE]
     case 'continuity-snapshot':
       return []
     case 'review': {

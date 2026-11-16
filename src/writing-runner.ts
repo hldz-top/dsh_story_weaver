@@ -22,6 +22,7 @@ import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
 import { blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseContinuitySnapshot, StageOutputSchemas, type BodyOutput, type ContinuityOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
 import { projectContinuitySnapshot } from './continuity-snapshot.ts'
+import { advisoryPlantHints, attachContinuityPlants, softenPlantField } from './plant-ledger.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
 import { measureChapterMetrics, type PreviousChapterSnapshot } from './review-metrics.ts'
@@ -51,6 +52,12 @@ export interface WritingRunnerOptions {
    * False rejects that candidate and leaves the admitted body unchanged. Not stored with runs.
    */
   readonly bodyPatchFallback?: boolean
+  /**
+   * Version 15 foreshadowing ledger. Default true. Not stored on the run.
+   * False keeps the version-14 continuity prompt and schema, and does not read plants.
+   * A rejected plant list never fails the chapter: the previous open ledger is kept and the note is advisory.
+   */
+  readonly plantLedger?: boolean
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -207,6 +214,8 @@ export class WritingRunner {
   private readonly replayControllers = new Set<AbortController>()
   private readonly replayShutdown = new Error('Writing preview replay was cancelled by plugin shutdown.')
   private closed = false
+  /** Advisory plant notes for the next chapter outline, keyed by novel and chapter. Not a failure and not stored on the run. */
+  private readonly plantAdvisories = new Map<string, string[]>()
   /** @param ctx - Existing DSH capabilities. @param service - Version owner. @param runs - Durable run owner. @param limits - Explicit deployment limits copied into new runs. @param deliveries - Awaited native document publisher. */
   constructor(private readonly ctx: Context, private readonly service: WritingService, readonly runs: RunStore, readonly limits: RunExecutionLimits, private readonly deliveries: StageDeliveries, private readonly options: WritingRunnerOptions = {}) {}
 
@@ -612,9 +621,10 @@ export class WritingRunner {
     const continuity = StageOutputSchemas.continuity.parse(JSON.parse(continuityArtifact.text))
     const body = StageOutputSchemas.body.parse(JSON.parse(read(applied.body.id).text))
     const earlier = inputs.filter(ref => ref.kind === 'continuity-snapshot').map(ref => StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(read(ref.id).text)))
-    const output = parseContinuitySnapshot(projectContinuitySnapshot({
+    const projected = projectContinuitySnapshot({
       chapterNumber: applied.chapterNumber, inputRefs: refs, continuity, bodyText: assembleBody(body), earlier,
-    }), { inputRefs: refs, chapterNumber: applied.chapterNumber })
+    })
+    const output = parseContinuitySnapshot(attachContinuityPlants(promptVersionOf(inv.run), this.options.plantLedger !== false, projected, continuity.plants), { inputRefs: refs, chapterNumber: applied.chapterNumber })
     const key = `continuity-snapshot/${applied.chapterNumber}/host`
     const candidate = await this.service.saveContinuitySnapshot(inv.actor, {
       novelId: inv.run.novelId, requestId: requestId(inv.run, key), ...target, childSessionId: null, output, snapshotThrough,
@@ -1160,11 +1170,12 @@ export class WritingRunner {
     // Version 14 body repairs. Earlier versions leave both null, so their prompts stay the version they started with.
     let defect: FailureStreak | null = null
     let pendingDefectNote: string | null = null
+    const plantHints = target.kind === 'chapter-outline' ? this.plantHintLines(inv, context.inputRefs, target.chapterNumber) : []
     for (let repair = 0; repair <= repairCap; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       const sameDefectNote = promptVersionOf(inv.run) >= 14 && target.kind === 'body' ? pendingDefectNote ?? undefined : undefined
       aiToneSpans = []
-      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError }
+      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError, ...(plantHints.length > 0 ? { plantHints } : {}) }
       const outlineKind: OutlineRepairKind | null = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? target.kind : null
       const outlinePatching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
       const bodyPatching = target.kind === 'body' && bodyRepairUsesPatch(promptVersionOf(inv.run), target.kind, priorBody !== null)
@@ -1194,6 +1205,7 @@ export class WritingRunner {
         result = await this.stage(inv, stageKey, target.kind, context.inputRefs, stageTask, feedback, undefined, undefined, undefined, repairMode, undefined, undefined, sameDefectNote)
         structured = result.structured
       }
+      if (target.kind === 'continuity') structured = this.prepareContinuityPlants(inv, structured, context.inputRefs, target.chapterNumber)
       let candidate: ManuscriptCandidateView
       try {
         candidate = await this.service.saveManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, target, researchPlanId: research.planId,
@@ -1610,11 +1622,40 @@ export class WritingRunner {
       ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}),
       ...(settingsDimensionCode === undefined ? {} : { settingsDimensionCode }), promptVersion,
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}),
-      ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 13 ? { aiToneRepairFloor: aiToneRepairFloorOf(inv.run) } : {}) })
-    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion))
+      ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 13 ? { aiToneRepairFloor: aiToneRepairFloorOf(inv.run) } : {}),
+      ...(promptVersion >= 15 && this.options.plantLedger === false ? { plantLedger: false as const } : {}) })
+    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion, { plantLedger: this.options.plantLedger !== false }))
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.
     const direct = batch !== 'consistency' && (kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot')
     return this.capture(inv, key, prompt, allRefs, schema, direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, stageWritingRole(kind), direct)
+  }
+
+  /**
+   * Version 15 keeps a rejected plant list from failing continuity. The previous open ledger is stored instead.
+   * The advisory sentence is handed to the next chapter outline. Versions before 15 drop a stray plants field.
+   */
+  private prepareContinuityPlants(inv: Invocation, structured: unknown, refs: readonly ArtifactRef[], chapterNumber: number): unknown {
+    if (promptVersionOf(inv.run) < 15 || this.options.plantLedger === false) return stripPlants(structured)
+    const earlier = refs.filter(ref => ref.kind === 'continuity-snapshot').map(ref => {
+      const parsed = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: ref.id }).text))
+      return parsed.plants === undefined ? {} : { plants: parsed.plants }
+    })
+    const softened = softenPlantField(structured, earlier, chapterNumber)
+    if (softened.advisory !== null) {
+      const key = `${inv.run.novelId}:${chapterNumber + 1}`
+      this.plantAdvisories.set(key, [...(this.plantAdvisories.get(key) ?? []), softened.advisory])
+    }
+    return softened.value
+  }
+
+  /** Advisory plant lines for a chapter outline. They do not fail the outline round. */
+  private plantHintLines(inv: Invocation, refs: readonly ArtifactRef[], chapterNumber: number): readonly string[] {
+    if (promptVersionOf(inv.run) < 15 || this.options.plantLedger === false) return []
+    const remembered = this.plantAdvisories.get(`${inv.run.novelId}:${chapterNumber}`) ?? []
+    const latest = refs.filter(ref => ref.kind === 'continuity-snapshot').at(-1)
+    if (latest === undefined) return remembered
+    const parsed = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: latest.id }).text))
+    return [...advisoryPlantHints(parsed.plants, chapterNumber), ...remembered]
   }
 
   private feedChars(inv: Invocation, ref: ArtifactRef, chapterNumber: number): number {
@@ -1845,6 +1886,13 @@ function storedResearchRequest(prompt: string, parentSessionId: ResearchStageReq
   }
 }
 /** @returns The prompt version a run started with; runs stored before versioning are version 1. */
+function stripPlants(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !('plants' in value)) return value
+  const copy = { ...(value as Record<string, unknown>) }
+  delete copy.plants
+  return copy
+}
+
 function promptVersionOf(run: WritingRun): PromptVersion { return run.promptVersion ?? 1 }
 /**
  * @returns Whether body reviews of this run block on AI tone. Runs before prompt version 5 never recorded the switch and are

@@ -6,6 +6,7 @@ import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { evidenceQuoteOccurs, reportQuoteRepair, resolveEvidenceQuote, type QuoteRepair } from './evidence-quote.ts'
 import { openChecklistItems, openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import { expandParagraphCitations, type NumberedParagraph } from './paragraphs.ts'
+import { checkPlantList, foreshadowPlantSchema } from './plant-ledger.ts'
 import { echo, parseModelOutput, StageValidationRejection } from './stage-rejection.ts'
 
 /** A catalog classification dimension records a label and its grounds, not world-building detail. The single source for this set; stage-prompts.ts imports it rather than declaring its own copy. */
@@ -195,10 +196,11 @@ export const continuitySchemaLegacy = inputsSchema.extend({
   })),
 })
 /**
- * Admission, and the schema version 9 publishes. `name_note` is optional, so a stored `{ name, state }` character
- * still reads back. A present note must be nonblank. The host keeps it and does not treat it as a separate fact.
+ * The schema versions 9–14 publish. `name_note` is optional, so a stored `{ name, state }` character still reads back.
+ * A present note must be nonblank. The host keeps it and does not treat it as a separate fact. These versions do not
+ * publish `plants`.
  */
-const continuitySchema = inputsSchema.extend({
+export const continuitySchemaV14 = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), summary: text,
   characters: z.array(z.strictObject({
     name: text, state: text,
@@ -208,6 +210,13 @@ const continuitySchema = inputsSchema.extend({
   obligations: z.array(z.strictObject({
     id: text, status: z.enum(['open', 'fulfilled']), explanation: text, evidence: z.array(citationSchema),
   })),
+})
+/**
+ * Admission, and the schema version 15 publishes when the plant ledger is on. `plants` is optional.
+ * A present list is checked by {@link checkPlantList}. The runner replaces a rejected list with the previous ledger.
+ */
+const continuitySchema = continuitySchemaV14.extend({
+  plants: z.array(foreshadowPlantSchema).optional().describe('Optional foreshadowing ledger. Omit it when this chapter carries and plants nothing.'),
 })
 
 /** Exact immutable source identity declared by a stage output. */
@@ -231,11 +240,20 @@ const snapshotNote = z.strictObject({ note: text })
  * Compact facts extracted after a chapter is applied. Counts and note length are host limits, checked by
  * {@link parseContinuitySnapshot}, so the published schema stays inside the native keyword subset.
  */
-const continuitySnapshotSchema = inputsSchema.extend({
+/**
+ * Snapshot published through version 14. Character status is `{ name, status }` only. There is no `name_note` and no `plants`.
+ */
+export const continuitySnapshotSchemaV14 = inputsSchema.extend({
   chapterNumber: z.number().int().positive(),
   characterStatus: z.array(z.strictObject({ name: text, status: text })),
   unrecoveredForeshadowing: z.array(snapshotNote),
   usedPlotBridges: z.array(snapshotNote),
+})
+/**
+ * Admission, and the schema version 15 publishes when the plant ledger is on. `plants` is optional.
+ */
+const continuitySnapshotSchema = continuitySnapshotSchemaV14.extend({
+  plants: z.array(foreshadowPlantSchema).optional().describe('Optional foreshadowing ledger copied from admitted continuity.'),
 })
 /** One reviewed chapter's compact continuity snapshot. */
 export type ContinuitySnapshotOutput = z.infer<typeof continuitySnapshotSchema>
@@ -665,7 +683,8 @@ export function parseContinuityOutput(value: unknown, expected: {
     }
     return obligation
   })
-  return { ...output, timeline, obligations }
+  if (output.plants !== undefined) checkPlantList(output.plants, output.chapterNumber)
+  return { ...output, timeline, obligations, ...(output.plants === undefined ? {} : { plants: [...output.plants] }) }
 }
 
 /**
@@ -687,6 +706,7 @@ export function parseContinuitySnapshot(value: unknown, expected: { inputRefs: r
     boundedNote(character.status, MAX_SNAPSHOT_NOTE_CHARS, `status of ${echo(character.name)}`)
   }
   for (const note of [...output.unrecoveredForeshadowing, ...output.usedPlotBridges]) boundedNote(note.note, MAX_SNAPSHOT_NOTE_CHARS, 'snapshot note')
+  if (output.plants !== undefined) checkPlantList(output.plants, output.chapterNumber)
   return output
 }
 
