@@ -1,4 +1,5 @@
 /** Logged writing-stage instructions derived from Story V2 business roles. */
+import { CHARACTER_REVIEW_PROMPT_VERSION } from './character-metrics.ts'
 import { CHARACTER_SHEET_PROMPT_VERSION, DEFAULT_MAX_CHARACTERS } from './character-sheet.ts'
 import { SCENE_CAST_PROMPT_VERSION } from './scene-cast.ts'
 import type { ArtifactId, NovelId } from './contracts.ts'
@@ -18,10 +19,12 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * instructions when `characterDimensions` names those dimensions. Version 10 publishes the same output schemas as
  * version 9. Version 11, for new runs only, asks each chapter-outline scene for cast, pov and misread, tells the body
  * to use task.castCards, and publishes those scene fields. Versions 1–10 stay frozen.
+ * Version 12, for new runs only, adds category `character` and three body-review checks. `characterReview: false`
+ * omits that sentence, so a version-12 review prompt matches version 11. Versions 1–11 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 11
+export const CURRENT_PROMPT_VERSION: PromptVersion = 12
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
@@ -58,6 +61,12 @@ export interface StagePromptRequest {
    * every other stage.
    */
   readonly aiToneBlocking?: boolean
+  /**
+   * Version 12 body reviews. False omits the character checks and keeps the version-11 review text.
+   * Omitted means on. Ignored before version 12 and for every stage that is not a body review.
+   * Not stored on the run.
+   */
+  readonly characterReview?: boolean
 }
 
 /** Versions 1–6. Version 7 drops the scene-allocation clause; the per-scene ceiling rule stays, because that is the host rule already in this sentence. */
@@ -192,6 +201,14 @@ function characterSheetInstruction(dimensions: readonly ('e5' | 'e6')[], maxChar
 
 const SCENE_CAST_OUTLINE = 'On each scene, set cast to every name present in that scene, pov to the viewpoint character (one name from that scene\'s cast), and misread to the scene\'s dominant frame: 利益, 礼法, 逻辑, 技艺, 生计, or 其它. A cast name that is not on the character card is kept. The host rejects a pov that is not in that scene\'s cast, and a misread outside that list.'
 const SCENE_CAST_BODY = 'When task.castCards is present, write each listed person from that one-line card and no one else. task.misreadMap is the frame of each scene. task.uncastNames, when present, are cast names without a card; do not invent a card for them. Do not bring in a character the chapter outline did not list in cast.'
+const CHARACTER_REVIEW = 'On a body review, return three checks with category character, including a check that passes. Each summary starts with its id and a colon: character-voice, character-function, or character-arc. character-voice asks whether a supporting character\'s lines would still mean the same thing if another supporting character said them. If they would, add a blocking issue whose id starts with character-voice, cite paragraphId, and write message as one repair step that names the lines and the smallest change, such as one negation and one interruption. character-function asks whether a supporting character only reacts to the protagonist and has no situation of their own. If so, add a blocking issue whose id starts with character-function. character-arc asks whether every name in the chapter outline cast is a recognizable presence and not only a name. character-arc issues are severity advisory and must not be blocking; an id for them starts with character-arc. When task.metrics is present it is a host measurement of addressVariety, castPresence, protagonistFreeScenes, quoteP50, quoteP90, uncastNames and warnings. metricsBlocking is false. Those warnings are advisory: do not file them as blocking issues and do not change any issue severity. Do not assign quoted sentences to speakers; that judgment stays in character-voice. If task.metrics is absent, the character card was missing or could not be parsed: skip the counts and still return the three checks. A missing card is not a chapter failure.'
+
+/** @param request - The stage being prompted. @returns The version-12 character-review sentence for a body review, or none. */
+function characterReviewLines(request: StagePromptRequest): readonly string[] {
+  if ((request.promptVersion ?? 1) < CHARACTER_REVIEW_PROMPT_VERSION || request.kind !== 'review' || request.reviewedKind !== 'body') return []
+  if (request.characterReview === false) return []
+  return [CHARACTER_REVIEW]
+}
 
 /** @param request - The stage being prompted. @returns The version-11 scene-cast sentence, or none before version 11 and for every other stage. */
 function sceneCastLines(request: StagePromptRequest): readonly string[] {
@@ -362,6 +379,7 @@ export function buildStagePrompt(request: StagePromptRequest): string {
     ...reviewConstraintLines(request),
     ...characterSheetLines(request),
     ...sceneCastLines(request),
+    ...characterReviewLines(request),
   ]
   return [...instructions, 'TASK_DATA', JSON.stringify({
     novelId: request.novelId, kind: request.kind, inputs: request.inputs, task: request.task, requirements: request.requirements,

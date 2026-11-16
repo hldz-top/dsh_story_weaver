@@ -5,6 +5,7 @@ import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { evidenceQuoteOccurs, reportQuoteRepair, resolveEvidenceQuote, type QuoteRepair } from './evidence-quote.ts'
 import { openChecklistItems, openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import { expandParagraphCitations, type NumberedParagraph } from './paragraphs.ts'
+import { CHARACTER_REVIEW_ADVISORY, CHARACTER_REVIEW_BLOCKING, CHARACTER_REVIEW_CHECKS, characterCheckIdFromIssue, characterCheckIdFromSummary, type CharacterReviewCheck } from './character-metrics.ts'
 import { CHARACTER_SHEET_PROMPT_VERSION, parseCharacterSheet, type ParseCharacterSheetOptions } from './character-sheet.ts'
 import { assertSceneCastFields, SCENE_MISREAD_FRAMES } from './scene-cast.ts'
 import { echo, parseModelOutput, StageValidationRejection } from './stage-rejection.ts'
@@ -34,6 +35,8 @@ const paragraphCitationSchema = z.strictObject({
   problem: text,
 })
 const reviewCategorySchema = z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style'])
+/** Prompt version 12. Versions 1–11 publish {@link reviewCategorySchema} and do not list `character`. */
+const reviewCategorySchemaV12 = z.enum([...reviewCategorySchema.options, 'character'])
 const issueShape = {
   id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchema,
   location: text, message: text, evidence: z.array(citationSchema).nonempty(),
@@ -68,6 +71,22 @@ export const reviewParagraphSchemaV8 = reviewParagraphSchema.extend({
   })),
 })
 /**
+ * Prompt version 12 review publication. Same paragraph citations and `briefQuote` as version 8, plus category `character`.
+ * Versions 1–11 keep their schemas. `poison` from a later review-schema change is not part of this object; rebase adds it
+ * by extending that schema instead of this one.
+ */
+export const reviewParagraphSchemaV12 = reviewParagraphSchemaV8.extend({
+  checks: z.array(z.strictObject({
+    category: reviewCategorySchemaV12, summary: text, evidence: z.array(paragraphCitationSchema).nonempty(),
+  })).nonempty(),
+  issues: z.array(z.strictObject({
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues and character-arc must be advisory. character-voice and character-function must be blocking. Every other category must be blocking.'),
+    category: reviewCategorySchemaV12,
+    location: text, message: text, briefQuote: text.optional().describe('Verbatim excerpt of the creative brief. Required when this blocking issue is completeness or obligations.'),
+    evidence: z.array(paragraphCitationSchema).nonempty(),
+  })),
+})
+/**
  * Host marker on an issue none of whose evidence can be found in any admitted input: the issue is kept, made advisory,
  * and keeps its original citations so the marker can be re-verified on every readback. Never part of the model schema.
  */
@@ -80,9 +99,19 @@ const storedChecklistSchema = z.strictObject({
     id: text, status: z.enum(['pass', 'fail', 'na']), paragraphId: z.string().regex(/^p[1-9][0-9]*$/u).optional(),
   })).nonempty(),
 })
-/** The admitted (stored) review: the quote schema, host downgrade markers, and an optional open-dimension checklist. */
+/**
+ * The admitted (stored) review. Category `character` is accepted so a version-12 review reads back.
+ * Model admission of versions 1–11 still rejects that category in {@link parseReviewOutput}.
+ * Host downgrade markers and an optional open-dimension checklist stay here. They are not published.
+ */
 const admittedReviewSchema = reviewSchema.extend({
-  issues: z.array(z.strictObject({ ...issueShape, briefQuote: text.optional(), hostDowngrade: hostDowngradeSchema.optional() })),
+  checks: z.array(z.strictObject({ category: reviewCategorySchemaV12, summary: text, evidence: z.array(citationSchema).nonempty() })).nonempty(),
+  issues: z.array(z.strictObject({
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'),
+    category: reviewCategorySchemaV12,
+    location: text, message: text, evidence: z.array(citationSchema).nonempty(),
+    briefQuote: text.optional(), hostDowngrade: hostDowngradeSchema.optional(),
+  })),
   checklist: storedChecklistSchema.optional(),
 })
 /** Admission-only review constraints. Readback of a stored review does not repeat them. */
@@ -195,8 +224,8 @@ const continuitySchema = inputsSchema.extend({
 export type StageInputRef = z.infer<typeof inputRefSchema>
 /** Generated candidate for one selected settings dimension; application is host-owned. */
 export type SettingsDimensionOutput = z.infer<typeof settingsSchema>
-/** Substantive review categories; the host specifies those required for the stage. */
-export type ReviewCategory = z.infer<typeof reviewCategorySchema>
+/** Review categories. `character` is published only on prompt version 12. Earlier published schemas omit it. */
+export type ReviewCategory = z.infer<typeof reviewCategorySchemaV12>
 /** Review findings tied to an exact candidate and quoted source versions. */
 export type ReviewOutput = z.infer<typeof admittedReviewSchema>
 /** Ordered book structure, character development, ending, and chapter obligations. */
@@ -248,6 +277,44 @@ function unique(values: readonly string[], label: string): void {
     if (seen.has(value)) throw new StageValidationRejection(`Duplicate ${label}: ${echo(value)} appears more than once; each must be unique`)
     seen.add(value)
   }
+}
+
+function reviewUsesCharacter(value: { readonly checks: readonly { readonly category: string }[]; readonly issues: readonly { readonly category: string }[] }): boolean {
+  return value.checks.some(check => check.category === 'character') || value.issues.some(issue => issue.category === 'character')
+}
+
+function characterCheckKey(summary: string): string {
+  const id = characterCheckIdFromSummary(summary)
+  if (id === undefined) {
+    throw new StageValidationRejection(`A character check summary must start with character-voice:, character-function:, or character-arc:. This summary does not: ${echo(summary.slice(0, 80))}`)
+  }
+  return `character:${id}`
+}
+
+function assertCharacterChecks(checks: readonly { readonly category: string; readonly summary: string }[]): void {
+  const present = new Set<CharacterReviewCheck>()
+  for (const check of checks) {
+    if (check.category !== 'character') continue
+    const id = characterCheckIdFromSummary(check.summary)
+    if (id !== undefined) present.add(id)
+  }
+  const missing = CHARACTER_REVIEW_CHECKS.filter(id => !present.has(id))
+  if (missing.length > 0) throw new StageValidationRejection(`Review is missing a required check: ${missing.join(', ')} (required: ${CHARACTER_REVIEW_CHECKS.join(', ')})`)
+}
+
+function assertCharacterIssueSeverity(issue: { readonly id: string; readonly category: string; readonly severity: string }): void {
+  const check = characterCheckIdFromIssue(issue.id)
+  if (issue.category !== 'character' || check === undefined) {
+    throw new StageValidationRejection(`Character issue ${echo(issue.id)} must use category character and an id of character-voice, character-function, or character-arc.`)
+  }
+  if (check === CHARACTER_REVIEW_ADVISORY) {
+    if (issue.severity !== 'advisory') throw new StageValidationRejection(`character-arc is fixed advisory: issue ${echo(issue.id)} is ${issue.severity}`)
+    return
+  }
+  if (!(CHARACTER_REVIEW_BLOCKING as readonly string[]).includes(check)) {
+    throw new StageValidationRejection(`Character issue ${echo(issue.id)} is not one of character-voice, character-function, or character-arc.`)
+  }
+  if (issue.severity !== 'blocking') throw new StageValidationRejection(`${check} issues must be blocking: issue ${echo(issue.id)} is ${issue.severity}`)
 }
 
 function nonempty<T>(values: T[]): [T, ...T[]] {
@@ -538,6 +605,13 @@ export function parseReviewOutput(value: unknown, expected: {
   readonly paragraphs?: readonly NumberedParagraph[]
   /** Prompt version 8 model reviews. Omitted on readback and on every earlier prompt version. */
   readonly admission?: ReviewAdmission
+  /**
+   * Prompt version 12 model reviews. A body review whose required checks include `character` must contain
+   * character-voice, character-function and character-arc. Older prompt versions omit this.
+   */
+  readonly characterReview?: boolean
+  /** Readback of a review that was already admitted. A stored `character` category stays readable. */
+  readonly storedCharacter?: boolean
 }): ReviewOutput {
   if (expected.admission?.chinese === true) assertReviewChinese(value)
   const expanded = expected.paragraphs === undefined ? value : expandParagraphCitations(value, expected.paragraphs, expected.reviewed.artifactId)
@@ -547,14 +621,22 @@ export function parseReviewOutput(value: unknown, expected: {
   if (output.reviewed.artifactId !== expected.reviewed.artifactId || output.reviewed.sha256 !== expected.reviewed.sha256) {
     throw new StageValidationRejection(`Reviewed artifact differs from the requested candidate version: got ${output.reviewed.artifactId}@${output.reviewed.sha256.slice(0, 12)}, expected ${expected.reviewed.artifactId}@${expected.reviewed.sha256.slice(0, 12)}`)
   }
-  unique(output.checks.map(check => check.category), 'review check category')
+  if ((expected.characterReview === true || expected.storedCharacter === true) !== true && reviewUsesCharacter(output)) {
+    throw new StageValidationRejection('Review category character is not part of this prompt version')
+  }
+  unique(output.checks.map(check => check.category === 'character' ? characterCheckKey(check.summary) : check.category), 'review check category')
   unique(output.issues.map(issue => issue.id), 'review issue ID')
   unique(expected.evidenceSources.map(source => source.artifactId), 'evidence source')
   const missingChecks = expected.requiredChecks.filter(category => !output.checks.some(check => check.category === category))
   if (missingChecks.length > 0) throw new StageValidationRejection(`Review is missing a required check: ${missingChecks.join(', ')} (required: ${expected.requiredChecks.join(', ')})`)
+  if (expected.characterReview === true && expected.requiredChecks.includes('character')) assertCharacterChecks(output.checks)
   for (const issue of output.issues) {
     if (issue.hostDowngrade !== undefined) {
       if (issue.severity !== 'advisory') throw new StageValidationRejection(`A host-downgraded issue must be advisory: issue ${echo(issue.id)} is ${issue.severity}`)
+      continue
+    }
+    if (issue.category === 'character' || characterCheckIdFromIssue(issue.id) !== undefined) {
+      assertCharacterIssueSeverity(issue)
       continue
     }
     if (issue.category === 'style' && issue.severity !== 'advisory') throw new StageValidationRejection(`Style suggestions must remain advisory: issue ${echo(issue.id)} is ${issue.severity}`)

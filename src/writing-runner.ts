@@ -10,6 +10,7 @@ import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
+import { appendCharacterMetricWarnings, CHARACTER_METRICS_BLOCKING, CHARACTER_REVIEW_PROMPT_VERSION, measureCharacterMetrics, protagonistFreeSceneCount, sheetForCharacterMetrics, type CharacterMetrics } from './character-metrics.ts'
 import { CHARACTER_SHEET_PROMPT_VERSION, CharacterSheetRejection, DEFAULT_MAX_CHARACTERS, parseCharacterSheet, type CharacterSheet } from './character-sheet.ts'
 import { assertKnownCast, buildCastInjection, castTaskFields, mergeCharacterSheets, SCENE_CAST_PROMPT_VERSION, type SceneCastScene } from './scene-cast.ts'
 import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, characterDimensionsForStage, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
@@ -60,6 +61,12 @@ export interface WritingRunnerOptions {
   readonly castInjection?: boolean
   /** Han-character budget of the injected cards. Default 1200. Not stored on the run. */
   readonly maxCastCardChars?: number
+  /**
+   * Version 12 body reviews require character-voice, character-function and character-arc, and may carry task.metrics.
+   * Default true. Not stored on the run: versions before 12 ignore it, so their replay stays byte-identical.
+   * False keeps the version-11 review prompt and schema. Metrics never change issue.severity and never gate a chapter.
+   */
+  readonly characterReview?: boolean
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -819,6 +826,79 @@ export class WritingRunner {
     return parsed.success ? parsed.data.scenes : null
   }
 
+  /** Version 12 with character review on. Older runs and `characterReview: false` keep the previous review. Not stored. */
+  private characterReviewEnabled(run: WritingRun): boolean {
+    return promptVersionOf(run) >= CHARACTER_REVIEW_PROMPT_VERSION && this.options.characterReview !== false
+  }
+
+  /** e5/e6 markdown, or an empty list when the card path is off or the collection cannot be read. */
+  private characterMarkdowns(inv: Invocation): string[] {
+    if (this.characterSheetGate(inv.run) === undefined) return []
+    const settings = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'settings')
+    if (settings === undefined) return []
+    try {
+      const text = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: settings.artifact.id }).text
+      const collection = settingsCollectionSchema.safeParse(JSON.parse(text))
+      if (!collection.success) return []
+      return collection.data.dimensions.flatMap(dimension => dimension.dimensionCode === 'e5' || dimension.dimensionCode === 'e6' ? [dimension.contentMarkdown] : [])
+    } catch { return [] }
+  }
+
+  /** First book-outline arc, used only as the protagonist name for a free-scene count. Unknown stays null. */
+  private protagonistName(inv: Invocation): string | null {
+    const outline = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'book-outline')
+    if (outline === undefined) return null
+    try {
+      const text = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outline.artifact.id }).text
+      const parsed = StageOutputSchemas['book-outline'].safeParse(JSON.parse(text))
+      return parsed.success ? parsed.data.characterArcs[0]?.character ?? null : null
+    } catch { return null }
+  }
+
+  /** Free-scene counts of the two chapters before this one, oldest first. A gap ends the streak. */
+  private recentProtagonistFreeScenes(inv: Invocation, chapterNumber: number, protagonist: string | null): number[] {
+    if (protagonist === null) return []
+    const applied = this.service.getManuscript(inv.actor, inv.run.novelId).appliedChapters
+    const counts: number[] = []
+    for (let number = chapterNumber - 1; number >= 1 && counts.length < 2; number--) {
+      if (!applied.some(item => item.chapterNumber === number)) break
+      const scenes = this.chapterOutlineScenes(inv, number)
+      if (scenes === null) break
+      const count = protagonistFreeSceneCount(scenes, protagonist)
+      if (count === null) break
+      counts.unshift(count)
+    }
+    return counts
+  }
+
+  /**
+   * Character metrics for one admitted body. A missing or unparsed card returns undefined and does not fail the chapter.
+   * The result is advisory: callers may put it on task.metrics and append its warnings to a repair instruction.
+   */
+  private bodyCharacterMetrics(inv: Invocation, body: BodyOutput): CharacterMetrics | undefined {
+    if (!this.characterReviewEnabled(inv.run)) return undefined
+    const sheet = sheetForCharacterMetrics(this.characterMarkdowns(inv), this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS)
+    if (sheet === null) return undefined
+    const scenes = this.chapterOutlineScenes(inv, body.chapterNumber) ?? []
+    const protagonist = this.protagonistName(inv)
+    return measureCharacterMetrics({
+      bodyText: assembleBody(body), scenes, sheet, protagonistName: protagonist,
+      recentProtagonistFreeScenes: this.recentProtagonistFreeScenes(inv, body.chapterNumber, protagonist),
+    })
+  }
+
+  /** @param storedText - Admitted body JSON. Unreadable text skips metrics. */
+  private metricsOfStoredBody(inv: Invocation, storedText: string): CharacterMetrics | undefined {
+    try { return this.metricsOfValue(inv, JSON.parse(storedText)) }
+    catch { return undefined }
+  }
+
+  /** @param value - A body candidate. A value that is not a body skips metrics. */
+  private metricsOfValue(inv: Invocation, value: unknown): CharacterMetrics | undefined {
+    const parsed = StageOutputSchemas.body.safeParse(value)
+    return parsed.success ? this.bodyCharacterMetrics(inv, parsed.data) : undefined
+  }
+
   /** Body-task cards for a version-11 run. Older runs, a closed switch, and a missing card add no keys. */
   private bodyCastTask(inv: Invocation, target: GeneratedManuscriptTarget): ReturnType<typeof castTaskFields> {
     if (target.kind !== 'body' || promptVersionOf(inv.run) < SCENE_CAST_PROMPT_VERSION || this.options.castInjection === false) return {}
@@ -1370,11 +1450,13 @@ export class WritingRunner {
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
       if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null) return { candidate: reviewed, convergence: null }
-      if (aiToneSpans.length > 0) { validationError = withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction); repairMode = 'review' }
-      else if (incomplete) { validationError = withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction); repairMode = 'review' }
-      else if (reviewed.length?.blocking) { validationError = withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction); repairMode = 'length' }
-      else if (eventInstruction !== null && reviewed.status !== 'blocked') { validationError = eventInstruction; repairMode = 'review' }
-      else { validationError = withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction); repairMode = 'review' }
+      const characterMetrics = target.kind === 'body' ? this.metricsOfValue(inv, structured) : undefined
+      const withMetrics = (text: string) => appendCharacterMetricWarnings(text, characterMetrics)
+      if (aiToneSpans.length > 0) { validationError = withMetrics(withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction)); repairMode = 'review' }
+      else if (incomplete) { validationError = withMetrics(withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction)); repairMode = 'review' }
+      else if (reviewed.length?.blocking) { validationError = withMetrics(withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction)); repairMode = 'length' }
+      else if (eventInstruction !== null && reviewed.status !== 'blocked') { validationError = withMetrics(eventInstruction); repairMode = 'review' }
+      else { validationError = withMetrics(withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction)); repairMode = 'review' }
       feedback = this.feedback(reviewed)
     }
     // Never auto-pass: a body still carrying blocking AI tone when repairs run out ends review-blocked and is not applied.
@@ -1392,7 +1474,8 @@ export class WritingRunner {
   private async reviewManuscript(inv: Invocation, key: string, candidate: ManuscriptCandidateView, requiredChecks: readonly ReviewCategory[]): Promise<ManuscriptCandidateView> {
     return this.reviewLoop(inv, key, candidate, requiredChecks, (result, reviewKey) => this.service.saveManuscriptReview(inv.actor, {
       novelId: inv.run.novelId, candidateId: candidate.artifact.id, expectedReviewId: null,
-      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv) }))
+      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv),
+      ...(this.characterReviewEnabled(inv.run) ? { characterReview: true } : {}) }))
   }
 
   /**
@@ -1453,10 +1536,13 @@ export class WritingRunner {
     const openCode = promptVersion >= 7 && 'dimensionCode' in candidate && isOpenChecklistCode(candidate.dimensionCode) ? candidate.dimensionCode : undefined
     const stored = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id })
     const paragraphs = promptVersion >= 7 ? paragraphsOfStoredCandidate(stored.kind, stored.text) : undefined
-    return this.stage(inv, key, 'review', refs, { reviewed: inputRef(candidate.artifact), requiredChecks, validationError,
+    const reviewChecks = this.characterReviewEnabled(inv.run) && reviewedKind === 'body' && !requiredChecks.includes('character') ? [...requiredChecks, 'character' as const] : requiredChecks
+    const characterMetrics = reviewedKind === 'body' ? this.metricsOfStoredBody(inv, stored.text) : undefined
+    return this.stage(inv, key, 'review', refs, { reviewed: inputRef(candidate.artifact), requiredChecks: reviewChecks, validationError,
       ...(paragraphs === undefined ? {} : { paragraphs }),
       ...(openCode === undefined ? {} : { checklistItems: openChecklistItems(openCode) }),
       ...('length' in candidate ? { measuredWordCount: candidate.wordCount, measuredLength: candidate.length } : {}),
+      ...(characterMetrics === undefined ? {} : { metrics: characterMetrics, metricsBlocking: CHARACTER_METRICS_BLOCKING }),
       // Version-1 runs keep their original task text; later runs hand the body review host-measured positions to cite.
       ...('beats' in candidate && candidate.beats !== null && promptVersionOf(inv.run) >= 2 ? { measuredBeats: candidate.beats } : {}),
       // Version 3 body reviews also get host-detected AI-tone markers in narration (advisory evidence only).
@@ -1579,8 +1665,9 @@ export class WritingRunner {
       ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}),
       ...(settingsDimensionCode === undefined ? {} : { settingsDimensionCode }), promptVersion,
       ...(characterDimensions.length === 0 ? {} : { characterDimensions, maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS }),
-      ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}) })
-    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion))
+      ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}),
+      ...(kind === 'review' && promptVersion >= CHARACTER_REVIEW_PROMPT_VERSION && !this.characterReviewEnabled(inv.run) ? { characterReview: false as const } : {}) })
+    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion, { characterReview: this.characterReviewEnabled(inv.run) }))
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.
     const direct = batch !== 'consistency' && (kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot')
     return this.capture(inv, key, prompt, allRefs, schema, direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, stageWritingRole(kind), direct)

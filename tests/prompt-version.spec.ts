@@ -114,7 +114,7 @@ describe('version 3 AI-tone review', () => {
 })
 
 describe('version 2 guardrails', () => {
-  it('is followed by version 11 for new runs', () => { expect(CURRENT_PROMPT_VERSION).toBe(11) })
+  it('is followed by version 12 for new runs', () => { expect(CURRENT_PROMPT_VERSION).toBe(12) })
 
   it('appends each sentence only to its own stage', () => {
     for (const kind of kinds) {
@@ -239,12 +239,12 @@ describe('runs keep their prompt version', () => {
     expect(bodyReview?.prompt).not.toContain('the host itself blocks the chapter')
   })
 
-  it('starts new runs on version 11 and hands body reviews host-measured beats and graded AI-tone markers', { timeout: 120_000 }, async () => {
+  it('starts new runs on version 12 and hands body reviews host-measured beats and graded AI-tone markers', { timeout: 120_000 }, async () => {
     const record = recorder()
     const fixture = await useWritingFixture({ maxReadChars: 8192, onChildRequest: record.onChildRequest })
     const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
     if (outcome.status === 'rejected') throw outcome.reason
-    expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 11, executionLimits: { aiToneBlocking: true } })
+    expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 12, executionLimits: { aiToneBlocking: true } })
     expect(record.seen.find(item => item.stage.kind === 'settings')?.prompt).toContain('Do not expand this classification into motives')
     expect(record.seen.find(item => item.stage.kind === 'book-outline')?.prompt).toContain('starting want, the pressure that changes it')
     expect(record.seen.find(item => item.stage.kind === 'chapter-outline')?.prompt).toContain('who chooses, what they want in that moment')

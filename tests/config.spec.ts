@@ -119,6 +119,7 @@ it('rejects a non-boolean cast switch before opening storage', async () => {
   onTestFinished(async () => { await ctx.fiber.dispose() })
   await expect(Story.apply(ctx, { ...new Story.Config(), strictCast: 'yes' as never })).rejects.toThrow('strictCast must be a boolean')
   await expect(Story.apply(ctx, { ...new Story.Config(), castInjection: 'yes' as never })).rejects.toThrow('castInjection must be a boolean')
+  await expect(Story.apply(ctx, { ...new Story.Config(), characterReview: 'yes' as never })).rejects.toThrow('characterReview must be a boolean')
   expect(ctx.get('story')).toBeUndefined()
 })
 

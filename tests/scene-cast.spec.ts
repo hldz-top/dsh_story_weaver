@@ -79,7 +79,7 @@ describe('scene cast admission', () => {
 
 describe('prompt version 11', () => {
   it('replays versions 1–10 prompt and schema bytes from parent 6bd305e', () => {
-    expect(CURRENT_PROMPT_VERSION).toBe(SCENE_CAST_PROMPT_VERSION)
+    expect(CURRENT_PROMPT_VERSION).toBeGreaterThan(SCENE_CAST_PROMPT_VERSION)
     for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const satisfies readonly PromptVersion[]) {
       for (const kind of kinds) {
         expect(sha(buildStagePrompt({ ...promptBase, kind, promptVersion: version })), `p/${version}/${kind}`).toBe(parentHashes[`p/${version}/${kind}`])

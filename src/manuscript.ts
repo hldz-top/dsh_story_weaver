@@ -78,6 +78,11 @@ export interface SaveManuscriptReviewRequest {
   readonly childSessionId: SessionId; readonly output: unknown
   /** Prompt version 8 model reviews. Readback and earlier prompt versions omit it. */
   readonly admission?: ReviewAdmission
+  /**
+   * Prompt version 12 model reviews. Not stored on the run. Body reviews then require the three character checks.
+   * Readback leaves this unset and still accepts a character category that was already admitted.
+   */
+  readonly characterReview?: boolean
 }
 /** Standalone settings or outline adoption with a current-head precondition. */
 export interface ApplyManuscriptCandidateRequest {
@@ -151,7 +156,7 @@ export class ManuscriptStore {
     const novel = this.record(actor, request.novelId)
     const candidate = this.candidate(novel, request.candidateId)
     this.validateCandidate(actor, novel, candidate)
-    const output = this.reviewOutput(actor, novel, candidate, request.output, request.admission)
+    const output = this.reviewOutput(actor, novel, candidate, request.output, request.admission, { characterReview: request.characterReview === true })
     const hash = digest([request.childSessionId, request.expectedReviewId, output])
     const replay = candidate.reviewHistory.find(item => item.request.requestId === request.requestId)
     if (replay !== undefined) { sameRequest(replay.request.hash, hash); return this.view(actor, novel, candidate) }
@@ -489,7 +494,7 @@ export class ManuscriptStore {
       const bodyRecord = this.candidate(novel, body.id)
       if (bodyRecord.target.kind !== 'body' || bodyRecord.target.chapterNumber !== target.chapterNumber || !bodyRecord.reviewHistory.some(item => item.artifact.id === review.id)) throw new WritingError('corrupt-artifact', 'Continuity review does not belong to the requested chapter body')
       const bodyOutput = StageOutputSchemas.body.parse(JSON.parse(body.text))
-      const bodyReview = this.reviewOutput(actor, novel, bodyRecord, JSON.parse(review.text))
+      const bodyReview = this.reviewOutput(actor, novel, bodyRecord, JSON.parse(review.text), undefined, { stored: true })
       const blocking = bodyReview.issues.filter(issue => issue.severity === 'blocking')
       const converged = bodyRecord.convergence?.reviewId === review.id && bodyRecord.convergence.failCount === blocking.length
       if (blocking.length > 0 && !converged) throw new WritingError('review-blocked', 'Continuity body still has blocking issues')
@@ -585,7 +590,7 @@ export class ManuscriptStore {
     this.currentInputs(actor, novel, candidate)
   }
 
-  private reviewOutput(actor: Actor, novel: NovelRecord, candidate: ManuscriptRecord, value: unknown, admission?: ReviewAdmission) {
+  private reviewOutput(actor: Actor, novel: NovelRecord, candidate: ManuscriptRecord, value: unknown, admission?: ReviewAdmission, mode: { readonly characterReview?: boolean; readonly stored?: boolean } = {}) {
     const refs = [inputRef(candidate.artifact), ...candidate.inputRefs]
     const evidenceSources = refs.map(ref => {
       const source = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: ref.artifactId })
@@ -593,8 +598,13 @@ export class ManuscriptStore {
       return { artifactId: source.id, text: source.kind === 'body' ? assembleBody(StageOutputSchemas.body.parse(JSON.parse(source.text))) : source.text }
     })
     const stored = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: candidate.artifact.id })
-    return parseReviewOutput(value, { reviewed: inputRef(candidate.artifact), inputRefs: candidate.inputRefs, requiredChecks: requiredChecks(candidate.target.kind), evidenceSources,
+    const baseChecks = requiredChecks(candidate.target.kind)
+    const characterReview = mode.characterReview === true
+    const required = characterReview && candidate.target.kind === 'body' && !baseChecks.includes('character') ? [...baseChecks, 'character' as const] : baseChecks
+    return parseReviewOutput(value, { reviewed: inputRef(candidate.artifact), inputRefs: candidate.inputRefs, requiredChecks: required, evidenceSources,
       acceptAdvisoryCompleteness: candidate.target.kind === 'settings',
+      ...(characterReview ? { characterReview: true } : {}),
+      ...(mode.stored === true ? { storedCharacter: true } : {}),
       ...(admission === undefined ? {} : { admission }),
       ...(hasParagraphCitation(value) ? { paragraphs: paragraphsOfStoredCandidate(stored.kind, stored.text) } : {}) })
   }
@@ -625,7 +635,7 @@ export class ManuscriptStore {
     const latest = candidate.reviewHistory.at(-1)
     if (latest === undefined || latest.artifact.id !== reviewId) throw new WritingError('review-blocked', 'The latest exact manuscript review is required')
     const artifact = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: reviewId })
-    const output = this.reviewOutput(actor, novel, candidate, JSON.parse(artifact.text))
+    const output = this.reviewOutput(actor, novel, candidate, JSON.parse(artifact.text), undefined, { stored: true })
     const blocking = output.issues.filter(issue => issue.severity === 'blocking')
     if (blocking.length === 0) return
     const stored = candidate.convergence?.reviewId === reviewId && candidate.convergence.failCount === blocking.length
@@ -637,7 +647,7 @@ export class ManuscriptStore {
     try {
       for (const [index, review] of candidate.reviewHistory.entries()) {
         const artifact = this.owner.getArtifact(actor, { novelId: novel.id, artifactId: review.artifact.id })
-        const parsed = this.reviewOutput(actor, novel, candidate, JSON.parse(artifact.text))
+        const parsed = this.reviewOutput(actor, novel, candidate, JSON.parse(artifact.text), undefined, { stored: true })
         if (review.blocking !== parsed.issues.some(issue => issue.severity === 'blocking')) throw new Error('Review index differs from immutable issues')
         if (candidate.convergence?.reviewId === review.artifact.id && candidate.convergence.failCount !== parsed.issues.filter(issue => issue.severity === 'blocking').length) throw new Error('Convergence fail count differs from the review')
         if (review.request.hash !== digest([review.childSessionId, candidate.reviewHistory[index - 1]?.artifact.id ?? null, parsed])) throw new Error('Review provenance differs from its publication receipt')

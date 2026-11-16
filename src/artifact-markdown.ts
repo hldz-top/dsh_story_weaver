@@ -25,7 +25,7 @@ const outcomes: Record<ResearchOutcome, string> = {
 }
 const reviewCategories: Record<ReviewCategory, string> = {
   completeness: 'Completeness', consistency: 'Consistency', obligations: 'Required events',
-  continuity: 'Continuity', length: 'Chapter length', style: 'Style',
+  continuity: 'Continuity', length: 'Chapter length', style: 'Style', character: 'Character',
 }
 const classifications = { internal: 'Internal context', creative: 'Creative decision', external: 'External research' }
 

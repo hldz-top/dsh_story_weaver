@@ -21,6 +21,7 @@ import { registerWritingTools } from '../../src/tools.ts'
 import { registerResearchTools } from '../../src/research-tools.ts'
 import { researchNecessitySchema } from '../../src/research-planning.ts'
 import { OUTLINE_PATCH_REQUIREMENT } from '../../src/outline-repair.ts'
+import { CHARACTER_REVIEW_CHECKS } from '../../src/character-metrics.ts'
 import { StageOutputSchemas } from '../../src/stage-output.ts'
 import { settingsCollectionSchema } from '../../src/manuscript-records.ts'
 import { call } from './model.ts'
@@ -41,7 +42,9 @@ const taskSchema = z.object({
   batch: z.enum(['draft', 'consistency', 'repair']).optional(), codes: z.array(z.string()).optional(),
   chapterCount: z.number().int().positive().optional(), sceneIds: z.array(z.string()).optional(),
   obligations: z.array(z.object({ id: z.string(), description: z.string() })).optional(),
-  requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style'])).optional(),
+  requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style', 'character'])).optional(),
+  metrics: z.record(z.string(), z.unknown()).optional(),
+  metricsBlocking: z.boolean().optional(),
   reviewed: inputRef.optional(), bodyId: artifactIdSchema.optional(),
   measuredWordCount: z.number().nullable().optional(),
   measuredLength: z.object({ status: z.enum(['within-range', 'too-short', 'too-long']), blocking: z.boolean() }).nullable().optional(),
@@ -103,6 +106,8 @@ export interface WritingFixtureOptions {
   readonly castInjection?: boolean
   /** Han budget of those cards. Default 1200. Not stored on the run. */
   readonly maxCastCardChars?: number
+  /** Plugin flag for the version-12 character review. Default true. Not stored on the run. */
+  readonly characterReview?: boolean
   /** Run-store raw output cap. Default 262144. */
   readonly maxOutputBytes?: number
   /** Creative brief stored on the fixture novel. Default is the fog-harbor premise, which states no numbered required events. */
@@ -276,7 +281,12 @@ function generate(state: ChildState): object {
       const evidence = task.paragraphs !== undefined && task.paragraphs.length > 0
         ? [{ paragraphId: task.paragraphs[0]!.id, problem: '这段引文覆盖本项检查所读的候选段落。' }]
         : [{ artifactId: reviewed.artifactId, quote: quoteCandidate(source(state, reviewed.artifactId)) }]
-      const checks = required(task.requiredChecks, 'requiredChecks').map(category => ({ category, summary: category === 'length' ? `宿主计数 ${task.measuredWordCount}；${task.measuredLength?.status}。` : `已读候选并完成${category}检查。`, evidence }))
+      const checks: { category: string; summary: string; evidence: typeof evidence }[] = []
+      for (const category of required(task.requiredChecks, 'requiredChecks')) {
+        if (category === 'character') {
+          for (const id of CHARACTER_REVIEW_CHECKS) checks.push({ category, summary: `${id}: 已读候选并完成这项人物检查。`, evidence })
+        } else checks.push({ category, summary: category === 'length' ? `宿主计数 ${task.measuredWordCount}；${task.measuredLength?.status}。` : `已读候选并完成${category}检查。`, evidence })
+      }
       const issues = task.measuredLength?.blocking === true ? [{ id: 'fixture-length', severity: 'blocking', category: 'length', location: '整章', message: '宿主测得本章超出规定的章节总字数范围。', evidence }] : []
       return { ...base, reviewed, checks, issues }
     }
@@ -421,6 +431,7 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
     ...(options.strictCast === undefined ? {} : { strictCast: options.strictCast }),
     ...(options.castInjection === undefined ? {} : { castInjection: options.castInjection }),
     ...(options.maxCastCardChars === undefined ? {} : { maxCastCardChars: options.maxCastCardChars }),
+    ...(options.characterReview === undefined ? {} : { characterReview: options.characterReview }),
   })
   fixture.ctx.effect(() => () => runner.close())
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
