@@ -10,7 +10,8 @@ import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
-import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
+import { CHARACTER_SHEET_PROMPT_VERSION, CharacterSheetRejection, DEFAULT_MAX_CHARACTERS } from './character-sheet.ts'
+import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, characterDimensionsForStage, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
 import { aiToneHits, gradeAiTone } from './ai-tone.ts'
 import { buildResearchPrompt, validateResearchStageResult, RESEARCH_STAGE_OUTPUT_SCHEMA, researchStageTools, researchToolAuthorization, type ResearchStageRequest } from './research-stage.ts'
@@ -20,7 +21,7 @@ import { batchDimensionKind, batchFactStatement, dimensionDocument, parseSetting
 import { StageValidationRejection } from './stage-rejection.ts'
 import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
-import { blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseContinuitySnapshot, StageOutputSchemas, type BodyOutput, type ContinuityOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
+import { assertCharacterSheet, blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseContinuitySnapshot, StageOutputSchemas, type BodyOutput, type ContinuityOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
 import { projectContinuitySnapshot } from './continuity-snapshot.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
@@ -42,6 +43,13 @@ export interface WritingRunnerOptions {
   readonly allowIncompleteSettings?: boolean
   /** Reuse a passed settings collection when the brief text and roots match. Default true. */
   readonly reuseSettingsSnapshot?: boolean
+  /**
+   * Parse e5/e6 character cards on prompt version 10. Default true.
+   * Not stored on the run: versions before 10 ignore it, so their replay stays byte-identical.
+   */
+  readonly characterSheet?: boolean
+  /** Cap for one e5 or e6 dimension. Default 12. Not stored on the run. */
+  readonly maxCharacters?: number
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -52,9 +60,24 @@ type RepairMode = 'length' | 'review'
 type ProducedSettings =
   | { readonly kind: 'passing'; readonly candidate: SettingsCandidateView; readonly review: NonNullable<SettingsCandidateView['review']> }
   | { readonly kind: 'blocked'; readonly candidate: SettingsCandidateView }
-  | { readonly kind: 'invalid'; readonly message: string }
+  | { readonly kind: 'invalid'; readonly message: string; readonly unparsedCharacterSheet?: UnparsedCharacterSheet }
   | { readonly kind: 'checklist'; readonly decision: ReturnType<typeof checklistRepairDecision>; readonly candidate: SettingsCandidateView; readonly review: NonNullable<SettingsCandidateView['review']>; readonly fails: number }
 /** Fail count and held candidate for one open-checklist line. Other lines and other dimensions do not read it. */
+/** Last e5/e6 model output whose character card was rejected, kept so repair exhaustion can admit the prose. */
+interface UnparsedCharacterSheet {
+  readonly output: unknown
+  readonly childSessionId: CapturedStage['childSessionId']
+  readonly stageKey: string
+  readonly message: string
+}
+interface SettingsBatchCapture {
+  readonly dimensions: SettingsBatchOutput['dimensions']
+  readonly childSessionId: CapturedStage['childSessionId']
+  readonly characterSheetDegraded: boolean
+}
+interface SettingsBatchFallback extends SettingsBatchCapture {
+  readonly message: string
+}
 interface OpenChecklistLine {
   held: { readonly candidate: SettingsCandidateView; readonly fails: number } | null
   feedback: readonly ArtifactRef[]
@@ -731,24 +754,64 @@ export class WritingRunner {
     const groups = planSettingsBatches(needed, inv.run.limits.maxOutputBytes)
     for (const codes of groups) {
       const captured = await this.captureSettingsDraft(inv, codes, excerpts)
-      await this.materializeSettings(inv, codes, captured.dimensions, planId, captured.childSessionId, code => `settings/batch/save/${codes.join('-')}/${code}`)
+      await this.materializeSettings(inv, codes, captured.dimensions, planId, captured.childSessionId, code => `settings/batch/save/${codes.join('-')}/${code}`, captured.characterSheetDegraded)
     }
   }
 
-  private async captureSettingsDraft(inv: Invocation, codes: readonly string[], excerpts: readonly string[]): Promise<{ readonly dimensions: SettingsBatchOutput['dimensions']; readonly childSessionId: CapturedStage['childSessionId'] }> {
+  /** Version 10 with character cards on. Older runs and `characterSheet: false` stay on the free-text path and are not stored. */
+  private characterSheetGate(run: WritingRun): { readonly promptVersion: PromptVersion; readonly maxCharacters: number } | undefined {
+    if (promptVersionOf(run) < CHARACTER_SHEET_PROMPT_VERSION || this.options.characterSheet === false) return undefined
+    return { promptVersion: promptVersionOf(run), maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS }
+  }
+
+  /** @returns The admission flag for a fresh e5/e6 save, or nothing when this run does not parse character cards. */
+  private characterSheetRequest(run: WritingRun): { readonly characterSheet: { readonly promptVersion: PromptVersion; readonly maxCharacters: number; readonly characterSheet: true; readonly enforce: true } } | Record<string, never> {
+    const gate = this.characterSheetGate(run)
+    if (gate === undefined) return {}
+    return { characterSheet: { promptVersion: gate.promptVersion, maxCharacters: gate.maxCharacters, characterSheet: true, enforce: true } }
+  }
+
+  /**
+   * Parse a settings batch, then require e5/e6 character cards when this run asks for them.
+   * A card rejection is remembered so the repair loop can hand it back, and so exhaustion can keep the prose.
+   */
+  private readSettingsBodies(inv: Invocation, stage: CapturedStage, codes: readonly string[], fallback: { current: SettingsBatchFallback | null }): SettingsBatchCapture {
+    fallback.current = null
+    const dimensions = parseSettingsBatch(stage.structured, { codes, maxOutputBytes: inv.run.limits.maxOutputBytes, kinds: dimensionKinds(codes) }).dimensions
+    const produced: SettingsBatchCapture = { dimensions, childSessionId: stage.childSessionId, characterSheetDegraded: false }
+    const gate = this.characterSheetGate(inv.run)
+    if (gate === undefined) return produced
+    try {
+      for (const item of dimensions) assertCharacterSheet(item.code, item.body, { promptVersion: gate.promptVersion, characterSheet: true, maxCharacters: gate.maxCharacters })
+    } catch (cause) {
+      if (cause instanceof CharacterSheetRejection) fallback.current = { ...produced, characterSheetDegraded: true, message: cause.message }
+      throw cause
+    }
+    return produced
+  }
+
+  /** @returns The last rejected character card when that rejection is what exhausted the repair loop. */
+  private degradedSettingsBatch(cause: unknown, fallback: { current: SettingsBatchFallback | null }): SettingsBatchCapture | undefined {
+    if (!(cause instanceof WritingError) || fallback.current === null || !cause.message.includes(fallback.current.message)) return undefined
+    return { dimensions: fallback.current.dimensions, childSessionId: fallback.current.childSessionId, characterSheetDegraded: true }
+  }
+
+  private async captureSettingsDraft(inv: Invocation, codes: readonly string[], excerpts: readonly string[]): Promise<SettingsBatchCapture> {
     const count = inv.run.executionLimits.settingsCandidateCount ?? 1
-    const kinds = dimensionKinds(codes)
-    const runOne = async (key: string, validationError: string | null) => {
+    const fallback: { current: SettingsBatchFallback | null } = { current: null }
+    const runOne = async (key: string, validationError: string | null): Promise<SettingsBatchCapture> => {
       const stage = await this.stage(inv, key, 'settings', this.draftRefs(inv, codes), {
         batch: 'draft', codes, ...(validationError === null ? {} : { validationError }), ...(excerpts.length > 0 ? { officialRetrieval: [...excerpts] } : {}),
       }, [], batchDimensionKind(codes))
-      return { dimensions: parseSettingsBatch(stage.structured, { codes, maxOutputBytes: inv.run.limits.maxOutputBytes, kinds }).dimensions, childSessionId: stage.childSessionId }
+      return this.readSettingsBodies(inv, stage, codes, fallback)
     }
-    let chosen: { readonly dimensions: SettingsBatchOutput['dimensions']; readonly childSessionId: CapturedStage['childSessionId'] } | undefined
+    let chosen: SettingsBatchCapture | undefined
     const batchKey = `settings/batch/${codes.join('-')}/draft`
     try { chosen = await this.admitted(inv, 'Settings batch', repair => repair === 0 ? batchKey : `${batchKey}/repair/${repair}`, runOne) }
     catch (cause) {
-      if (count === 1 || !(cause instanceof WritingError) || !cause.message.startsWith('Settings batch repair limit')) throw cause
+      const degraded = this.degradedSettingsBatch(cause, fallback)
+      if (degraded !== undefined && count === 1) chosen = degraded
+      else if (degraded === undefined && (count === 1 || !(cause instanceof WritingError) || !cause.message.startsWith('Settings batch repair limit'))) throw cause
     }
     for (let candidate = 1; candidate < count; candidate++) {
       try {
@@ -756,6 +819,7 @@ export class WritingRunner {
         chosen ??= alternative
       } catch (cause) { if (!isOutputError(cause)) throw cause }
     }
+    if (chosen === undefined && fallback.current !== null) chosen = { dimensions: fallback.current.dimensions, childSessionId: fallback.current.childSessionId, characterSheetDegraded: true }
     if (chosen === undefined) throw new WritingError('review-blocked', 'Settings batch candidates were exhausted')
     return chosen
   }
@@ -780,20 +844,27 @@ export class WritingRunner {
     const groups = planSettingsBatches(named, inv.run.limits.maxOutputBytes)
     for (const codes of groups) {
       const relevant = issues.filter(issue => codes.includes(issue.dimension))
-      const kinds = dimensionKinds(codes)
       const repairKey = `settings/repair/${codes.join('-')}`
-      const captured = await this.admitted(inv, 'Settings repair', repair => repair === 0 ? repairKey : `${repairKey}/repair/${repair}`, async (key, validationError) => {
-        const stage = await this.stage(inv, key, 'settings', this.draftRefs(inv, codes), {
-          batch: 'repair', codes, issues: relevant, ...(validationError === null ? {} : { validationError }),
-        }, [], batchDimensionKind(codes))
-        return { dimensions: parseSettingsBatch(stage.structured, { codes, maxOutputBytes: inv.run.limits.maxOutputBytes, kinds }).dimensions, childSessionId: stage.childSessionId }
-      })
-      await this.materializeSettings(inv, codes, captured.dimensions, planId, captured.childSessionId, code => `settings/repair/${codes.join('-')}/save/${code}`)
+      const fallback: { current: SettingsBatchFallback | null } = { current: null }
+      let captured: SettingsBatchCapture
+      try {
+        captured = await this.admitted(inv, 'Settings repair', repair => repair === 0 ? repairKey : `${repairKey}/repair/${repair}`, async (key, validationError) => {
+          const stage = await this.stage(inv, key, 'settings', this.draftRefs(inv, codes), {
+            batch: 'repair', codes, issues: relevant, ...(validationError === null ? {} : { validationError }),
+          }, [], batchDimensionKind(codes))
+          return this.readSettingsBodies(inv, stage, codes, fallback)
+        })
+      } catch (cause) {
+        const degraded = this.degradedSettingsBatch(cause, fallback)
+        if (degraded === undefined) throw cause
+        captured = degraded
+      }
+      await this.materializeSettings(inv, codes, captured.dimensions, planId, captured.childSessionId, code => `settings/repair/${codes.join('-')}/save/${code}`, captured.characterSheetDegraded)
       await this.restabilizeSettings(inv, planId)
     }
   }
 
-  private async materializeSettings(inv: Invocation, codes: readonly string[], dimensions: SettingsBatchOutput['dimensions'], planId: ArtifactRef['id'], childSessionId: CapturedStage['childSessionId'], keyOf: (code: string) => string): Promise<void> {
+  private async materializeSettings(inv: Invocation, codes: readonly string[], dimensions: SettingsBatchOutput['dimensions'], planId: ArtifactRef['id'], childSessionId: CapturedStage['childSessionId'], keyOf: (code: string) => string, skipCharacterSheet = false): Promise<void> {
     for (const code of codes) {
       const body = dimensions.find(item => item.code === code)?.body
       if (body === undefined) throw new WritingError('corrupt-artifact', `Settings batch has no body for ${code}`)
@@ -806,6 +877,7 @@ export class WritingRunner {
       let candidate = await this.service.saveSettingsCandidate(inv.actor, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, keyOf(code)), dimensionCode: code, researchPlanId: planId, childSessionId, output: dimensionDocument(code, body, refs),
         ...(revisionOf === undefined ? {} : { revisionOf }),
+        ...(skipCharacterSheet ? {} : this.characterSheetRequest(inv.run)),
       })
       if (candidate.review === null) {
         candidate = await this.service.saveSettingsReview(inv.actor, {
@@ -978,7 +1050,9 @@ export class WritingRunner {
       : null
     let feedback = crossFeedback
     let validationError: string | null = null
+    let unparsed: UnparsedCharacterSheet | null = null
     for (let repair = 0; repair <= inv.run.executionLimits.maxRepairAttempts; repair++) {
+      unparsed = null
       const slots = checklistLines === null ? (repair === 0 ? candidateCount : 1) : checklistLines.length
       const settled = await Promise.allSettled(Array.from({ length: slots }, (_, index) => {
         const line = checklistLines?.[index]
@@ -1008,8 +1082,12 @@ export class WritingRunner {
         }
         const blocked = produced.flatMap(item => item.kind === 'blocked' ? [item.candidate] : [])
         if (blocked.length > 0) feedback = [...crossFeedback, ...blocked.flatMap(candidate => this.feedback(candidate))]
-        const invalid = produced.flatMap(item => item.kind === 'invalid' ? [item.message] : [])
-        if (invalid.length > 0) validationError = invalid.at(-1) ?? validationError
+        const invalid = produced.flatMap(item => item.kind === 'invalid' ? [item] : [])
+        if (invalid.length > 0) {
+          validationError = invalid.at(-1)?.message ?? validationError
+          const sheets = invalid.flatMap(item => item.unparsedCharacterSheet === undefined ? [] : [item.unparsedCharacterSheet])
+          unparsed = sheets.length === invalid.length && invalid.length === produced.length ? sheets.at(-1) ?? null : null
+        }
         continue
       }
       let applyNext: { readonly candidate: SettingsCandidateView; readonly review: NonNullable<SettingsCandidateView['review']> } | undefined
@@ -1043,10 +1121,39 @@ export class WritingRunner {
         return
       }
     }
+    // A character card that is still invalid after the existing repair rounds is kept as free text. It does not fail the run.
+    if (checklistLines === null && unparsed !== null) {
+      await this.admitUnparsedCharacterDimension(inv, { code, refs, researchPlanId: research.planId, revision, expectedAppliedId: old?.artifact.id ?? null, unparsed })
+      return
+    }
     // A fail count that stays positive and does not rise is still review-blocked. The held candidate is not applied.
     const checklistError = checklistLines?.findLast(line => line.validationError !== null)?.validationError ?? null
     const exhausted = checklistLines === null ? validationError : checklistError
     throw new WritingError('review-blocked', `Settings repair limit was exhausted for ${code}${exhausted === null ? '' : `: ${exhausted}`}`)
+  }
+
+  /** Save an e5/e6 candidate whose character card never parsed, then review it as ordinary free text. */
+  private async admitUnparsedCharacterDimension(inv: Invocation, input: {
+    readonly code: string
+    readonly refs: readonly ArtifactRef[]
+    readonly researchPlanId: ArtifactId
+    readonly revision: NonNullable<WritingRun['revision']> | undefined
+    readonly expectedAppliedId: ArtifactId | null
+    readonly unparsed: UnparsedCharacterSheet
+  }): Promise<void> {
+    let candidate = await this.service.saveSettingsCandidate(inv.actor, {
+      novelId: inv.run.novelId, requestId: requestId(inv.run, input.unparsed.stageKey), dimensionCode: input.code,
+      researchPlanId: input.researchPlanId, childSessionId: input.unparsed.childSessionId, output: input.unparsed.output,
+      ...(input.revision === undefined ? {} : { revisionOf: input.revision.baseArtifactId }),
+    })
+    candidate = await this.reviewLoop(inv, input.unparsed.stageKey, candidate, ['completeness', 'consistency'], (review, reviewKey) =>
+      this.service.saveSettingsReview(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, requestId: requestId(inv.run, reviewKey),
+        expectedReviewId: null, childSessionId: review.childSessionId, output: review.structured, ...this.reviewAdmission(inv) }))
+    if (candidate.status !== 'blocked' && candidate.review !== null) {
+      await this.service.applySettingsCandidate(inv.actor, { novelId: inv.run.novelId, candidateId: candidate.artifact.id, reviewId: candidate.review.id, expectedAppliedId: input.expectedAppliedId })
+      return
+    }
+    throw new WritingError('review-blocked', `Settings repair limit was exhausted for ${input.code}`)
   }
 
   /**
@@ -1073,8 +1180,12 @@ export class WritingRunner {
     let candidate: SettingsCandidateView
     try {
       candidate = await this.service.saveSettingsCandidate(inv.actor, { novelId: inv.run.novelId, requestId: requestId(inv.run, input.stageKey), dimensionCode: input.code,
-        researchPlanId: input.researchPlanId, childSessionId: stage.childSessionId, output: stage.structured, ...(input.revision === undefined ? {} : { revisionOf: input.revision.baseArtifactId }) })
+        researchPlanId: input.researchPlanId, childSessionId: stage.childSessionId, output: stage.structured, ...(input.revision === undefined ? {} : { revisionOf: input.revision.baseArtifactId }),
+        ...this.characterSheetRequest(inv.run) })
     } catch (cause) {
+      if (cause instanceof CharacterSheetRejection) {
+        return { kind: 'invalid', message: cause.message, unparsedCharacterSheet: { output: stage.structured, childSessionId: stage.childSessionId, stageKey: input.stageKey, message: cause.message } }
+      }
       if (!isOutputError(cause)) throw cause
       return { kind: 'invalid', message: cause.message }
     }
@@ -1376,6 +1487,7 @@ export class WritingRunner {
     const batch = settingsBatchKind(task)
     const feedChapter = kind === 'body' && promptVersion >= 7 && typeof (task as { chapterNumber?: unknown }).chapterNumber === 'number' ? (task as { chapterNumber: number }).chapterNumber : undefined
     const fed = (ref: ArtifactRef) => feedChapter !== undefined && (ref.kind === 'book-outline' || ref.kind === 'chapter-outline')
+    const characterDimensions = promptVersion >= CHARACTER_SHEET_PROMPT_VERSION && this.options.characterSheet !== false && kind === 'settings' ? characterDimensionsForStage(task) : []
     const prompt = buildStagePrompt({ kind, novelId: inv.run.novelId,
       inputs: allRefs.map(ref => ({ artifactId: ref.id, sha256: ref.sha256, kind: ref.kind,
         chars: fed(ref) ? this.feedChars(inv, ref, feedChapter!) : prose ? this.proseChars(inv, ref) : ref.chars,
@@ -1395,6 +1507,7 @@ export class WritingRunner {
       ], ...(settingsDimensionKind === undefined ? {} : { settingsDimensionKind }), ...(settingsCollectionKinds === undefined ? {} : { settingsCollectionKinds }),
       ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}),
       ...(settingsDimensionCode === undefined ? {} : { settingsDimensionCode }), promptVersion,
+      ...(characterDimensions.length === 0 ? {} : { characterDimensions, maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS }),
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}) })
     const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion))
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.

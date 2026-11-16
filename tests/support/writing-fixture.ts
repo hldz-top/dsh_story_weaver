@@ -93,6 +93,10 @@ export interface WritingFixtureOptions {
   readonly registerWebTools?: boolean
   /** Plugin flag for settings snapshot reuse. Default true. */
   readonly reuseSettingsSnapshot?: boolean
+  /** Plugin flag for e5/e6 character cards. Default true. Not stored on the run. */
+  readonly characterSheet?: boolean
+  /** Plugin cap for one e5 or e6 dimension. Default 12. Not stored on the run. */
+  readonly maxCharacters?: number
   /** Run-store raw output cap. Default 262144. */
   readonly maxOutputBytes?: number
   /** Creative brief stored on the fixture novel. Default is the fog-harbor premise, which states no numbered required events. */
@@ -403,7 +407,12 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   fixture.ctx.effect(() => () => runs.close())
   registerWritingTools(fixture.ctx, service, '.dsh-story')
   registerResearchTools(fixture.ctx, service)
-  const runner = new WritingRunner(fixture.ctx, service, runs, executionLimits, new StageDeliveries(fixture.ctx, service, runs, '.dsh-story'), { allowIncompleteSettings: options.allowIncompleteSettings ?? true, ...(options.reuseSettingsSnapshot === undefined ? {} : { reuseSettingsSnapshot: options.reuseSettingsSnapshot }) })
+  const runner = new WritingRunner(fixture.ctx, service, runs, executionLimits, new StageDeliveries(fixture.ctx, service, runs, '.dsh-story'), {
+    allowIncompleteSettings: options.allowIncompleteSettings ?? true,
+    ...(options.reuseSettingsSnapshot === undefined ? {} : { reuseSettingsSnapshot: options.reuseSettingsSnapshot }),
+    ...(options.characterSheet === undefined ? {} : { characterSheet: options.characterSheet }),
+    ...(options.maxCharacters === undefined ? {} : { maxCharacters: options.maxCharacters }),
+  })
   fixture.ctx.effect(() => () => runner.close())
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
   const actor: Actor = { sessionId: fixture.parent.session.id, workspace: workspace.displayPath }

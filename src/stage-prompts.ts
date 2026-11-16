@@ -1,4 +1,5 @@
 /** Logged writing-stage instructions derived from Story V2 business roles. */
+import { CHARACTER_SHEET_PROMPT_VERSION, DEFAULT_MAX_CHARACTERS } from './character-sheet.ts'
 import type { ArtifactId, NovelId } from './contracts.ts'
 import { isOpenChecklistCode, openChecklistItems, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import type { SettingsDimensionKind } from './settings-catalog.ts'
@@ -12,11 +13,13 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * chapter-outline pacing sentence, keeps measured-beat citation on body reviews, and replaces the blocking AI-tone
  * sentence with a density-graded hint. Version 8, for new runs only, adds the review brief-quote field and the Chinese
  * review-prose rule. Version 9, for new runs only, publishes optional `name_note` on each continuity character.
- * The prompt text is unchanged from version 8. Versions 1–8 stay frozen.
+ * The prompt text is unchanged from version 8. Version 10, for new runs only, adds the e5/e6 character-card
+ * instructions when `characterDimensions` names those dimensions. Versions 1–9 stay frozen, and version 10 publishes
+ * the same output schemas as version 9.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 9
+export const CURRENT_PROMPT_VERSION: PromptVersion = 10
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
@@ -40,6 +43,13 @@ export interface StagePromptRequest {
   readonly settingsDimensionCode?: OpenChecklistCode
   /** The run's recorded prompt version; omitted means version 1, the frozen pre-guardrail text. */
   readonly promptVersion?: PromptVersion
+  /**
+   * e5 and/or e6 being written by this settings stage. Version 10 appends the double-table instruction.
+   * Omitted, empty, or any version before 10 leaves the prompt unchanged.
+   */
+  readonly characterDimensions?: readonly ('e5' | 'e6')[]
+  /** Character cap named by the version-10 e5/e6 instruction. Ignored unless `characterDimensions` is nonempty. */
+  readonly maxCharacters?: number
   /**
    * Version 5 only: the run froze aiToneBlocking on, so a body review gets the blocking AI-tone sentence in place of the
    * advisory version-3 one. Omitted or false keeps the version-4 text byte for byte; ignored before version 5 and for
@@ -161,6 +171,29 @@ const REVIEW_BY_KIND: Partial<Record<StagePromptKind, string>> = {
   body: 'A consistency issue quotes a choice that uses knowledge, a motive or a physical fact the accepted settings and prior continuity deny. A continuity issue quotes the prior applied fact and the sentence that breaks it. An obligations issue names the required event and shows the prose does not perform it. AI-tone issues stay category style and severity advisory, as the AI-tone instruction states.',
   continuity: 'Block when a new fact or a fulfilled obligation is not supported by the reviewed body, or when the chapter drops or alters a fact it does not change. A plain summary is not a block.',
   'continuity-snapshot': 'Block a character status, unrecovered note, or used bridge that the applied body and continuity do not support. Do not ask for a narrative-state graph or a foreshadowing ledger. A compact note the prose supports is complete.',
+}
+
+/** e5 or e6 codes present on a settings task. Other stages and other dimensions return an empty list. */
+export function characterDimensionsForStage(task: object): readonly ('e5' | 'e6')[] {
+  const found = new Set<'e5' | 'e6'>()
+  const add = (value: unknown): void => { if (value === 'e5' || value === 'e6') found.add(value) }
+  if ('dimensionCode' in task) add(task.dimensionCode)
+  if ('codes' in task && Array.isArray(task.codes)) for (const code of task.codes) add(code)
+  return (['e5', 'e6'] as const).filter(code => found.has(code))
+}
+
+/** @param dimensions - e5, e6, or both. @param maxCharacters - The host cap for one dimension. @returns The version-10 table instruction. */
+function characterSheetInstruction(dimensions: readonly ('e5' | 'e6')[], maxCharacters: number): string {
+  const which = dimensions.map(code => code === 'e5' ? 'e5 助攻角色' : 'e6 配角群').join(' and ')
+  return `For ${which}, each dimension body must contain two Markdown tables that list the same characters once each, at most ${maxCharacters} people in that dimension. Put allies in e5 and the wider cast in e6; do not add a new settings dimension. The core table has exactly these 8 columns in order: 角色, 身份, 欲望, 恐惧, 缺陷, 误读框架, 反差, 出场章. 误读框架 is one of 利益, 礼法, 逻辑, 技艺, 生计, or 其它: followed by at most 10 characters. 反差 is one sentence of contrast. 出场章 is comma-separated positive chapter numbers such as 1,2,3. The voice table has exactly these 7 columns in order: 角色, 句式, 专属词, 称呼主角, 自称, 身体签, 禁语. 句式 is a length range plus one signature pattern. 专属词 is three items separated by 、. 称呼主角 and 自称 stay consistent with e9. 身体签 is one fixed gesture. 禁语 is one sentence this person will never say. A host rejection names the character and the field; correct that cell and return the complete value.`
+}
+
+/** @param request - The stage being prompted. @returns The version-10 e5/e6 table sentence, or none for older versions and every other stage. */
+function characterSheetLines(request: StagePromptRequest): readonly string[] {
+  if ((request.promptVersion ?? 1) < CHARACTER_SHEET_PROMPT_VERSION) return []
+  const dimensions = request.characterDimensions
+  if (dimensions === undefined || dimensions.length === 0) return []
+  return [characterSheetInstruction(dimensions, request.maxCharacters ?? DEFAULT_MAX_CHARACTERS)]
 }
 
 /** @param request - The stage being prompted. @returns Version-8 review constraints, or none before version 8 and for every other stage. */
@@ -314,6 +347,7 @@ export function buildStagePrompt(request: StagePromptRequest): string {
     ...((request.promptVersion ?? 1) >= 4 ? aiToneWritingGuardrails[request.kind] ?? [] : []),
     ...qualityParagraphs(request),
     ...reviewConstraintLines(request),
+    ...characterSheetLines(request),
   ]
   return [...instructions, 'TASK_DATA', JSON.stringify({
     novelId: request.novelId, kind: request.kind, inputs: request.inputs, task: request.task, requirements: request.requirements,

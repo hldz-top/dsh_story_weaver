@@ -1,7 +1,7 @@
 /** Versioned settings candidates and their host-owned adoption state. */
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ArtifactId, ArtifactRef, NovelId, RequestId } from './contracts.ts'
-import type { ReviewAdmission, StageInputRef } from './stage-output.ts'
+import type { CharacterSheetAdmission, ReviewAdmission, StageInputRef } from './stage-output.ts'
 
 /** Host submission of one completed stage; callers cannot request automatic adoption. */
 export interface SaveSettingsCandidateRequest {
@@ -13,6 +13,11 @@ export interface SaveSettingsCandidateRequest {
   readonly researchPlanId: ArtifactId
   readonly childSessionId: SessionId
   readonly output: unknown
+  /**
+   * Present only for a fresh model admission of e5/e6 on prompt version 10 with character cards enabled.
+   * `enforce: false` is not stored; callers omit the field to keep free text. Never written into the novel record.
+   */
+  readonly characterSheet?: CharacterSheetAdmission & { readonly enforce: boolean }
 }
 /** Exact settings version, review and validity against current source versions. */
 export interface SettingsCandidateView {

@@ -18,7 +18,7 @@ import { bodyFeed, proseView } from './prose-view.ts'
 import { paragraphsOfStoredCandidate } from './candidate-paragraphs.ts'
 import { isOpenChecklistCode } from './open-dimension-checklist.ts'
 import { hasParagraphCitation } from './paragraphs.ts'
-import { admitOpenDimensionChecklist, parseSettingsDimensionOutput, parseReviewOutput, checkSettingsDimensionScope } from './stage-output.ts'
+import { admitOpenDimensionChecklist, assertCharacterSheet, parseSettingsDimensionOutput, parseReviewOutput, checkSettingsDimensionScope } from './stage-output.ts'
 import type { ApplySettingsCandidateRequest, ImportSettingsRequest, SaveSettingsReviewRequest, SaveSettingsCandidateRequest, SettingsCandidateView, SettingsView } from './settings.ts'
 import { ManuscriptStore, type AssembleSettingsRequest, type ManuscriptCandidateView, type ManuscriptView, type SaveManuscriptReviewRequest, type ApplyManuscriptCandidateRequest, type ManuscriptLimits, type ManuscriptContext, type GeneratedManuscriptTarget, type SaveManuscriptCandidateRequest, type ApplyChapterRequest, type AppliedChapterView, type SaveContinuitySnapshotRequest, type AttachContinuitySnapshotRequest } from './manuscript.ts'
 
@@ -551,6 +551,13 @@ export class WritingService {
       const dimension = settingsCatalog.find(item => item.code === request.dimensionCode)
       if (dimension === undefined) throw new WritingError('invalid-input', 'Settings dimension is not available for generation')
       checkSettingsDimensionScope(output, dimension.kind)
+      if (request.characterSheet?.enforce === true) {
+        assertCharacterSheet(output.dimensionCode, output.contentMarkdown, {
+          ...(request.characterSheet.promptVersion === undefined ? {} : { promptVersion: request.characterSheet.promptVersion }),
+          ...(request.characterSheet.characterSheet === undefined ? {} : { characterSheet: request.characterSheet.characterSheet }),
+          ...(request.characterSheet.maxCharacters === undefined ? {} : { maxCharacters: request.characterSheet.maxCharacters }),
+        })
+      }
     }
     const text = JSON.stringify(output)
     const hash = settingsHash({ researchPlanId: request.researchPlanId, childSessionId: request.childSessionId, revisionOf: request.revisionOf ?? null }, output)

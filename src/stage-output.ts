@@ -5,6 +5,7 @@ import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { evidenceQuoteOccurs, reportQuoteRepair, resolveEvidenceQuote, type QuoteRepair } from './evidence-quote.ts'
 import { openChecklistItems, openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import { expandParagraphCitations, type NumberedParagraph } from './paragraphs.ts'
+import { CHARACTER_SHEET_PROMPT_VERSION, parseCharacterSheet, type ParseCharacterSheetOptions } from './character-sheet.ts'
 import { echo, parseModelOutput, StageValidationRejection } from './stage-rejection.ts'
 
 /** A catalog classification dimension records a label and its grounds, not world-building detail. The single source for this set; stage-prompts.ts imports it rather than declaring its own copy. */
@@ -354,6 +355,28 @@ export function parseSettingsDimensionOutput(value: unknown, expected: { dimensi
  * so a candidate accepted by an earlier version of this bound remains durably readable.
  * @param output - Already structurally validated settings output. @param kind - The dimension's catalog kind.
  */
+/** Gate for {@link assertCharacterSheet}. Omitted fields keep the safe defaults: parsing on, from prompt version 10, cap 12. */
+export interface CharacterSheetAdmission extends ParseCharacterSheetOptions {
+  /** Run prompt version. Below {@link CHARACTER_SHEET_PROMPT_VERSION} the markdown is free text. */
+  readonly promptVersion?: number
+  /** When false, e5 and e6 stay free text and this check does nothing. */
+  readonly characterSheet?: boolean
+}
+
+/**
+ * Admit an e5 or e6 contentMarkdown character card before the settings artifact is stored.
+ * Other dimensions, `characterSheet: false`, and prompt versions before 10 return without reading the tables.
+ * A defect throws {@link CharacterSheetRejection} (a `StageValidationRejection`) naming the character and the field.
+ * @param dimension - Catalog code of the candidate. @param markdown - Its contentMarkdown.
+ * @param options - Version gate, switch, and character cap.
+ */
+export function assertCharacterSheet(dimension: string, markdown: string, options: CharacterSheetAdmission = {}): void {
+  if (dimension !== 'e5' && dimension !== 'e6') return
+  if (options.characterSheet === false) return
+  if ((options.promptVersion ?? CHARACTER_SHEET_PROMPT_VERSION) < CHARACTER_SHEET_PROMPT_VERSION) return
+  parseCharacterSheet(markdown, options.maxCharacters === undefined ? {} : { maxCharacters: options.maxCharacters })
+}
+
 export function checkSettingsDimensionScope(output: SettingsDimensionOutput, kind: SettingsDimensionKind): void {
   if (!ENUM_SETTINGS_KINDS.has(kind)) return
   if (output.facts.length > MAX_ENUM_SETTINGS_FACTS) {

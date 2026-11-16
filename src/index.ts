@@ -50,6 +50,13 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
    * A map names planning, review and body. `opencode-go` is rejected: OpenCode Go is a host subscription, and this plugin registers no adapter.
    */
   writingModel: string | { planning?: 'inherit' | { provider: string; model: string }; review?: 'inherit' | { provider: string; model: string }; body?: 'inherit' | { provider: string; model: string } }
+  /**
+   * Parse e5/e6 character cards on prompt version 10. Default true.
+   * Not copied into a run: versions before 10 never see it, so their prompts and stored records stay unchanged.
+   */
+  characterSheet: boolean
+  /** Maximum characters in one e5 or e6 dimension. Default 12. Not copied into a run. */
+  maxCharacters: number
   /** When false, research planning and research children do not run. Default false. Official settings retrieval is independent of this switch. */
   researchEnabled: boolean
   /** Skip research planning and research children when remaining native web-call slots are below this floor. Default 1. Settings official retrieval still runs. */
@@ -83,6 +90,8 @@ export const Config: z<Config> = z.object({
   reuseSettingsSnapshot: z.boolean().default(true),
   allowSettingsImport: z.boolean().default(false),
   aiToneBlocking: z.boolean().default(true),
+  characterSheet: z.boolean().default(true),
+  maxCharacters: z.number().default(12),
   writingModel: z.any().default('inherit'),
   researchEnabled: z.boolean().default(false),
   researchBudgetFloor: z.number().default(1),
@@ -118,6 +127,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!Number.isSafeInteger(config.maxRepairAttempts) || config.maxRepairAttempts < 0) throw new Error('maxRepairAttempts must be a finite nonnegative integer')
   if (config.stageTimeoutMs > 2_147_483_647) throw new Error('stageTimeoutMs exceeds the supported timer range')
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
+  if (typeof config.characterSheet !== 'boolean') throw new Error('characterSheet must be a boolean')
+  if (!Number.isSafeInteger(config.maxCharacters) || config.maxCharacters < 1) throw new Error('maxCharacters must be a finite positive integer')
   if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
   const writingModel = normalizeWritingModel(config.writingModel)
@@ -158,7 +169,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
   deliveryProjection = await registerStageDeliveryProjection(ctx)
-  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot })
+  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot, characterSheet: config.characterSheet, maxCharacters: config.maxCharacters })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)
   registerWritingTools(ctx, service, config.previewDirectory)
