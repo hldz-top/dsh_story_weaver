@@ -6,6 +6,7 @@ import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { evidenceQuoteOccurs, reportQuoteRepair, resolveEvidenceQuote, type QuoteRepair } from './evidence-quote.ts'
 import { openChecklistItems, openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import { expandParagraphCitations, type NumberedParagraph } from './paragraphs.ts'
+import { CHARACTER_REVIEW_ADVISORY, CHARACTER_REVIEW_BLOCKING, CHARACTER_REVIEW_CHECKS, characterCheckIdFromIssue, characterCheckIdFromSummary, type CharacterReviewCheck } from './review-metrics.ts'
 import { CHARACTER_SHEET_PROMPT_VERSION, parseCharacterSheet, type ParseCharacterSheetOptions } from './character-sheet.ts'
 import { HOOK_TYPES } from './hook-type.ts'
 import { checkPlantList, foreshadowPlantSchema } from './plant-ledger.ts'
@@ -39,6 +40,8 @@ const paragraphCitationSchema = z.strictObject({
 const reviewCategorySchema = z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style'])
 /** Version 12 review publication. Admission also accepts `pov` so a stored version-12 review reads back. */
 const reviewCategorySchemaV11 = z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style', 'pov'])
+/** Version 15 review publication. Versions 1–14 do not publish `character`. */
+const reviewCategorySchemaV15 = z.enum([...reviewCategorySchemaV11.options, 'character'])
 const paragraphIdSchema = z.string().regex(/^p[1-9][0-9]*$/u)
 const issueShape = {
   id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchema,
@@ -104,6 +107,22 @@ export const reviewParagraphSchemaV13 = reviewParagraphSchemaV11.extend({
   })),
 })
 /**
+ * Prompt version 15 review publication. Same fields as version 13, plus category `character`.
+ * Versions 1–14 keep their schemas. `characterReview: false` republishes version 13.
+ */
+export const reviewParagraphSchemaV15 = reviewParagraphSchemaV13.extend({
+  checks: z.array(z.strictObject({ category: reviewCategorySchemaV15, summary: text, evidence: z.array(paragraphCitationSchema).nonempty() })).nonempty(),
+  issues: z.array(z.strictObject({
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues and character-arc must be advisory. character-voice and character-function must be blocking. Every other category must be blocking.'),
+    category: reviewCategorySchemaV15,
+    location: text, message: text,
+    paragraphId: paragraphIdSchema.optional().describe('Required when this issue is the pov-limited check. One id from task.paragraphs.'),
+    briefQuote: text.optional().describe('Verbatim excerpt of the creative brief. Required when this blocking issue is completeness or obligations.'),
+    poison: poisonSchema,
+    evidence: z.array(paragraphCitationSchema).nonempty(),
+  })),
+})
+/**
  * Host marker on an issue none of whose evidence can be found in any admitted input: the issue is kept, made advisory,
  * and keeps its original citations so the marker can be re-verified on every readback. Never part of the model schema.
  */
@@ -119,9 +138,9 @@ const storedChecklistSchema = z.strictObject({
 /** The admitted (stored) review. Category `pov`, optional `paragraphId`, and optional `poison` read back. */
 const admittedReviewSchema = inputsSchema.extend({
   reviewed: inputRefSchema,
-  checks: z.array(z.strictObject({ category: reviewCategorySchemaV11, summary: text, evidence: z.array(citationSchema).nonempty() })).nonempty(),
+  checks: z.array(z.strictObject({ category: reviewCategorySchemaV15, summary: text, evidence: z.array(citationSchema).nonempty() })).nonempty(),
   issues: z.array(z.strictObject({
-    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchemaV11,
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchemaV15,
     location: text, message: text, paragraphId: paragraphIdSchema.optional(), evidence: z.array(citationSchema).nonempty(),
     briefQuote: text.optional(), poison: poisonSchema, hostDowngrade: hostDowngradeSchema.optional(),
   })),
@@ -135,6 +154,8 @@ export interface ReviewAdmission {
   readonly briefText: string
   /** Version 12 body reviews require the fixed `pov` check. Omitted on every earlier version and on readback. */
   readonly povLimited?: true
+  /** Version 15 body reviews require the three character checks. Omitted on every earlier version and on readback. */
+  readonly characterReview?: true
 }
 const obligationSchema = z.strictObject({ id: text, description: text })
 const targetWords = z.number().int().positive()
@@ -165,6 +186,12 @@ const bookOutlineSchema = inputsSchema.extend({
   })).nonempty(),
 })
 const sceneCard = z.array(z.strictObject({ id: text, purpose: text, action: text, obligationIds: z.array(text) })).nonempty()
+const sceneCastShape = {
+  cast: z.array(text).nonempty().optional().describe('Names present in this scene.'),
+  pov: text.optional().describe('Viewpoint character. One name from cast.'),
+  misread: z.string().optional().describe('Dominant frame: 利益, 礼法, 逻辑, 技艺, 生计, or 其它. An unknown value is kept and noted.'),
+}
+const sceneCardCast = z.array(z.strictObject({ id: text, purpose: text, action: text, obligationIds: z.array(text), ...sceneCastShape })).nonempty()
 /** Optional free-text state list (prompt version 2). No enums, so a loose note never costs a repair attempt. */
 const stateNotes = z.array(text).optional()
 /** Prompt versions 2–6 publish this schema. `targetWords` stays between `title` and `throughLine`, as in the frozen schema. */
@@ -177,14 +204,18 @@ export const chapterOutlineSchemaV7 = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), title: text, throughLine: text,
   constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
 })
-/** Version 15 publication. Optional `hookType` from the fixed checklist. Versions 1–14 keep {@link chapterOutlineSchemaV7}. */
+/** Version 15 publication with hookType and the version-7 scenes. `sceneCast: false` uses this. */
 export const chapterOutlineSchemaV15 = chapterOutlineSchemaV7.extend({
   hookType: z.enum(HOOK_TYPES).optional().describe('One closing hook: suspense, danger, gain, misread, or promise. Do not repeat the previous chapter.'),
 })
-/** Admission accepts a historical `targetWords`, a version-7 outline that omits it, and an optional version-15 hookType. */
+/** Version 15 scenes with cast, and no hookType. `hookRotation: false` uses this. */
+export const chapterOutlineSchemaCast = chapterOutlineSchemaV7.extend({ scenes: sceneCardCast })
+/** Version 15 publication when hook rotation and scene cast are both on. */
+export const chapterOutlineSchemaV15Cast = chapterOutlineSchemaV15.extend({ scenes: sceneCardCast })
+/** Admission accepts a historical `targetWords`, optional hookType, and optional scene cast fields. */
 const chapterOutlineSchema = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), title: text, targetWords: targetWords.optional(), throughLine: text,
-  constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
+  constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCardCast, stateNotes,
   hookType: z.enum(HOOK_TYPES).optional(),
 })
 const bodySchema = inputsSchema.extend({
@@ -241,8 +272,8 @@ const continuitySchema = continuitySchemaV14.extend({
 export type StageInputRef = z.infer<typeof inputRefSchema>
 /** Generated candidate for one selected settings dimension; application is host-owned. */
 export type SettingsDimensionOutput = z.infer<typeof settingsSchema>
-/** Substantive review categories. `pov` is published and required only for a version-12 body review. */
-export type ReviewCategory = z.infer<typeof reviewCategorySchemaV11>
+/** Review categories. `character` is published only on prompt version 15. Earlier published schemas omit it. */
+export type ReviewCategory = z.infer<typeof reviewCategorySchemaV15>
 /** Review findings tied to an exact candidate and quoted source versions. */
 export type ReviewOutput = z.infer<typeof admittedReviewSchema>
 /** Ordered book structure, character development, ending, and chapter obligations. */
@@ -306,6 +337,35 @@ export const StageOutputSchemas = {
   settings: settingsSchema, review: reviewSchema, 'book-outline': bookOutlineSchema, 'chapter-outline': chapterOutlineSchema,
   body: bodySchema, continuity: continuitySchema, 'continuity-snapshot': continuitySnapshotSchema,
 } as const
+
+function reviewUsesCharacter(value: { readonly checks: readonly { readonly category: string }[]; readonly issues: readonly { readonly category: string }[] }): boolean {
+  return value.checks.some(check => check.category === 'character') || value.issues.some(issue => issue.category === 'character')
+}
+
+function assertCharacterChecks(checks: readonly { readonly category: string; readonly summary: string }[]): void {
+  const present = new Set<CharacterReviewCheck>()
+  for (const check of checks) {
+    if (check.category !== 'character') continue
+    const id = characterCheckIdFromSummary(check.summary)
+    if (id !== undefined) present.add(id)
+  }
+  const missing = CHARACTER_REVIEW_CHECKS.filter(id => !present.has(id))
+  if (missing.length > 0) throw new StageValidationRejection(`Review is missing a required character check: ${missing.join(', ')} (required: ${CHARACTER_REVIEW_CHECKS.join(', ')})`)
+}
+
+function assertCharacterIssueSeverity(issue: { readonly id: string; readonly category: string; readonly severity: string }): void {
+  const check = characterCheckIdFromIssue(issue.id)
+  if (issue.category !== 'character' || check === undefined) {
+    throw new StageValidationRejection(`Character issue ${echo(issue.id)} must use category character and an id of character-voice, character-function, or character-arc.`)
+  }
+  if (check === CHARACTER_REVIEW_ADVISORY) {
+    if (issue.severity !== 'advisory') throw new StageValidationRejection(`character-arc is fixed advisory: issue ${echo(issue.id)} is ${issue.severity}`)
+    return
+  }
+  if (!(CHARACTER_REVIEW_BLOCKING as readonly string[]).includes(check) || issue.severity !== 'blocking') {
+    throw new StageValidationRejection(`${check} issues must be blocking: issue ${echo(issue.id)} is ${issue.severity}`)
+  }
+}
 
 function unique(values: readonly string[], label: string): void {
   const seen = new Set<string>()
@@ -612,16 +672,24 @@ export function parseReviewOutput(value: unknown, expected: {
   if (output.reviewed.artifactId !== expected.reviewed.artifactId || output.reviewed.sha256 !== expected.reviewed.sha256) {
     throw new StageValidationRejection(`Reviewed artifact differs from the requested candidate version: got ${output.reviewed.artifactId}@${output.reviewed.sha256.slice(0, 12)}, expected ${expected.reviewed.artifactId}@${expected.reviewed.sha256.slice(0, 12)}`)
   }
-  unique(output.checks.map(check => check.category), 'review check category')
+  unique(output.checks.map(check => check.category === 'character' ? `character:${characterCheckIdFromSummary(check.summary) ?? check.summary}` : check.category), 'review check category')
   unique(output.issues.map(issue => issue.id), 'review issue ID')
   unique(expected.evidenceSources.map(source => source.artifactId), 'evidence source')
+  if (expected.admission !== undefined && expected.admission.characterReview !== true && reviewUsesCharacter(output)) {
+    throw new StageValidationRejection('Review category character is not part of this prompt version')
+  }
   const requiredChecks = expected.admission?.povLimited === true && !expected.requiredChecks.includes('pov')
     ? [...expected.requiredChecks, 'pov' as const]
     : expected.requiredChecks
   const missingChecks = requiredChecks.filter(category => !output.checks.some(check => check.category === category))
   if (missingChecks.length > 0) throw new StageValidationRejection(`Review is missing a required check: ${missingChecks.join(', ')} (required: ${requiredChecks.join(', ')})`)
+  if (expected.admission?.characterReview === true) assertCharacterChecks(output.checks)
   for (const issue of output.issues) {
     if (issue.poison !== undefined && issue.category !== 'style') throw new StageValidationRejection(`poison belongs only on a style issue: issue ${echo(issue.id)} is ${issue.category}`)
+    if (issue.category === 'character' || characterCheckIdFromIssue(issue.id) !== undefined) {
+      assertCharacterIssueSeverity(issue)
+      continue
+    }
     if (issue.category === 'pov' || (expected.admission?.povLimited === true && (issue.id === 'pov-limited' || issue.id.startsWith('pov-limited-')))) {
       if (issue.category !== 'pov' || (issue.id !== 'pov-limited' && !issue.id.startsWith('pov-limited-'))) {
         throw new StageValidationRejection(`A pov-limited issue must use category pov and an id of pov-limited. Issue ${echo(issue.id)} is ${issue.category}.`)

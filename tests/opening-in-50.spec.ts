@@ -18,5 +18,5 @@ it('flags a chapter-1 opening that misses a person, an event, or a conflict', ()
 it('adds the opening sentence only on version 15', () => {
   expect(buildStagePrompt({ ...prompt, kind: 'body', promptVersion: 14 })).not.toContain('first 50 Story-counted words')
   expect(buildStagePrompt({ ...prompt, kind: 'body', promptVersion: 15 })).toContain('first 50 Story-counted words')
-  expect(buildStagePrompt({ ...prompt, kind: 'body', promptVersion: 15, openingIn50: false })).toBe(buildStagePrompt({ ...prompt, kind: 'body', promptVersion: 14 }))
+  expect(buildStagePrompt({ ...prompt, kind: 'body', promptVersion: 15, openingIn50: false, sceneCast: false })).toBe(buildStagePrompt({ ...prompt, kind: 'body', promptVersion: 14 }))
 })

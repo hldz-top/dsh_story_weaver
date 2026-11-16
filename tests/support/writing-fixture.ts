@@ -42,7 +42,7 @@ const taskSchema = z.object({
   batch: z.enum(['draft', 'consistency', 'repair']).optional(), codes: z.array(z.string()).optional(),
   chapterCount: z.number().int().positive().optional(), sceneIds: z.array(z.string()).optional(),
   obligations: z.array(z.object({ id: z.string(), description: z.string() })).optional(),
-  requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style', 'pov'])).optional(),
+  requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style', 'pov', 'character'])).optional(),
   reviewed: inputRef.optional(), bodyId: artifactIdSchema.optional(),
   measuredWordCount: z.number().nullable().optional(),
   measuredLength: z.object({ status: z.enum(['within-range', 'too-short', 'too-long']), blocking: z.boolean() }).nullable().optional(),
@@ -273,7 +273,12 @@ function generate(state: ChildState): object {
       const evidence = task.paragraphs !== undefined && task.paragraphs.length > 0
         ? [{ paragraphId: task.paragraphs[0]!.id, problem: '这段引文覆盖本项检查所读的候选段落。' }]
         : [{ artifactId: reviewed.artifactId, quote: quoteCandidate(source(state, reviewed.artifactId)) }]
-      const checks = required(task.requiredChecks, 'requiredChecks').map(category => ({ category, summary: category === 'length' ? `宿主计数 ${task.measuredWordCount}；${task.measuredLength?.status}。` : `已读候选并完成${category}检查。`, evidence }))
+      const checks: { category: string; summary: string; evidence: typeof evidence }[] = []
+      for (const category of required(task.requiredChecks, 'requiredChecks')) {
+        if (category === 'character') {
+          for (const id of ['character-voice', 'character-function', 'character-arc'] as const) checks.push({ category, summary: `${id}：这段引文说明该项通过。`, evidence })
+        } else checks.push({ category, summary: category === 'length' ? `宿主计数 ${task.measuredWordCount}；${task.measuredLength?.status}。` : `已读候选并完成${category}检查。`, evidence })
+      }
       const issues = task.measuredLength?.blocking === true ? [{ id: 'fixture-length', severity: 'blocking', category: 'length', location: '整章', message: '宿主测得本章超出规定的章节总字数范围。', evidence }] : []
       return { ...base, reviewed, checks, issues }
     }

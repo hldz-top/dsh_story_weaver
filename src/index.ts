@@ -75,6 +75,22 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   /** Maximum characters in one e5 or e6 dimension. Default 12. Not stored on the run. */
   maxCharacters: number
   /**
+   * Version 15 scene cast fields. Default true. Not stored on the run and not a field of story_writing.json.
+   * False omits cast, pov and misread from the chapter-outline schema and prompt.
+   */
+  sceneCast: boolean
+  /** Reject a cast name that is not on the character card. Default false. Not stored on the run. */
+  strictCast: boolean
+  /** Inject present-character cards into the body task. Default true. Not stored on the run. */
+  castInjection: boolean
+  /** Han-character budget of those cards. Default 1200. Not stored on the run. */
+  maxCastCardChars: number
+  /**
+   * Version 15 character review and metrics. Default true. Not stored on the run and not a field of story_writing.json.
+   * False keeps the version-14 review prompt and schema. Metrics never block a chapter.
+   */
+  characterReview: boolean
+  /**
    * Lowest AI-tone grade a poison repair will touch on prompt version 13. `heavy` repairs only heavy poisons; a notice
    * is recorded and a hint is ignored. Frozen into each new version-13 run. Default `heavy`. It does not fail a chapter.
    */
@@ -123,6 +139,11 @@ export const Config: z<Config> = z.object({
   openingIn50: z.boolean().default(true),
   characterSheet: z.boolean().default(true),
   maxCharacters: z.number().default(12),
+  sceneCast: z.boolean().default(true),
+  strictCast: z.boolean().default(false),
+  castInjection: z.boolean().default(true),
+  maxCastCardChars: z.number().default(1200),
+  characterReview: z.boolean().default(true),
   aiToneRepairFloor: z.union([z.const('hint'), z.const('notice'), z.const('heavy')]).default('heavy'),
   writingModel: z.any().default('inherit'),
   researchEnabled: z.boolean().default(false),
@@ -165,6 +186,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (typeof config.openingIn50 !== 'boolean') throw new Error('openingIn50 must be a boolean')
   if (typeof config.characterSheet !== 'boolean') throw new Error('characterSheet must be a boolean')
   if (!Number.isSafeInteger(config.maxCharacters) || config.maxCharacters < 1) throw new Error('maxCharacters must be a finite positive integer')
+  if (typeof config.sceneCast !== 'boolean') throw new Error('sceneCast must be a boolean')
+  if (typeof config.strictCast !== 'boolean') throw new Error('strictCast must be a boolean')
+  if (typeof config.castInjection !== 'boolean') throw new Error('castInjection must be a boolean')
+  if (!Number.isSafeInteger(config.maxCastCardChars) || config.maxCastCardChars < 1) throw new Error('maxCastCardChars must be a finite positive integer')
+  if (typeof config.characterReview !== 'boolean') throw new Error('characterReview must be a boolean')
   if (!AI_TONE_REPAIR_FLOORS.includes(config.aiToneRepairFloor)) throw new Error('aiToneRepairFloor must be hint, notice, or heavy')
   if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
@@ -206,7 +232,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
   deliveryProjection = await registerStageDeliveryProjection(ctx)
-  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot, plantLedger: config.plantLedger, hookRotation: config.hookRotation, openingIn50: config.openingIn50, characterSheet: config.characterSheet, maxCharacters: config.maxCharacters })
+  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot, plantLedger: config.plantLedger, hookRotation: config.hookRotation, openingIn50: config.openingIn50, characterSheet: config.characterSheet, maxCharacters: config.maxCharacters, sceneCast: config.sceneCast, strictCast: config.strictCast, castInjection: config.castInjection, maxCastCardChars: config.maxCastCardChars, characterReview: config.characterReview })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)
   registerWritingTools(ctx, service, config.previewDirectory)

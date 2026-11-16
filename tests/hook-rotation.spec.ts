@@ -23,5 +23,5 @@ it('publishes hookType only at version 15 and keeps versions 1–14 unchanged', 
   expect(JSON.stringify(nativeStageOutputSchema('chapter-outline', 15, { hookRotation: false }))).not.toContain('hookType')
   expect(buildStagePrompt({ ...prompt, kind: 'chapter-outline', promptVersion: 14 })).not.toContain('hookType')
   expect(buildStagePrompt({ ...prompt, kind: 'chapter-outline', promptVersion: 15 })).toContain('suspense, danger, gain, misread, promise')
-  expect(buildStagePrompt({ ...prompt, kind: 'chapter-outline', promptVersion: 15, hookRotation: false, plantLedger: false })).toBe(buildStagePrompt({ ...prompt, kind: 'chapter-outline', promptVersion: 14 }))
+  expect(buildStagePrompt({ ...prompt, kind: 'chapter-outline', promptVersion: 15, hookRotation: false, plantLedger: false, sceneCast: false })).toBe(buildStagePrompt({ ...prompt, kind: 'chapter-outline', promptVersion: 14 }))
 })

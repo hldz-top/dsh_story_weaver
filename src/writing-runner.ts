@@ -10,7 +10,8 @@ import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
-import { CharacterSheetRejection, DEFAULT_MAX_CHARACTERS } from './character-sheet.ts'
+import { CharacterSheetRejection, DEFAULT_MAX_CHARACTERS, parseCharacterSheet } from './character-sheet.ts'
+import { assertKnownCast, assertSceneCastFields, buildCastInjection, castTaskFields, DEFAULT_MAX_CAST_CARD_CHARS, mergeCharacterSheets } from './scene-cast.ts'
 import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, characterDimensionsForStage, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
 import { aiToneHits, gradeAiTone, selectPoisonRepairHits, type AiToneRepairFloor } from './ai-tone.ts'
@@ -28,7 +29,7 @@ import { openingIn50Miss, openingIn50RepairInstruction } from './opening-in-50.t
 import { advisoryPlantHints, attachContinuityPlants, softenPlantField } from './plant-ledger.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
-import { measureChapterMetrics, type PreviousChapterSnapshot } from './review-metrics.ts'
+import { appendCharacterMetricWarnings, measureChapterMetrics, measureCharacterMetrics, protagonistFreeSceneCount, type CharacterMetrics, type PreviousChapterSnapshot } from './review-metrics.ts'
 import { failureSignature, nextFailureRepair, skipFailureRound, type FailureStreak } from './failure-signoff.ts'
 import { extractRequiredEvents, missingRequiredEvents, requiredEventRepairInstruction, type MissingRequiredEvent } from './required-events.ts'
 import { povHeuristicReport, viewpointName, type PovHeuristicReport } from './pov-limited.ts'
@@ -79,6 +80,24 @@ export interface WritingRunnerOptions {
   readonly characterSheet?: boolean
   /** Cap for one e5 or e6 dimension. Default 12. Not stored on the run. */
   readonly maxCharacters?: number
+  /**
+   * Version 15 scene cast, viewpoint and misread. Default true. Not stored on the run.
+   * False keeps the chapter-outline schema and prompt that version 15 would use without those fields.
+   * A viewpoint outside the cast, or an illegal misread, is an advisory note and does not fail the outline.
+   */
+  readonly sceneCast?: boolean
+  /** Reject cast names that are not on the character card. Default false. Not stored on the run. */
+  readonly strictCast?: boolean
+  /** Inject present-character cards into the body task. Default true. Not stored on the run. */
+  readonly castInjection?: boolean
+  /** Han-character budget of those cards. Default 1200. Not stored on the run. */
+  readonly maxCastCardChars?: number
+  /**
+   * Version 15 character review. Default true. Not stored on the run.
+   * False keeps the version-14 review prompt and schema. Character metrics never change issue severity
+   * and never join a failure signature. A missing character check uses the existing review repair budget.
+   */
+  readonly characterReview?: boolean
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -237,16 +256,19 @@ export class WritingRunner {
   private closed = false
   /** Advisory plant notes for the next chapter outline, keyed by novel and chapter. Not a failure and not stored on the run. */
   private readonly plantAdvisories = new Map<string, string[]>()
+  /** Advisory cast notes for a chapter body. They do not fail the outline. */
+  private readonly castAdvisories = new Map<string, string[]>()
   /** @param ctx - Existing DSH capabilities. @param service - Version owner. @param runs - Durable run owner. @param limits - Explicit deployment limits copied into new runs. @param deliveries - Awaited native document publisher. */
   constructor(private readonly ctx: Context, private readonly service: WritingService, readonly runs: RunStore, readonly limits: RunExecutionLimits, private readonly deliveries: StageDeliveries, private readonly options: WritingRunnerOptions = {}) {}
 
   /** @param exec - Calling native tool. @param input - Explicit novel, brief and chapter scope. @returns Terminal progress after all native work has stopped. */
-  async start(exec: ToolExecution, input: StartWritingInput): Promise<WritingRun> {
+  async start(exec: ToolExecution, input: StartWritingInput & { readonly promptVersion?: PromptVersion }): Promise<WritingRun> {
     const actor = await writingActor(this.ctx, exec)
     this.admit(actor, input)
     this.requirePresentation(exec)
+    const { promptVersion, ...request } = input
     return this.admission(async () => {
-      const run = await this.runs.begin(actor, { ...input, revision: null, executionLimits: this.limits, serviceLimits: this.serviceLimits() })
+      const run = await this.runs.begin(actor, { ...request, revision: null, executionLimits: this.limits, serviceLimits: this.serviceLimits() }, promptVersion)
       return this.launchAdmitted(exec, actor, run)
     })
   }
@@ -1193,11 +1215,12 @@ export class WritingRunner {
     let defect: FailureStreak | null = null
     let pendingDefectNote: string | null = null
     const plantHints = target.kind === 'chapter-outline' ? this.plantHintLines(inv, context.inputRefs, target.chapterNumber) : []
+    const castFields = target.kind === 'body' ? this.bodyCastTask(inv, target.chapterNumber) : {}
     for (let repair = 0; repair <= repairCap; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       const sameDefectNote = promptVersionOf(inv.run) >= 14 && target.kind === 'body' ? pendingDefectNote ?? undefined : undefined
       aiToneSpans = []
-      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError, ...(plantHints.length > 0 ? { plantHints } : {}) }
+      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError, ...(plantHints.length > 0 ? { plantHints } : {}), ...castFields }
       const outlineKind: OutlineRepairKind | null = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? target.kind : null
       const outlinePatching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
       const bodyPatching = target.kind === 'body' && bodyRepairUsesPatch(promptVersionOf(inv.run), target.kind, priorBody !== null)
@@ -1281,7 +1304,8 @@ export class WritingRunner {
       else if (poison === null || poison.spans.length === 0) previousPoisonKeys = null
       const hookInstruction = target.kind === 'chapter-outline' ? this.repeatedHook(inv, structured, target.chapterNumber) : null
       const openingInstruction = target.kind === 'body' ? this.openingInstruction(inv, structured) : null
-      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && openingInstruction === null
+      const castStrict = target.kind === 'chapter-outline' ? this.strictCastInstruction(inv, structured) : null
+      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && openingInstruction === null && castStrict === null
       if (promptVersionOf(inv.run) >= 8 && reviewBlocked && reviewed.review !== null) {
         const fails = blockingIssueCount(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: reviewed.review.id }).text))
         const decision = checklistRepairDecision(heldReview?.fails ?? null, fails, 'does-not-decrease')
@@ -1293,7 +1317,7 @@ export class WritingRunner {
         }
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
-      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && openingInstruction === null
+      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && openingInstruction === null && castStrict === null
       if (clean && !styleRepair) return { candidate: reviewed, convergence: null }
       if (promptVersionOf(inv.run) >= 14 && target.kind === 'body') {
         // Poison, style, and blocking AI-tone rounds are not a signed-off defect. They do not record a signature,
@@ -1319,17 +1343,19 @@ export class WritingRunner {
           }
         }
       } else pendingDefectNote = null
-      const hostChecks = [openingInstruction, hookInstruction]
-      if (aiToneSpans.length > 0) { validationError = withHostChecks(withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction), hostChecks); repairMode = 'review' }
-      else if (incomplete) { validationError = withHostChecks(withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction), hostChecks); repairMode = 'review' }
-      else if (reviewed.length?.blocking) { validationError = withHostChecks(withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction), hostChecks); repairMode = 'length' }
-      else if ((eventInstruction !== null || hookInstruction !== null || openingInstruction !== null) && reviewed.status !== 'blocked') { validationError = withHostChecks(eventInstruction ?? '', hostChecks); repairMode = 'review' }
+      const characterMetrics = target.kind === 'body' ? this.characterMetricsOf(inv, structured) : undefined
+      const hostChecks = [openingInstruction, hookInstruction, castStrict]
+      const note = (text: string) => appendCharacterMetricWarnings(withHostChecks(text, hostChecks), characterMetrics)
+      if (aiToneSpans.length > 0) { validationError = note(withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction)); repairMode = 'review' }
+      else if (incomplete) { validationError = note(withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction)); repairMode = 'review' }
+      else if (reviewed.length?.blocking) { validationError = note(withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction)); repairMode = 'length' }
+      else if ((eventInstruction !== null || hookInstruction !== null || openingInstruction !== null || castStrict !== null) && reviewed.status !== 'blocked') { validationError = note(eventInstruction ?? ''); repairMode = 'review' }
       else if (clean && styleRepair && poison !== null) {
         if (promptVersionOf(inv.run) >= 13) cleanPoisonBody = reviewed
-        validationError = aiTonePoisonRepairInstruction(poison.spans)
+        validationError = appendCharacterMetricWarnings(aiTonePoisonRepairInstruction(poison.spans), characterMetrics)
         repairMode = 'review'
       }
-      else { validationError = withHostChecks(withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction), hostChecks); repairMode = 'review' }
+      else { validationError = note(withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction)); repairMode = 'review' }
       feedback = this.feedback(reviewed)
     }
     // Never auto-pass: a body still carrying blocking AI tone when repairs run out ends review-blocked and is not applied.
@@ -1341,10 +1367,10 @@ export class WritingRunner {
   }
 
   /** Prompt version 8 model reviews. Earlier runs and host-synthesized reviews omit it. Version 12 body reviews also require pov-limited. */
-  private reviewAdmission(inv: Invocation, povLimited = false): { readonly admission?: ReviewAdmission } {
+  private reviewAdmission(inv: Invocation, povLimited = false, characterReview = false): { readonly admission?: ReviewAdmission } {
     if (promptVersionOf(inv.run) < 8) return {}
     const brief = this.service.getNovel(inv.actor, inv.run.novelId).brief
-    return { admission: { chinese: true, briefText: this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: brief.id }).text, ...(povLimited ? { povLimited: true as const } : {}) } }
+    return { admission: { chinese: true, briefText: this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: brief.id }).text, ...(povLimited ? { povLimited: true as const } : {}), ...(characterReview ? { characterReview: true as const } : {}) } }
   }
 
   private reviewIssues(inv: Invocation, reviewed: ManuscriptCandidateView): { readonly category?: string; readonly id?: string; readonly paragraphId?: string; readonly poison?: string }[] {
@@ -1356,10 +1382,15 @@ export class WritingRunner {
 
   private async reviewManuscript(inv: Invocation, key: string, candidate: ManuscriptCandidateView, requiredChecks: readonly ReviewCategory[]): Promise<ManuscriptCandidateView> {
     const povLimited = promptVersionOf(inv.run) >= 12 && candidate.target.kind === 'body'
-    const checks = povLimited && !requiredChecks.includes('pov') ? [...requiredChecks, 'pov' as const] : requiredChecks
+    const characterReview = promptVersionOf(inv.run) >= 15 && this.options.characterReview !== false && candidate.target.kind === 'body'
+    const checks = [
+      ...requiredChecks,
+      ...(povLimited && !requiredChecks.includes('pov') ? ['pov' as const] : []),
+      ...(characterReview && !requiredChecks.includes('character') ? ['character' as const] : []),
+    ]
     return this.reviewLoop(inv, key, candidate, checks, (result, reviewKey) => this.service.saveManuscriptReview(inv.actor, {
       novelId: inv.run.novelId, candidateId: candidate.artifact.id, expectedReviewId: null,
-      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv, povLimited) }))
+      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv, povLimited, characterReview) }))
   }
 
   /**
@@ -1442,20 +1473,53 @@ export class WritingRunner {
    * Advisory body measurements for a version-11 review. Older runs and every other review omit the fields.
    * `metricsBlocking` is the recorded flag. Metric rows, including a missed eventHits keyword, do not change admission.
    */
-  private reviewMetrics(inv: Invocation, reviewedKind: StagePromptKind, storedText: string, sources: readonly { readonly id: string; readonly kind: string; readonly text: string }[]): { readonly metrics: ReturnType<typeof measureChapterMetrics>; readonly metricsBlocking: boolean } | Record<string, never> {
+  private reviewMetrics(inv: Invocation, reviewedKind: StagePromptKind, storedText: string, sources: readonly { readonly id: string; readonly kind: string; readonly text: string }[]): { readonly metrics: ReturnType<typeof measureChapterMetrics> & { readonly character?: CharacterMetrics }; readonly metricsBlocking: boolean } | Record<string, never> {
     if (promptVersionOf(inv.run) < 11 || reviewedKind !== 'body') return {}
     let output: BodyOutput
     try { output = StageOutputSchemas.body.parse(JSON.parse(storedText)) }
     catch { throw new WritingError('corrupt-artifact', 'Admitted chapter body cannot be measured') }
     const brief = sources.find(source => source.kind === 'creative-brief' && source.id === inv.run.briefArtifactId)
     if (brief === undefined) throw new WritingError('corrupt-artifact', 'Body review has no creative brief for chapter metrics')
-    const metrics = measureChapterMetrics({
+    const measured = measureChapterMetrics({
       text: assembleBody(output),
       previousSnapshot: previousSnapshot(sources, output.chapterNumber),
       briefText: brief.text,
       settingsTexts: sources.filter(source => source.kind === 'settings' || source.kind === 'settings-dimension').map(source => proseView(source.kind, source.text)),
     })
-    return { metrics, metricsBlocking: metricsBlockingOf(inv.run) }
+    const character = promptVersionOf(inv.run) >= 15 && this.options.characterReview !== false ? this.characterMetricsOf(inv, output) : undefined
+    return { metrics: character === undefined ? measured : { ...measured, character }, metricsBlocking: metricsBlockingOf(inv.run) }
+  }
+
+  /** Character metrics for an admitted body. A missing card omits them and does not fail the chapter. */
+  private characterMetricsOf(inv: Invocation, value: unknown): CharacterMetrics | undefined {
+    if (promptVersionOf(inv.run) < 15 || this.options.characterReview === false) return undefined
+    const body = StageOutputSchemas.body.safeParse(value)
+    if (!body.success) return undefined
+    const sheet = this.characterSheet(inv)
+    if (sheet === null) return undefined
+    const outline = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === body.data.chapterNumber)
+    const scenes = outline === undefined ? [] : (StageOutputSchemas['chapter-outline'].safeParse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outline.artifact.id }).text)).data?.scenes ?? [])
+    const book = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'book-outline')
+    const protagonist = book === undefined ? null : (StageOutputSchemas['book-outline'].safeParse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: book.artifact.id }).text)).data?.characterArcs[0]?.character ?? null)
+    const recent = this.recentFreeScenes(inv, body.data.chapterNumber, protagonist)
+    return measureCharacterMetrics({ bodyText: assembleBody(body.data), scenes, sheet, protagonistName: protagonist, recentProtagonistFreeScenes: recent })
+  }
+
+  private recentFreeScenes(inv: Invocation, chapterNumber: number, protagonist: string | null): number[] {
+    if (protagonist === null) return []
+    const applied = this.service.getManuscript(inv.actor, inv.run.novelId).appliedChapters
+    const counts: number[] = []
+    for (let number = chapterNumber - 1; number >= 1 && counts.length < 2; number--) {
+      if (!applied.some(item => item.chapterNumber === number)) break
+      const outline = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === number)
+      if (outline === undefined) break
+      const scenes = StageOutputSchemas['chapter-outline'].safeParse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outline.artifact.id }).text)).data?.scenes
+      if (scenes === undefined) break
+      const count = protagonistFreeSceneCount(scenes, protagonist)
+      if (count === null) break
+      counts.unshift(count)
+    }
+    return counts
   }
 
   private async research(inv: Invocation, key: string, refs: readonly ArtifactRef[], purpose: string, outputTarget: object) {
@@ -1652,8 +1716,11 @@ export class WritingRunner {
       ...(promptVersion >= 15 && this.options.plantLedger === false ? { plantLedger: false as const } : {}),
       ...(promptVersion >= 15 && this.options.hookRotation === false ? { hookRotation: false as const } : {}),
       ...(promptVersion >= 15 && this.options.openingIn50 === false ? { openingIn50: false as const } : {}),
-      ...(characterDimensions.length === 0 ? {} : { characterDimensions, maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS }) })
-    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion, { plantLedger: this.options.plantLedger !== false, hookRotation: this.options.hookRotation !== false }))
+      ...(characterDimensions.length === 0 ? {} : { characterDimensions, maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS }),
+      ...(promptVersion >= 15 && this.options.sceneCast === false ? { sceneCast: false as const } : {}),
+      ...(promptVersion >= 15 && this.options.castInjection === false ? { castInjection: false as const } : {}),
+      ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 15 && this.options.characterReview === false ? { characterReview: false as const } : {}) })
+    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion, { plantLedger: this.options.plantLedger !== false, hookRotation: this.options.hookRotation !== false, sceneCast: this.options.sceneCast !== false, characterReview: this.options.characterReview !== false }))
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.
     const direct = batch !== 'consistency' && (kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot')
     return this.capture(inv, key, prompt, allRefs, schema, direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, stageWritingRole(kind), direct)
@@ -1720,6 +1787,69 @@ export class WritingRunner {
     if (prior === undefined) return null
     const priorOutline = StageOutputSchemas['chapter-outline'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: prior.artifact.id }).text))
     return repeatedHookInstruction(outline.data.hookType, priorOutline.hookType)
+  }
+
+  /**
+   * Viewpoint and misread defects are advisory. Unknown cast names fail the outline only when strictCast is on.
+   * @returns The strictCast repair sentence, or null when the outline round should continue.
+   */
+  private strictCastInstruction(inv: Invocation, structured: unknown): string | null {
+    if (promptVersionOf(inv.run) < 15 || this.options.sceneCast === false) return null
+    const outline = StageOutputSchemas['chapter-outline'].safeParse(structured)
+    if (!outline.success) return null
+    try { assertSceneCastFields(outline.data.scenes) }
+    catch (cause) {
+      if (!(cause instanceof StageValidationRejection)) throw cause
+      const key = `${inv.run.novelId}:${outline.data.chapterNumber}`
+      this.castAdvisories.set(key, [...(this.castAdvisories.get(key) ?? []), `Advisory cast: ${cause.message} The outline is kept.`])
+    }
+    if (this.options.strictCast !== true) return null
+    const known = this.characterNames(inv)
+    if (known === null) return null
+    try { assertKnownCast(outline.data.scenes, known) }
+    catch (cause) {
+      if (!(cause instanceof StageValidationRejection)) throw cause
+      return cause.message
+    }
+    return null
+  }
+
+  /** Names on a parsed e5/e6 card. A missing or unparsed card does not reject the outline. */
+  private characterNames(inv: Invocation): Set<string> | null {
+    const sheet = this.characterSheet(inv)
+    return sheet === null ? null : new Set(sheet.core.map(row => row.name))
+  }
+
+  private characterSheet(inv: Invocation) {
+    if (promptVersionOf(inv.run) < 15 || this.options.characterSheet === false) return null
+    const settings = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'settings')
+    if (settings === undefined) return null
+    try {
+      const text = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: settings.artifact.id }).text
+      const collection = settingsCollectionSchema.safeParse(JSON.parse(text))
+      if (!collection.success) return null
+      const markdowns = collection.data.dimensions.flatMap(dimension => dimension.dimensionCode === 'e5' || dimension.dimensionCode === 'e6' ? [dimension.contentMarkdown] : [])
+      const sheets = []
+      for (const markdown of markdowns) {
+        try { sheets.push(parseCharacterSheet(markdown, { maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS })) }
+        catch (cause) { if (cause instanceof CharacterSheetRejection) return null; throw cause }
+      }
+      return mergeCharacterSheets(sheets)
+    } catch { return null }
+  }
+
+  /** Body-task cards. Older runs, a closed switch, and a missing card add no keys. */
+  private bodyCastTask(inv: Invocation, chapterNumber: number): ReturnType<typeof castTaskFields> & { readonly castAdvisory?: readonly string[] } {
+    if (promptVersionOf(inv.run) < 15 || this.options.sceneCast === false || this.options.castInjection === false) return {}
+    const outline = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === chapterNumber)
+    if (outline === undefined) return {}
+    const parsed = StageOutputSchemas['chapter-outline'].safeParse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outline.artifact.id }).text))
+    if (!parsed.success) return {}
+    const injection = buildCastInjection(parsed.data.scenes, {
+      sheet: this.characterSheet(inv), castInjection: true, maxCastCardChars: this.options.maxCastCardChars ?? DEFAULT_MAX_CAST_CARD_CHARS,
+    })
+    const advisory = this.castAdvisories.get(`${inv.run.novelId}:${chapterNumber}`) ?? []
+    return { ...castTaskFields(injection), ...(advisory.length === 0 ? {} : { castAdvisory: advisory }) }
   }
 
   /** Chapter 1 opening miss. Other chapters, and a closed switch, are not a repair. */

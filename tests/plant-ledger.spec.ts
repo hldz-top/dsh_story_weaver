@@ -81,7 +81,7 @@ it('publishes plants only at version 15 and leaves versions 1–14 unchanged', (
   expect(JSON.stringify(nativeStageOutputSchema('continuity', 15, { plantLedger: false }))).not.toContain('"plants"')
   for (const kind of kinds) {
     if (kind !== 'continuity' && kind !== 'chapter-outline' && kind !== 'body') expect(buildStagePrompt({ ...prompt, kind, promptVersion: 15 }), kind).toBe(buildStagePrompt({ ...prompt, kind, promptVersion: 14 }))
-    if (kind !== 'continuity' && kind !== 'continuity-snapshot' && kind !== 'chapter-outline') expect(JSON.stringify(nativeStageOutputSchema(kind, 15)), kind).toBe(JSON.stringify(nativeStageOutputSchema(kind, 14)))
+    if (kind !== 'continuity' && kind !== 'continuity-snapshot' && kind !== 'chapter-outline' && kind !== 'review') expect(JSON.stringify(nativeStageOutputSchema(kind, 15)), kind).toBe(JSON.stringify(nativeStageOutputSchema(kind, 14)))
   }
   expect(buildStagePrompt({ ...prompt, kind: 'continuity', promptVersion: 14 })).not.toContain('Carry forward every open plant')
   expect(buildStagePrompt({ ...prompt, kind: 'chapter-outline', promptVersion: 14 })).not.toContain('task.plantHints')
