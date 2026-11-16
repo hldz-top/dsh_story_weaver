@@ -71,7 +71,8 @@ export function projectNativeStageSchema(schema: object): ObjectJsonSchema {
  * Version 10 publishes the same schemas as version 9. Version 11 publishes the same schemas as version 10.
  * Advisory review metrics are task data, not output fields. Version 12 reviews add category `pov` and optional `paragraphId`.
  * Version 13 adds optional `poison` on each review issue. Version 14 publishes the same schemas as version 13.
- * Continuity and continuity snapshots stay on the version-9 schema.
+ * Version 15 is the gate for later optional fields. Until a check publishes one, version 15 uses the version-14 schema.
+ * Continuity and continuity snapshots stay on the version-9 schema through version 14.
  * @returns An object-root schema; the caller must still run canonical admission.
  */
 export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION): ObjectJsonSchema {

@@ -24,10 +24,13 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * Version 14, for new runs only, keeps the version 13 prompt text and published schemas. The first signed-off
  * body failure appends one repair sentence to the next round. A second identical signature stops before another
  * round. Versions 1–13 stay frozen.
+ * Version 15, for new runs only, is the gate for plants, hook rotation, the chapter-1 opening, character cards,
+ * scene cast and character review. Each of those sentences is added by its own check and only when that check is on.
+ * Versions 1–14 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 14
+export const CURRENT_PROMPT_VERSION: PromptVersion = 15
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
