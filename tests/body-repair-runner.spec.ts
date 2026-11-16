@@ -58,7 +58,7 @@ it('stores a patched body when a repair is requested, and the model reply is onl
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
-  expect(outcome.value.promptVersion).toBe(13)
+  expect(outcome.value.promptVersion).toBe(14)
 
   const draft = [...fixture.stages.values()].find(stage => stage.kind === 'body' && stage.task?.validationError == null)
   const repair = [...fixture.stages.values()].find(stage => asksForBodyPatch(stage))

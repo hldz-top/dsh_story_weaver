@@ -214,7 +214,7 @@ async function scripted(script: {
   return { fixture, bodyTasks, counts: () => ({ bodies, reviews }) }
 }
 
-async function write(fixture: Awaited<ReturnType<typeof useWritingFixture>>, version: 11 | 12 | 13 = 13): Promise<WritingRun> {
+async function write(fixture: Awaited<ReturnType<typeof useWritingFixture>>, version: 11 | 12 | 13 | 14 = 13): Promise<WritingRun> {
   const begun = await fixture.runs.begin(fixture.actor, { ...fixture.input, chapterCount: 1, throughChapter: 1, revision: null,
     executionLimits: fixture.runner.limits, serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits } }, version)
   await fixture.runs.finish(fixture.actor, begun.id, 'stopped', `Stored on prompt version ${version}.`)
@@ -247,6 +247,18 @@ describe('version 13 repairs a heavy poison and still applies the chapter', () =
     expect(lastLine(bodyTasks[1])).toEqual({ code: 'style-repair', reason: 'ai-tone-poison', spans: ['——'] })
     expect(lastLine(aiTonePoisonRepairInstruction(['——']))).toEqual({ code: 'style-repair', reason: 'ai-tone-poison', spans: ['——'] })
     expect(run.attempts.filter(attempt => /^body\/1\/candidate\/\d+\/review\//u.test(attempt.key)).every(attempt => attempt.aiToneBlock === undefined)).toBe(true)
+  })
+
+  it('version 14 poison repair still applies the chapter and records no failure signature', { timeout: 120_000 }, async () => {
+    const { fixture, counts } = await scripted({
+      prefix: attempt => attempt === 0 ? '——'.repeat(80) : '',
+      quotes: review => review === 0 ? ['——'] : [],
+      poison: review => review === 0 ? 'forced' : undefined,
+    })
+    const run = await write(fixture, 14)
+    expect(run).toMatchObject({ status: 'completed', promptVersion: 14, error: null })
+    expect(counts()).toEqual({ bodies: 2, reviews: 2 })
+    expect(run.attempts.every(attempt => attempt.failureSignature === undefined)).toBe(true)
     expect(applied(fixture)).toBe(true)
   })
 
@@ -357,6 +369,21 @@ describe('version 13 repairs a heavy poison and still applies the chapter', () =
     const review = JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: chapter.bodyReview.id }).text) as { issues: { id?: string; severity?: string; poison?: string }[] }
     expect(review.issues.find(issue => issue.id === 'ai-tone-1')).toMatchObject({ severity: 'advisory', poison: 'forced' })
     expect(review.issues.some(issue => issue.severity === 'blocking')).toBe(false)
+  })
+
+  it('version 14 still applies the last clean body after a poison round and does not sign it off', { timeout: 120_000 }, async () => {
+    const marker = '——'.repeat(80)
+    const { fixture, counts } = await scripted({
+      prefix: attempt => attempt === 0 ? marker : '雨停了，他走了。',
+      quotes: review => review === 0 ? ['——'] : [],
+      poison: review => review === 0 ? 'forced' : undefined,
+      blocking: review => review > 0,
+    }, { executionLimits: { maxRepairAttempts: 1 } })
+    const run = await write(fixture, 14)
+    expect(run).toMatchObject({ status: 'completed', promptVersion: 14, error: null })
+    expect(counts().bodies).toBe(3)
+    expect(applied(fixture)).toBe(true)
+    expect(run.attempts.every(attempt => attempt.failureSignature === undefined)).toBe(true)
   })
 
   it('stays review-blocked when the chapter was never clean', { timeout: 120_000 }, async () => {

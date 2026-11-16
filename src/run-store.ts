@@ -126,6 +126,10 @@ const attemptSchema = z.strictObject({
   // stays as the reviewer wrote it (its AI-tone issues are advisory), so this marker is what shows the block before any
   // manual use of that body. Absent on every other attempt and on older records.
   aiToneBlock: aiToneBlockSchema.exactOptional(),
+  // Prompt version 14 body rounds that already failed: required-event keywords, pov-limited paragraphs,
+  // and missed metric eventHits from that failed round. Absent on a clean round, on style, AI-tone, and poison
+  // rounds, and on every earlier prompt version.
+  failureSignature: z.string().min(1).max(800).optional(),
 })
 type AttemptRecord = z.infer<typeof attemptSchema>
 /** Detached execution progress, excluding the stored prompt and response schema. */
@@ -136,7 +140,7 @@ const runSchema = z.strictObject({
   startedBy: sessionIdSchema, lastResumedBy: sessionIdSchema,
   attempts: z.array(attemptSchema), error: z.string().nullable(),
   // Prompt text version fixed at creation so a resume rebuilds identical prompts; absent on runs created before versioning (= 1).
-  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13)]).optional(),
+  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13), z.literal(14)]).optional(),
 })
 /** Detached progress metadata; raw stage outputs are read explicitly. */
 export type WritingRun = Omit<RunRecord, 'attempts'> & { readonly attempts: readonly WritingAttempt[] }
@@ -394,6 +398,25 @@ export class RunStore {
       return replaceAttempt(current, attemptId, attempt => {
         if (attempt.status !== 'succeeded') fail('attempt-state', 'An AI-tone block belongs to a review attempt with saved output')
         return isDeepStrictEqual(attempt.aiToneBlock, parsed) ? attempt : { ...attempt, aiToneBlock: parsed }
+      })
+    })
+    return attemptView(findAttempt(run, attemptId))
+  }
+
+  /**
+   * @param actor - Workspace owner. @param runId - Running request. @param attemptId - Succeeded body attempt.
+   * @param signature - The defect just signed off on a round that already failed. Missed metric eventHits are included only then. Recording the same signature again is a no-op.
+   * @returns The attempt with its durable signature.
+   */
+  async recordFailureSignature(actor: Actor, runId: RunId, attemptId: AttemptId, signature: string): Promise<WritingAttempt> {
+    const parsed = z.string().min(1).max(800).parse(signature)
+    const run = await this.change(actor, runId, current => {
+      this.requireRunning(current)
+      return replaceAttempt(current, attemptId, attempt => {
+        if (attempt.status !== 'succeeded') fail('attempt-state', 'A failure signature belongs to an attempt with saved output')
+        if (attempt.failureSignature === parsed) return attempt
+        if (attempt.failureSignature !== undefined) fail('attempt-conflict', 'Attempt already signed off a different failure')
+        return { ...attempt, failureSignature: parsed }
       })
     })
     return attemptView(findAttempt(run, attemptId))
