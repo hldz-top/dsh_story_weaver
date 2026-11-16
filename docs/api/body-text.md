@@ -12,6 +12,7 @@ description: "Exact chapter assembly, Story-compatible word counting, and blocki
 - [Assembly](#assembly)
 - [Counting](#counting)
 - [Length inspection](#inspection)
+- [Advisory review metrics](#advisory-metrics)
 - [Integration](#integration)
 - [Dev Note](#dev-note)
 
@@ -56,6 +57,11 @@ This counter applies to the supplied text as written. It does not parse Markdown
 | `result.length.blocking` | `true` for either violation; `false` only for `within-range`. |
 
 With bounds 3000–5000, 2999 and 5001 are blocking, while 3000 and 5000 are within range. Inspection enforces no per-scene ceiling. Short and long candidates remain intact for review and repair; a failed length check never truncates or silently accepts them. A within-range result establishes length only, not substantive review acceptance.
+
+<a id="advisory-metrics"></a>
+## Advisory review metrics
+
+`countHanChars` counts the Han tokens of the Story counter and skips its ASCII words. [review-metrics.ts](../../src/review-metrics.ts) uses that count as `wordCount`. `dialogueRatio` divides Han characters inside `「」` and `“”` by `wordCount`. `hookWindow`, `beatPositions`, and `eventHits` are measured from the assembled chapter, the previous snapshot, and the brief and settings. A version-11 body review receives them as `task.metrics` with the recorded `metricsBlocking` flag. The default flag is false. These figures do not change length admission or the required-event repair instruction, and they are not written into outline schemas.
 
 <a id="integration"></a>
 ## Integration

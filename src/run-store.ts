@@ -38,6 +38,12 @@ const executionLimitsSchema = z.strictObject({
   // Prompt version 5 and later only: whether AI-tone findings in a body review block. Recorded on every such run (begin fills
   // the default, on); absent on runs created before version 5, which keep advisory AI tone whatever the current config says.
   aiToneBlocking: z.boolean().exactOptional(),
+  /**
+   * Prompt version 11 and later only: whether advisory chapter metrics may later be promoted to a hard gate.
+   * Recorded on every such run (begin fills the default, false). Absent before version 11. This version does not
+   * read the flag as a veto.
+   */
+  metricsBlocking: z.boolean().exactOptional(),
   /** Per-stage route captured for the run. Absent on runs stored before stage routing; those keep the parent model. */
   writingModel: z.strictObject({
     planning: writingModelChoiceSchema, review: writingModelChoiceSchema, body: writingModelChoiceSchema,
@@ -124,7 +130,7 @@ const runSchema = z.strictObject({
   startedBy: sessionIdSchema, lastResumedBy: sessionIdSchema,
   attempts: z.array(attemptSchema), error: z.string().nullable(),
   // Prompt text version fixed at creation so a resume rebuilds identical prompts; absent on runs created before versioning (= 1).
-  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10)]).optional(),
+  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11)]).optional(),
 })
 /** Detached progress metadata; raw stage outputs are read explicitly. */
 export type WritingRun = Omit<RunRecord, 'attempts'> & { readonly attempts: readonly WritingAttempt[] }
@@ -450,8 +456,15 @@ function pickRequest(run: RunRecord) {
  * never does, so its body reviews stay advisory regardless of the deployment's current switch.
  */
 function withAiToneBlocking(input: BeginRunInput, promptVersion: PromptVersion): BeginRunInput {
-  const { aiToneBlocking, ...limits } = input.executionLimits
-  return { ...input, executionLimits: promptVersion >= 5 ? { ...limits, aiToneBlocking: aiToneBlocking ?? true } : limits }
+  const { aiToneBlocking, metricsBlocking, ...limits } = input.executionLimits
+  return {
+    ...input,
+    executionLimits: {
+      ...limits,
+      ...(promptVersion >= 5 ? { aiToneBlocking: aiToneBlocking ?? true } : {}),
+      ...(promptVersion >= 11 ? { metricsBlocking: metricsBlocking ?? false } : {}),
+    },
+  }
 }
 
 function requireServiceLimits(run: RunRecord): void {

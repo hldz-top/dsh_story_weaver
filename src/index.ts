@@ -46,6 +46,12 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   /** Body reviews on prompt versions 5 and 6 turn AI-tone findings quoting the body into blocking issues. Prompt version 7 records the same switch and reports a density grade instead of blocking. Frozen into each new run. Default true. */
   aiToneBlocking: boolean
   /**
+   * Recorded on prompt version 11 runs. Default false. Chapter metrics stay advisory while this is false.
+   * The flag is kept so a later change can promote a metric to a hard gate without inventing a new switch.
+   * This version does not treat metric values as a veto.
+   */
+  metricsBlocking: boolean
+  /**
    * Writing-stage model route. `inherit` uses the parent Agent's configured model and subscription for every stage.
    * A map names planning, review and body. `opencode-go` is rejected: OpenCode Go is a host subscription, and this plugin registers no adapter.
    */
@@ -83,6 +89,7 @@ export const Config: z<Config> = z.object({
   reuseSettingsSnapshot: z.boolean().default(true),
   allowSettingsImport: z.boolean().default(false),
   aiToneBlocking: z.boolean().default(true),
+  metricsBlocking: z.boolean().default(false),
   writingModel: z.any().default('inherit'),
   researchEnabled: z.boolean().default(false),
   researchBudgetFloor: z.number().default(1),
@@ -118,6 +125,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!Number.isSafeInteger(config.maxRepairAttempts) || config.maxRepairAttempts < 0) throw new Error('maxRepairAttempts must be a finite nonnegative integer')
   if (config.stageTimeoutMs > 2_147_483_647) throw new Error('stageTimeoutMs exceeds the supported timer range')
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
+  if (typeof config.metricsBlocking !== 'boolean') throw new Error('metricsBlocking must be a boolean')
   if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
   const writingModel = normalizeWritingModel(config.writingModel)
@@ -128,7 +136,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     maxStageRequests: config.maxStageRequests, stageTimeoutMs: config.stageTimeoutMs, maxRepairAttempts: config.maxRepairAttempts,
     maxParallelStages: config.maxParallelStages, settingsCandidateCount,
     minChapterWords: config.minChapterWords, maxChapterWords: config.maxChapterWords,
-    aiToneBlocking: config.aiToneBlocking, writingModel, researchEnabled: config.researchEnabled, researchBudgetFloor: config.researchBudgetFloor }
+    aiToneBlocking: config.aiToneBlocking, metricsBlocking: config.metricsBlocking, writingModel, researchEnabled: config.researchEnabled, researchBudgetFloor: config.researchBudgetFloor }
   const researchLimits: ResearchLimits = {
     maxResearchQuestions: config.maxResearchQuestions,
     maxResearchCalls: config.maxResearchCalls,
