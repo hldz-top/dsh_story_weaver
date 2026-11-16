@@ -57,6 +57,12 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   characterSheet: boolean
   /** Maximum characters in one e5 or e6 dimension. Default 12. Not copied into a run. */
   maxCharacters: number
+  /** Reject a chapter-outline cast name that is not on the character card. Default false. Not copied into a run. */
+  strictCast: boolean
+  /** Inject present-character cards into the body task. Default true. Not copied into a run. */
+  castInjection: boolean
+  /** Han-character budget of those cards. Default 1200. Not copied into a run. */
+  maxCastCardChars: number
   /** When false, research planning and research children do not run. Default false. Official settings retrieval is independent of this switch. */
   researchEnabled: boolean
   /** Skip research planning and research children when remaining native web-call slots are below this floor. Default 1. Settings official retrieval still runs. */
@@ -92,6 +98,9 @@ export const Config: z<Config> = z.object({
   aiToneBlocking: z.boolean().default(true),
   characterSheet: z.boolean().default(true),
   maxCharacters: z.number().default(12),
+  strictCast: z.boolean().default(false),
+  castInjection: z.boolean().default(true),
+  maxCastCardChars: z.number().default(1200),
   writingModel: z.any().default('inherit'),
   researchEnabled: z.boolean().default(false),
   researchBudgetFloor: z.number().default(1),
@@ -129,6 +138,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
   if (typeof config.characterSheet !== 'boolean') throw new Error('characterSheet must be a boolean')
   if (!Number.isSafeInteger(config.maxCharacters) || config.maxCharacters < 1) throw new Error('maxCharacters must be a finite positive integer')
+  if (typeof config.strictCast !== 'boolean') throw new Error('strictCast must be a boolean')
+  if (typeof config.castInjection !== 'boolean') throw new Error('castInjection must be a boolean')
+  if (!Number.isSafeInteger(config.maxCastCardChars) || config.maxCastCardChars < 1) throw new Error('maxCastCardChars must be a finite positive integer')
   if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
   const writingModel = normalizeWritingModel(config.writingModel)
@@ -169,7 +181,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
   deliveryProjection = await registerStageDeliveryProjection(ctx)
-  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot, characterSheet: config.characterSheet, maxCharacters: config.maxCharacters })
+  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), {
+    allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot,
+    characterSheet: config.characterSheet, maxCharacters: config.maxCharacters,
+    strictCast: config.strictCast, castInjection: config.castInjection, maxCastCardChars: config.maxCastCardChars,
+  })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)
   registerWritingTools(ctx, service, config.previewDirectory)

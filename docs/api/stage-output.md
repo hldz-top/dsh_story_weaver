@@ -81,7 +81,7 @@ Prompt versions before 7 also stored a required `targetWords` on each chapter. A
 | `targetWords` | Accepted when a version before 7 stored it. Version 7 does not publish the field, and the preview does not render it. It is not a per-scene ceiling and it does not replace the host body count. |
 | `constraints` | Explicit array of nonblank constraints; may be empty. |
 | `obligations` | `{ id, description }` entries with unique IDs matching the requested obligations. |
-| `scenes` | Nonempty ordered array of `{ id, purpose, action, obligationIds }`. IDs, purposes, and actions are nonblank. Scene IDs are unique; a scene cannot repeat the same obligation ID. One obligation may span multiple scenes. |
+| `scenes` | Nonempty ordered array of `{ id, purpose, action, obligationIds }`. IDs, purposes, and actions are nonblank. Scene IDs are unique; a scene cannot repeat the same obligation ID. One obligation may span multiple scenes. Prompt version 11 also accepts optional `cast` (names present in the scene), `pov` (one of those names) and `misread` (`利益`, `礼法`, `逻辑`, `技艺`, `生计`, or `其它`). A `pov` outside `cast`, or a `misread` outside that list, is rejected and the message names the scene. A `cast` name that is not on the character card is kept. Versions 1–10 do not publish the three fields. |
 
 ## Body
 

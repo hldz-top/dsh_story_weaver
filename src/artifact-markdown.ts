@@ -121,7 +121,12 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
     const outline = parseContent(StageOutputSchemas['chapter-outline'], artifact.text)
     sections.push(`# Chapter ${outline.chapterNumber} outline`, 'Title', style.text(outline.title), '## Through-line', style.text(outline.throughLine))
     for (const constraint of outline.constraints) sections.push('## Constraint', style.text(constraint))
-    for (const scene of outline.scenes) sections.push('## Scene', 'Scene ID', style.text(scene.id), 'Purpose', style.text(scene.purpose), 'Action', style.text(scene.action), 'Required event IDs', style.text(scene.obligationIds.join(', ')))
+    for (const scene of outline.scenes) {
+      sections.push('## Scene', 'Scene ID', style.text(scene.id), 'Purpose', style.text(scene.purpose), 'Action', style.text(scene.action), 'Required event IDs', style.text(scene.obligationIds.join(', ')))
+      if (scene.cast !== undefined) sections.push('Cast', style.text(scene.cast.join('、')))
+      if (scene.pov !== undefined) sections.push('Viewpoint', style.text(scene.pov))
+      if (scene.misread !== undefined) sections.push('Misread', style.text(scene.misread))
+    }
     for (const obligation of outline.obligations) sections.push('## Required event', 'ID', style.text(obligation.id), 'Description', style.text(obligation.description))
     for (const note of outline.stateNotes ?? []) sections.push('## State note', style.text(note))
     for (const input of outline.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)

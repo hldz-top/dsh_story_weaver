@@ -10,7 +10,8 @@ import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
-import { CHARACTER_SHEET_PROMPT_VERSION, CharacterSheetRejection, DEFAULT_MAX_CHARACTERS } from './character-sheet.ts'
+import { CHARACTER_SHEET_PROMPT_VERSION, CharacterSheetRejection, DEFAULT_MAX_CHARACTERS, parseCharacterSheet, type CharacterSheet } from './character-sheet.ts'
+import { assertKnownCast, buildCastInjection, castTaskFields, mergeCharacterSheets, SCENE_CAST_PROMPT_VERSION, type SceneCastScene } from './scene-cast.ts'
 import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, characterDimensionsForStage, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
 import { aiToneHits, gradeAiTone } from './ai-tone.ts'
@@ -50,6 +51,15 @@ export interface WritingRunnerOptions {
   readonly characterSheet?: boolean
   /** Cap for one e5 or e6 dimension. Default 12. Not stored on the run. */
   readonly maxCharacters?: number
+  /**
+   * Reject a chapter outline whose cast names a person the character card does not list. Default false.
+   * Not stored on the run. A missing or unparsed card never rejects.
+   */
+  readonly strictCast?: boolean
+  /** Put present-character cards on the body task. Default true. Not stored on the run. */
+  readonly castInjection?: boolean
+  /** Han-character budget of the injected cards. Default 1200. Not stored on the run. */
+  readonly maxCastCardChars?: number
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -772,6 +782,66 @@ export class WritingRunner {
   }
 
   /**
+   * Parsed e5/e6 cards, or null when the switch is off, the run is older than version 10, or every card failed to parse.
+   * A failed card is the free-text fallback: injection and strict cast both skip it instead of failing the chapter.
+   */
+  private characterCards(inv: Invocation): ReturnType<typeof mergeCharacterSheets> {
+    if (this.characterSheetGate(inv.run) === undefined) return null
+    const settings = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'settings')
+    if (settings === undefined) return null
+    const text = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: settings.artifact.id }).text
+    let value: unknown
+    try { value = JSON.parse(text) as unknown }
+    catch { return null }
+    const collection = settingsCollectionSchema.safeParse(value)
+    if (!collection.success) return null
+    const sheets: CharacterSheet[] = []
+    for (const dimension of collection.data.dimensions) {
+      if (dimension.dimensionCode !== 'e5' && dimension.dimensionCode !== 'e6') continue
+      try { sheets.push(parseCharacterSheet(dimension.contentMarkdown, { maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS })) }
+      catch (cause) {
+        if (cause instanceof CharacterSheetRejection) continue
+        throw cause
+      }
+    }
+    return mergeCharacterSheets(sheets)
+  }
+
+  /** @returns The applied chapter outline's scenes, or null when that outline cannot be read. Injection then skips. */
+  private chapterOutlineScenes(inv: Invocation, chapterNumber: number): readonly SceneCastScene[] | null {
+    const outline = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === chapterNumber)
+    if (outline === undefined) return null
+    const text = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outline.artifact.id }).text
+    let value: unknown
+    try { value = JSON.parse(text) as unknown }
+    catch { return null }
+    const parsed = StageOutputSchemas['chapter-outline'].safeParse(value)
+    return parsed.success ? parsed.data.scenes : null
+  }
+
+  /** Body-task cards for a version-11 run. Older runs, a closed switch, and a missing card add no keys. */
+  private bodyCastTask(inv: Invocation, target: GeneratedManuscriptTarget): ReturnType<typeof castTaskFields> {
+    if (target.kind !== 'body' || promptVersionOf(inv.run) < SCENE_CAST_PROMPT_VERSION || this.options.castInjection === false) return {}
+    const sheet = this.characterCards(inv)
+    const scenes = this.chapterOutlineScenes(inv, target.chapterNumber)
+    if (sheet === null || scenes === null) return {}
+    return castTaskFields(buildCastInjection(scenes, { sheet, maxCastCardChars: this.options.maxCastCardChars }))
+  }
+
+  /**
+   * When strictCast is on, reject cast names the card does not list. A missing or unparsed card does not reject.
+   * pov and misread are checked later by chapter-outline admission for every run that emits them.
+   */
+  private rejectStrictCast(inv: Invocation, structured: unknown): void {
+    if (promptVersionOf(inv.run) < SCENE_CAST_PROMPT_VERSION || this.options.strictCast !== true) return
+    const parsed = StageOutputSchemas['chapter-outline'].safeParse(structured)
+    if (!parsed.success) return
+    const sheet = this.characterCards(inv)
+    if (sheet === null) return
+    assertKnownCast(parsed.data.scenes, new Set(sheet.core.map(row => row.name)))
+  }
+
+  /**
    * Parse a settings batch, then require e5/e6 character cards when this run asks for them.
    * A card rejection is remembered so the repair loop can hand it back, and so exhaustion can keep the prose.
    */
@@ -1231,7 +1301,7 @@ export class WritingRunner {
     for (let repair = 0; repair <= repairCap; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       aiToneSpans = []
-      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError }
+      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError, ...this.bodyCastTask(inv, target) }
       const outlineKind: OutlineRepairKind | null = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? target.kind : null
       const patching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
       let result: CapturedStage
@@ -1254,6 +1324,7 @@ export class WritingRunner {
       }
       let candidate: ManuscriptCandidateView
       try {
+        if (target.kind === 'chapter-outline') this.rejectStrictCast(inv, structured)
         candidate = await this.service.saveManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, target, researchPlanId: research.planId,
           requestId: requestId(inv.run, stageKey), childSessionId: result.childSessionId, output: structured, ...ceiling, ...(revision === undefined ? {} : { revisionOf: revision.baseArtifactId }) })
       } catch (cause) {

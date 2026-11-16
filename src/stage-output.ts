@@ -6,6 +6,7 @@ import { evidenceQuoteOccurs, reportQuoteRepair, resolveEvidenceQuote, type Quot
 import { openChecklistItems, openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import { expandParagraphCitations, type NumberedParagraph } from './paragraphs.ts'
 import { CHARACTER_SHEET_PROMPT_VERSION, parseCharacterSheet, type ParseCharacterSheetOptions } from './character-sheet.ts'
+import { assertSceneCastFields, SCENE_MISREAD_FRAMES } from './scene-cast.ts'
 import { echo, parseModelOutput, StageValidationRejection } from './stage-rejection.ts'
 
 /** A catalog classification dimension records a label and its grounds, not world-building detail. The single source for this set; stage-prompts.ts imports it rather than declaring its own copy. */
@@ -120,6 +121,23 @@ const bookOutlineSchema = inputsSchema.extend({
   })).nonempty(),
 })
 const sceneCard = z.array(z.strictObject({ id: text, purpose: text, action: text, obligationIds: z.array(text) })).nonempty()
+/** Optional scene cast. Versions before 11 do not publish these fields. Admission accepts them so a version-11 outline still reads back. */
+const sceneCastFields = {
+  cast: z.array(text).nonempty().optional().describe('Names present in this scene.'),
+  pov: text.optional().describe('Viewpoint character. Must be one name in cast.'),
+}
+/** Admission scene. `misread` stays a string so a bad value can name the scene id. */
+const sceneCardAdmitted = z.array(z.strictObject({
+  id: text, purpose: text, action: text, obligationIds: z.array(text),
+  ...sceneCastFields,
+  misread: z.string().optional(),
+})).nonempty()
+/** Version 11 publication. The model sees the closed misread enum. Versions 1–10 keep {@link sceneCard}. */
+const sceneCardPublished = z.array(z.strictObject({
+  id: text, purpose: text, action: text, obligationIds: z.array(text),
+  ...sceneCastFields,
+  misread: z.enum(SCENE_MISREAD_FRAMES).optional().describe('Dominant frame of this scene: 利益, 礼法, 逻辑, 技艺, 生计, or 其它.'),
+})).nonempty()
 /** Optional free-text state list (prompt version 2). No enums, so a loose note never costs a repair attempt. */
 const stateNotes = z.array(text).optional()
 /** Prompt versions 2–6 publish this schema. `targetWords` stays between `title` and `throughLine`, as in the frozen schema. */
@@ -132,10 +150,15 @@ export const chapterOutlineSchemaV7 = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), title: text, throughLine: text,
   constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
 })
-/** Admission accepts a historical `targetWords` and a version-7 outline that omits it. */
+/**
+ * Version 11 publication: version 7 plus optional `cast`, `pov` and `misread` on each scene.
+ * Versions 1–10 do not publish those fields.
+ */
+export const chapterOutlineSchemaV11 = chapterOutlineSchemaV7.extend({ scenes: sceneCardPublished })
+/** Admission accepts a historical `targetWords`, a version-7 outline that omits it, and optional scene cast fields. */
 const chapterOutlineSchema = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), title: text, targetWords: targetWords.optional(), throughLine: text,
-  constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
+  constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCardAdmitted, stateNotes,
 })
 const bodySchema = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), scenes: z.array(z.strictObject({ sceneId: text, text })).nonempty(),
@@ -592,6 +615,7 @@ export function parseChapterOutlineOutput(value: unknown, expected: {
   }
   const uncovered = expected.obligationIds.filter(id => !covered.has(id))
   if (uncovered.length > 0) throw new StageValidationRejection(`A required obligation has no assigned scene: ${list(uncovered)}; list each in some scene's obligationIds`)
+  assertSceneCastFields(output.scenes)
   return output
 }
 

@@ -148,7 +148,7 @@ describe('assertCharacterSheet', () => {
 
 describe('prompt version 10', () => {
   it('replays versions 1–9 prompt and schema bytes from parent 9fa7ab4', () => {
-    expect(CURRENT_PROMPT_VERSION).toBe(10)
+    expect(CURRENT_PROMPT_VERSION).toBe(11)
     for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9] as const satisfies readonly PromptVersion[]) {
       for (const kind of kinds) {
         expect(sha(buildStagePrompt({ ...promptBase, kind, promptVersion: version })), `p/${version}/${kind}`).toBe(parentHashes[`p/${version}/${kind}`])
@@ -221,7 +221,7 @@ describe('e5 admission', () => {
     const { fixture, outcome } = await writeE5(voiceOnly, { characterSheet: false, maxRepairAttempts: 0 })
     if (outcome.status === 'rejected') throw outcome.reason
     expect(outcome.value.status).toBe('completed')
-    expect(outcome.value.promptVersion).toBe(10)
+    expect(outcome.value.promptVersion).toBe(11)
     const settings = [...fixture.stages.values()].filter(stage => stage.kind === 'settings' && stage.task?.batch === 'draft')
     expect(settings.length).toBeGreaterThan(0)
     for (const stage of settings) {

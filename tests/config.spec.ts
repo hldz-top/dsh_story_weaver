@@ -114,6 +114,14 @@ it.each([-1, 1.5, Number.POSITIVE_INFINITY, Number.NaN, Number.MAX_SAFE_INTEGER 
   await expect(Story.apply(ctx, { ...new Story.Config(), maxRepairAttempts: value })).rejects.toThrow('maxRepairAttempts must be a finite nonnegative integer')
 })
 
+it('rejects a non-boolean cast switch before opening storage', async () => {
+  const ctx = new Context()
+  onTestFinished(async () => { await ctx.fiber.dispose() })
+  await expect(Story.apply(ctx, { ...new Story.Config(), strictCast: 'yes' as never })).rejects.toThrow('strictCast must be a boolean')
+  await expect(Story.apply(ctx, { ...new Story.Config(), castInjection: 'yes' as never })).rejects.toThrow('castInjection must be a boolean')
+  expect(ctx.get('story')).toBeUndefined()
+})
+
 it.each([
   { override: { stageTimeoutMs: 2_147_483_648 }, message: 'stageTimeoutMs exceeds the supported timer range' },
   { override: { stageProvider: '  ' }, message: 'stageProvider must name a configured native in-process spawn provider' },
@@ -121,6 +129,7 @@ it.each([
   { override: { writingModel: 'pi-ai' }, message: 'writingModel must be inherit so writing stages use the configured parent model and subscription' },
   { override: { writingModel: { body: { provider: 'opencode-go', model: 'strong' } } }, message: 'writingModel opencode-go is not provided by this plugin. OpenCode Go is a host subscription. Set writingModel to inherit so writing stages use the parent model and subscription.' },
   { override: { researchBudgetFloor: -1 }, message: 'researchBudgetFloor must be a finite nonnegative integer' },
+  { override: { maxCastCardChars: 0 }, message: 'maxCastCardChars must be a finite positive integer' },
 ])('rejects an unsupported native runtime setting: $message', async ({ override, message }) => {
   const ctx = new Context()
   onTestFinished(async () => { await ctx.fiber.dispose() })

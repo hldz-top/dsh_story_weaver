@@ -2,7 +2,8 @@
 import { assertObjectJsonSchema, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
-import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, continuitySchemaLegacy, reviewParagraphSchema, reviewParagraphSchemaV8, StageOutputSchemas } from './stage-output.ts'
+import { SCENE_CAST_PROMPT_VERSION } from './scene-cast.ts'
+import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, chapterOutlineSchemaV11, continuitySchemaLegacy, reviewParagraphSchema, reviewParagraphSchemaV8, StageOutputSchemas } from './stage-output.ts'
 import { CURRENT_PROMPT_VERSION, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 
 const nativeFields = new Set(['type', 'required', 'additionalProperties', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -69,11 +70,14 @@ export function projectNativeStageSchema(schema: object): ObjectJsonSchema {
  * Version 7 reviews cite `{ paragraphId, problem }` instead of a copied quote. Version 8 adds optional `briefQuote` on each issue.
  * Versions before 9 publish continuity characters as `{ name, state }` only. Version 9 adds optional `name_note`.
  * Version 10 publishes the same schemas as version 9, including the continuity snapshot without `name_note`.
+ * Version 11 chapter outlines add optional scene `cast`, `pov` and `misread`. Versions before 11 keep the version-7 chapter outline.
  * @returns An object-root schema; the caller must still run canonical admission.
  */
 export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION): ObjectJsonSchema {
   const outline = kind === 'book-outline' || kind === 'chapter-outline'
-  const schema = outline && promptVersion >= 7
+  const schema = kind === 'chapter-outline' && promptVersion >= SCENE_CAST_PROMPT_VERSION
+    ? chapterOutlineSchemaV11
+    : outline && promptVersion >= 7
     ? kind === 'book-outline' ? bookOutlineSchemaV7 : chapterOutlineSchemaV7
     : kind === 'chapter-outline'
       ? promptVersion === 1 ? chapterOutlineSchemaV1 : chapterOutlineSchemaLegacy

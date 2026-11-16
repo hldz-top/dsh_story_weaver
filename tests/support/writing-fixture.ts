@@ -97,6 +97,12 @@ export interface WritingFixtureOptions {
   readonly characterSheet?: boolean
   /** Plugin cap for one e5 or e6 dimension. Default 12. Not stored on the run. */
   readonly maxCharacters?: number
+  /** Reject cast names that are not on the character card. Default false. Not stored on the run. */
+  readonly strictCast?: boolean
+  /** Inject present-character cards into the body task. Default true. Not stored on the run. */
+  readonly castInjection?: boolean
+  /** Han budget of those cards. Default 1200. Not stored on the run. */
+  readonly maxCastCardChars?: number
   /** Run-store raw output cap. Default 262144. */
   readonly maxOutputBytes?: number
   /** Creative brief stored on the fixture novel. Default is the fog-harbor premise, which states no numbered required events. */
@@ -412,6 +418,9 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
     ...(options.reuseSettingsSnapshot === undefined ? {} : { reuseSettingsSnapshot: options.reuseSettingsSnapshot }),
     ...(options.characterSheet === undefined ? {} : { characterSheet: options.characterSheet }),
     ...(options.maxCharacters === undefined ? {} : { maxCharacters: options.maxCharacters }),
+    ...(options.strictCast === undefined ? {} : { strictCast: options.strictCast }),
+    ...(options.castInjection === undefined ? {} : { castInjection: options.castInjection }),
+    ...(options.maxCastCardChars === undefined ? {} : { maxCastCardChars: options.maxCastCardChars }),
   })
   fixture.ctx.effect(() => () => runner.close())
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
