@@ -65,6 +65,8 @@ function boundedProviderMessage(text: string): string {
 
 /** A stage failure that remains distinct from ordinary child output. */
 export class StageExecutionError extends Error {
+  /** Parsed JSON that failed the published schema. Set only for that schema rejection. */
+  rejectedOutput?: unknown
   /** @param code - Stable failure classification. @param message - Failure summary without private task text. @param options - Original failure cause when available. */
   constructor(readonly code: 'stage-budget' | 'stage-timeout' | 'stage-incomplete' | 'stage-config' | 'stage-provider' | 'stage-malformed' | 'stage-tool-scope' | 'stage-missing-result' | 'stage-refused' | 'stage-truncated' | 'stage-audit', message: string, options?: ErrorOptions) {
     super(message, options)

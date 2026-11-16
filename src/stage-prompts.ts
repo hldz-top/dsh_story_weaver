@@ -12,11 +12,13 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * chapter-outline pacing sentence, keeps measured-beat citation on body reviews, and replaces the blocking AI-tone
  * sentence with a density-graded hint. Version 8, for new runs only, adds the review brief-quote field and the Chinese
  * review-prose rule. Version 9, for new runs only, publishes optional `name_note` on each continuity character.
- * The prompt text is unchanged from version 8. Versions 1–8 stay frozen.
+ * The prompt text is unchanged from version 8. Version 10, for new runs only, keeps that same prompt text and the
+ * same published stage schemas. Once a body has been admitted, a later repair asks for a patch of the changed fields
+ * or paragraphs. Versions 1–9 still ask for the complete body, so a resume rebuilds those repair prompts byte for byte.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 9
+export const CURRENT_PROMPT_VERSION: PromptVersion = 10
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'

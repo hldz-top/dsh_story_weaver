@@ -27,6 +27,7 @@ import { assembleBody, countStoryWords } from './body-text.ts'
 import { extractRequiredEvents, missingRequiredEvents, requiredEventRepairInstruction, type MissingRequiredEvent } from './required-events.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
 import { applyOutlinePatch, buildOutlineRepairPrompt, OUTLINE_PATCH_OUTPUT_SCHEMA, outlineRepairUsesPatch, type OutlineRepairKind } from './outline-repair.ts'
+import { applyBodyPatch, BODY_PATCH_OUTPUT_SCHEMA, bodyPatchSchemaError, bodyRepairAfterRejectedPatch, bodyRepairUsesPatch, buildBodyRepairPrompt } from './body-repair.ts'
 import { collectQuoteRepairs, evidenceQuoteOccurs } from './evidence-quote.ts'
 import type { AppliedChapterView, GeneratedManuscriptTarget, ManuscriptCandidateView, ManuscriptTarget } from './manuscript.ts'
 import type { ImportSettingsRequest, SettingsCandidateView } from './settings.ts'
@@ -42,6 +43,11 @@ export interface WritingRunnerOptions {
   readonly allowIncompleteSettings?: boolean
   /** Reuse a passed settings collection when the brief text and roots match. Default true. */
   readonly reuseSettingsSnapshot?: boolean
+  /**
+   * When an admitted body patch does not apply, ask once for the complete body. Default true.
+   * False rejects that candidate and leaves the admitted body unchanged. Not stored with runs.
+   */
+  readonly bodyPatchFallback?: boolean
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -1115,6 +1121,8 @@ export class WritingRunner {
     let heldReview: { readonly candidate: ManuscriptCandidateView; readonly fails: number } | null = null
     // The last admitted book or chapter outline. From prompt version 7, a later repair patches this instead of rewriting it.
     let priorOutline: unknown = null
+    // The last admitted body. From prompt version 10, a later repair patches this instead of rewriting it.
+    let priorBody: unknown = null
     // Body candidates get one more replacement than the configured budget. Outlines and continuity keep that budget.
     const repairCap = repairAttemptCap(target.kind, inv.run.executionLimits.maxRepairAttempts)
     for (let repair = 0; repair <= repairCap; repair++) {
@@ -1122,10 +1130,11 @@ export class WritingRunner {
       aiToneSpans = []
       const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError }
       const outlineKind: OutlineRepairKind | null = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? target.kind : null
-      const patching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
+      const outlinePatching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
+      const bodyPatching = target.kind === 'body' && bodyRepairUsesPatch(promptVersionOf(inv.run), target.kind, priorBody !== null)
       let result: CapturedStage
       let structured: unknown
-      if (patching && outlineKind !== null) {
+      if (outlinePatching && outlineKind !== null) {
         result = await this.outlinePatchStage(inv, stageKey, outlineKind, context.inputRefs, priorOutline, stageTask, feedback)
         try {
           structured = outlineKind === 'book-outline'
@@ -1137,6 +1146,14 @@ export class WritingRunner {
           validationError = cause.message
           continue
         }
+      } else if (bodyPatching) {
+        const round = await this.admittedBodyPatch(inv, stageKey, context.inputRefs, priorBody, stageTask, feedback, repairMode)
+        if (round.kind === 'reject') {
+          validationError = round.message
+          continue
+        }
+        result = round.result
+        structured = round.structured
       } else {
         result = await this.stage(inv, stageKey, target.kind, context.inputRefs, stageTask, feedback, undefined, undefined, undefined, repairMode)
         structured = result.structured
@@ -1151,6 +1168,7 @@ export class WritingRunner {
         continue
       }
       if (outlineKind !== null && promptVersionOf(inv.run) >= 7) priorOutline = JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id }).text) as unknown
+      if (target.kind === 'body' && promptVersionOf(inv.run) >= 10) priorBody = JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id }).text) as unknown
       await this.deliver(inv, candidate.artifact)
       // Required events are a host hit against the brief. The review is not asked to rediscover them.
       const missingEvents = target.kind === 'body' ? this.missingBodyEvents(inv, context.inputRefs, context.obligations, structured) : []
@@ -1362,6 +1380,82 @@ export class WritingRunner {
     return this.capture(inv, key, prompt, allRefs, OUTLINE_PATCH_OUTPUT_SCHEMA, [], undefined, 'stored', undefined, stageWritingRole(kind), true)
   }
 
+  /**
+   * Ask for a body patch and keep the call on the direct model path. The admitted body is an input; the reply is
+   * only the changes. The caller applies them and stores the complete body.
+   */
+  /**
+   * Capture one body patch, apply it, or follow a schema rejection with one feedback retry and then the full-body path.
+   * A schema rejection is `stage-malformed` or `stage-missing-result`. The identical patch request is not repeated.
+   * @returns The complete body to admit, or a rejection that leaves the admitted body unchanged.
+   */
+  private async admittedBodyPatch(inv: Invocation, stageKey: string, refs: readonly ArtifactRef[], prior: unknown, task: { validationError?: string | null }, feedback: readonly ArtifactRef[], repairMode: RepairMode | undefined): Promise<{ kind: 'ready'; result: CapturedStage; structured: unknown } | { kind: 'reject'; message: string }> {
+    const savedFull = this.savedStage(inv, `${stageKey}/full`)
+    if (savedFull !== null) return { kind: 'ready', result: savedFull, structured: savedFull.structured }
+    const first = await this.readBodyPatch(inv, stageKey, refs, prior, task, feedback)
+    if (first.schemaError === null && first.captured !== null) {
+      try {
+        return { kind: 'ready', result: first.captured, structured: applyBodyPatch(prior, first.captured.structured) }
+      }
+      catch (cause) {
+        if (!isOutputError(cause)) throw cause
+        return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, cause.message)
+      }
+    }
+    const rejection = first.schemaError ?? 'The body patch was rejected because it did not match the patch schema.'
+    const second = await this.readBodyPatch(inv, `${stageKey}/schema`, refs, prior, { ...task, validationError: bodyPatchSchemaFeedback(task.validationError, rejection) }, feedback)
+    if (second.schemaError === null && second.captured !== null) {
+      try {
+        return { kind: 'ready', result: second.captured, structured: applyBodyPatch(prior, second.captured.structured) }
+      }
+      catch (cause) {
+        if (!isOutputError(cause)) throw cause
+        return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, cause.message)
+      }
+    }
+    return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, second.schemaError ?? rejection)
+  }
+
+  /** Read one patch capture. A schema rejection is reported. Any other capture failure propagates. */
+  private async readBodyPatch(inv: Invocation, key: string, refs: readonly ArtifactRef[], prior: unknown, task: object, feedback: readonly ArtifactRef[]): Promise<{ captured: CapturedStage | null; schemaError: string | null }> {
+    try {
+      const captured = await this.bodyPatchStage(inv, key, refs, prior, task, feedback)
+      return { captured, schemaError: bodyPatchSchemaError(captured.structured) }
+    }
+    catch (cause) {
+      if (!isBodyPatchSchemaRejection(cause)) throw cause
+      return { captured: null, schemaError: cause.message }
+    }
+  }
+
+  /** Ask for the complete body once, or reject the round when fallback is off. A saved full-body attempt is replayed as stored. */
+  private async bodyPatchFallbackRound(inv: Invocation, stageKey: string, refs: readonly ArtifactRef[], task: { validationError?: string | null }, feedback: readonly ArtifactRef[], repairMode: RepairMode | undefined, rejection: string): Promise<{ kind: 'ready'; result: CapturedStage; structured: unknown } | { kind: 'reject'; message: string }> {
+    if (bodyRepairAfterRejectedPatch(this.options.bodyPatchFallback) === 'reject') return { kind: 'reject', message: rejection }
+    const fullKey = `${stageKey}/full`
+    const stored = this.runs.storedPrompt(inv.actor, inv.run.id, fullKey)
+    const validationError = bodyPatchFullFeedback(task.validationError, rejection)
+    const result = stored === undefined
+      ? await this.stage(inv, fullKey, 'body', refs, { ...task, validationError }, feedback, undefined, undefined, undefined, repairMode)
+      : await this.capture(inv, fullKey, stored, uniqueRefs([...refs, ...feedback]), nativeStageOutputSchema('body', promptVersionOf(inv.run)), [], undefined, 'feed', chapterNumberOf(task), stageWritingRole('body'), true)
+    return { kind: 'ready', result, structured: result.structured }
+  }
+
+  /** @returns A succeeded stage for this key, so resume does not rebuild a prompt under an attempt that already finished. */
+  private savedStage(inv: Invocation, key: string): CapturedStage | null {
+    const attempt = this.runs.get(withoutSignal(inv.actor), inv.run.id).attempts.findLast(item => item.key === key)
+    if (attempt?.status !== 'succeeded' || attempt.childSessionId === null) return null
+    return { attempt, childSessionId: attempt.childSessionId, structured: JSON.parse(this.runs.readOutput(inv.actor, inv.run.id, attempt.id).text) as unknown }
+  }
+
+  private async bodyPatchStage(inv: Invocation, key: string, refs: readonly ArtifactRef[], prior: unknown, task: object, feedback: readonly ArtifactRef[]): Promise<CapturedStage> {
+    const allRefs = uniqueRefs([...refs, ...feedback])
+    const prompt = this.runs.storedPrompt(inv.actor, inv.run.id, key) ?? buildBodyRepairPrompt({
+      novelId: inv.run.novelId, prior, inputRefs: refs.map(inputRef), task,
+      inputs: allRefs.map(ref => ({ artifactId: ref.id, sha256: ref.sha256, kind: ref.kind, chars: ref.chars })),
+    })
+    return this.capture(inv, key, prompt, allRefs, BODY_PATCH_OUTPUT_SCHEMA, [], undefined, 'stored', undefined, stageWritingRole('body'), true, 0)
+  }
+
   private async stage(inv: Invocation, key: string, kind: StagePromptKind, refs: readonly ArtifactRef[], task: object, feedback: readonly ArtifactRef[],
     settingsDimensionKind?: SettingsDimensionKind, settingsCollectionKinds?: Readonly<Record<string, SettingsDimensionKind>>, reviewedKind?: StagePromptKind, repairMode?: RepairMode,
     publishedSchema?: object, settingsDimensionCode?: OpenChecklistCode): Promise<CapturedStage> {
@@ -1431,7 +1525,7 @@ export class WritingRunner {
     })
   }
 
-  private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' | 'feed' = 'stored', feedChapter?: number, modelRole: WritingModelRole | 'inherit' = 'inherit', direct = false): Promise<CapturedStage> {
+  private async capture(inv: Invocation, key: string, prompt: string, refs: readonly ArtifactRef[], outputSchema: object, allowedTools: readonly string[], authorizeTool?: StageRequest['authorizeTool'], readView: 'stored' | 'prose' | 'feed' = 'stored', feedChapter?: number, modelRole: WritingModelRole | 'inherit' = 'inherit', direct = false, malformedRetryLimit?: number): Promise<CapturedStage> {
     const stageTimeoutMs = stageDeadlineMs(key, inv.run.executionLimits.stageTimeoutMs)
     const unknownRetryLimit = gradedStageOf(key) === undefined ? 0 : GRADED_STAGE_UNKNOWN_RETRIES
     let unknownRetries = 0
@@ -1470,6 +1564,15 @@ export class WritingRunner {
         attempt = await this.runs.saveOutput(inv.actor, inv.run.id, attempt.id, text)
         return { ...result, attempt }
       } catch (cause) {
+        // A body-patch capture asks for one feedback retry instead of repeating this request. Keep the parsed reply
+        // when the model returned JSON, so the attempt is finished and a later full-body repair can still complete the run.
+        const retryLimit = malformedRetryLimit ?? inv.run.executionLimits.maxRepairAttempts
+        if (malformedRetryLimit === 0 && cause instanceof StageExecutionError && (cause.code === 'stage-malformed' || cause.code === 'stage-missing-result') && (cause.code === 'stage-missing-result' || cause.rejectedOutput !== undefined)) {
+          const rejected = cause.code === 'stage-missing-result' ? null : cause.rejectedOutput
+          const saved = await this.runs.saveOutput(inv.actor, inv.run.id, attempt.id, JSON.stringify(rejected))
+          if (saved.childSessionId === null) throw new RunStoreError('corrupt-run', 'Saved output has no native child')
+          return { attempt: saved, childSessionId: saved.childSessionId, structured: rejected }
+        }
         // A malformed structured_output call, or a turn that ended without structured output, is a completed model call
         // with a known, unusable result, not an uncertain outcome.
         const retryable = cause instanceof StageExecutionError && (cause.code === 'stage-malformed' || cause.code === 'stage-missing-result')
@@ -1489,9 +1592,8 @@ export class WritingRunner {
         }
         if (permitUnknownTimeout) { unknownRetries += 1; continue }
         if (!retryable) throw cause
-        if (retry < inv.run.executionLimits.maxRepairAttempts) continue
-        const retries = inv.run.executionLimits.maxRepairAttempts
-        throw new StageExecutionError(cause.code, `${cause.message}; stage ${key} failed after ${retries} automatic ${retries === 1 ? 'retry' : 'retries'}`, { cause })
+        if (retry < retryLimit) continue
+        throw new StageExecutionError(cause.code, `${cause.message}; stage ${key} failed after ${retryLimit} automatic ${retryLimit === 1 ? 'retry' : 'retries'}`, { cause })
       }
     }
   }
@@ -1609,6 +1711,22 @@ function failureKind(code: StageExecutionError['code']): AttemptFailureKind | un
 }
 /** Only a host rejection of a model-produced value is repairable; provider, refusal, truncation, cancellation, store and integrity failures are not. */
 function isOutputError(cause: unknown): cause is StageValidationRejection { return cause instanceof StageValidationRejection }
+/** A body-patch capture whose reply was not a patch. Other stage failures stay fatal. */
+function isBodyPatchSchemaRejection(cause: unknown): cause is StageExecutionError {
+  return cause instanceof StageExecutionError && (cause.code === 'stage-malformed' || cause.code === 'stage-missing-result')
+}
+function bodyPatchSchemaFeedback(previous: string | null | undefined, rejection: string): string {
+  const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''
+  return `${lead}The body patch was rejected because it did not match the patch schema: ${rejection} Return a body patch of only the changed fields or paragraphs.`
+}
+function bodyPatchFullFeedback(previous: string | null | undefined, rejection: string): string {
+  const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''
+  return `${lead}The body patch was rejected: ${rejection} Return the complete chapter body.`
+}
+function chapterNumberOf(task: object): number | undefined {
+  const chapterNumber = (task as { chapterNumber?: unknown }).chapterNumber
+  return typeof chapterNumber === 'number' ? chapterNumber : undefined
+}
 /** Every selected dimension's catalog kind, in catalog (code) order, for the assembled settings collection review. */
 function collectionDimensionKinds(selectedCodes: readonly string[]): Readonly<Record<string, SettingsDimensionKind>> {
   return Object.fromEntries(selectedCodes.map(code => [code, settingsCatalog.find(item => item.code === code)?.kind]).filter((entry): entry is [string, SettingsDimensionKind] => entry[1] !== undefined))
