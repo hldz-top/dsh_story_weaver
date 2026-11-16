@@ -52,7 +52,11 @@ function scaledFirstBody(sceneCounts: readonly number[]): (stage: WritingFixture
     if (stage.kind !== 'body' || (stage.task?.validationError ?? null) !== null) return output
     const body = StageOutputSchemas.body.parse(output)
     // Every scene mixes CJK characters, ASCII words, a number and punctuation, so only the Story counter's own rules produce its count.
-    return { ...body, scenes: body.scenes.map((scene, index) => ({ ...scene, text: `${'光'.repeat(sceneCounts[index]! - 4)} The lamp, 3 times.` })) }
+    return { ...body, scenes: body.scenes.map((scene, index) => {
+      const opening = index === 0 ? '林澜推开门，却见刀。' : ''
+      const openingWords = index === 0 ? 8 : 0
+      return { ...scene, text: `${opening}${'光'.repeat(sceneCounts[index]! - 4 - openingWords)} The lamp, 3 times.` }
+    }) }
   }
 }
 

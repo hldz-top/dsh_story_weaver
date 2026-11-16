@@ -152,7 +152,7 @@ it('completes a length repair when the only repeated miss is a settings eventHit
       }
       if (stage.kind !== 'body' || stage.task?.chapterNumber !== 1) return output
       const words = bodyRound++ < 2 ? 5200 : 4000
-      const text = '光'.repeat(words)
+      const text = `林澜推开门，却见刀。${'光'.repeat(words)}`
       if ('changes' in output && Array.isArray(output.changes)) {
         const changes = output.changes as { path?: string; value?: string }[]
         return { ...output, changes: changes.map(change => typeof change.path === 'string' && change.path.endsWith('.text') ? { ...change, value: text } : change) }

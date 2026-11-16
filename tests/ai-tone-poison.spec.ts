@@ -256,7 +256,7 @@ describe('version 13 repairs a heavy poison and still applies the chapter', () =
       poison: review => review === 0 ? 'forced' : undefined,
     })
     const run = await write(fixture, 14)
-    expect(run).toMatchObject({ status: 'completed', promptVersion: 15, error: null })
+    expect(run).toMatchObject({ status: 'completed', promptVersion: 14, error: null })
     expect(counts()).toEqual({ bodies: 2, reviews: 2 })
     expect(run.attempts.every(attempt => attempt.failureSignature === undefined)).toBe(true)
     expect(applied(fixture)).toBe(true)
@@ -380,7 +380,7 @@ describe('version 13 repairs a heavy poison and still applies the chapter', () =
       blocking: review => review > 0,
     }, { executionLimits: { maxRepairAttempts: 1 } })
     const run = await write(fixture, 14)
-    expect(run).toMatchObject({ status: 'completed', promptVersion: 15, error: null })
+    expect(run).toMatchObject({ status: 'completed', promptVersion: 14, error: null })
     expect(counts().bodies).toBe(3)
     expect(applied(fixture)).toBe(true)
     expect(run.attempts.every(attempt => attempt.failureSignature === undefined)).toBe(true)

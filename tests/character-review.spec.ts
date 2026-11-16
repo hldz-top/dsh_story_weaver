@@ -9,12 +9,9 @@ import { buildStagePrompt } from '../src/stage-prompts.ts'
 import { useWritingFixture, type WritingFixtureStage } from './support/writing-fixture.ts'
 
 function card(names: readonly string[], address = '前辈'): ReturnType<typeof parseCharacterSheet> {
-  const core = '| 角色 | 身份 | 欲望 | 恐惧 | 缺陷 | 误读框架 | 反差 | 出场章 |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n'
-  const voice = '| 角色 | 句式 | 专属词 | 称呼主角 | 自称 | 身体签 | 禁语 |\n| --- | --- | --- | --- | --- | --- | --- |\n'
-  return parseCharacterSheet([
-    core, ...names.map(name => `| ${name} | 剑修 | 证明自己 | 被无视 | 逞强 | 技艺 | 嘴上不服 | 1 |`),
-    '', voice, ...names.map(name => `| ${name} | 短句 | 甲、乙、丙 | ${address} | 我 | 按剑 | 示弱 |`),
-  ].join('\n'))
+  const core = ['| 角色 | 身份 | 欲望 | 恐惧 | 缺陷 | 误读框架 | 反差 | 出场章 |', '| --- | --- | --- | --- | --- | --- | --- | --- |', ...names.map(name => `| ${name} | 剑修 | 证明自己 | 被无视 | 逞强 | 技艺 | 嘴上不服 | 1 |`)]
+  const voice = ['| 角色 | 句式 | 专属词 | 称呼主角 | 自称 | 身体签 | 禁语 |', '| --- | --- | --- | --- | --- | --- | --- |', ...names.map(name => `| ${name} | 短句 | 甲、乙、丙 | ${address} | 我 | 按剑 | 示弱 |`)]
+  return parseCharacterSheet(`${core.join('\n')}\n\n${voice.join('\n')}`)
 }
 
 it('warns once when three present characters share one address form', () => {
