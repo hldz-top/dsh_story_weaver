@@ -55,6 +55,23 @@ export function countStoryWords(text: string): number {
 }
 
 /**
+ * Prefix that contains the first `words` Story words. The same counter as {@link countStoryWords}:
+ * one Han character, or one ASCII word. A word that would be cut at the boundary is left out.
+ * @param text - Reader-facing prose.
+ * @param words - Positive count.
+ * @returns The text through the end of that word, or the whole text when it has fewer words.
+ */
+export function prefixByStoryWords(text: string, words: number): string {
+  if (!Number.isSafeInteger(words) || words < 1) throw new RangeError('words must be a positive safe integer')
+  let count = 0
+  for (const match of text.matchAll(storyWordPattern())) {
+    count += 1
+    if (count === words) return text.slice(0, (match.index ?? 0) + match[0].length)
+  }
+  return text
+}
+
+/**
  * Han characters counted by {@link countStoryWords}. ASCII words in that same counter are not included.
  * @param text - Reader-facing chapter prose.
  */

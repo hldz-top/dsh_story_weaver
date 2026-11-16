@@ -123,7 +123,7 @@ describe('version 2 guardrails', () => {
       expect(buildStagePrompt({ ...base, kind, promptVersion: 11 }), kind).not.toContain('pov-limited')
       expect(buildStagePrompt({ ...base, kind, promptVersion: 12 }), kind).not.toContain('false-target')
       expect(buildStagePrompt({ ...base, kind, promptVersion: 14 }), kind).toBe(buildStagePrompt({ ...base, kind, promptVersion: 13 }))
-      if (kind !== 'continuity' && kind !== 'chapter-outline') expect(buildStagePrompt({ ...base, kind, promptVersion: 15 }), kind).toBe(buildStagePrompt({ ...base, kind, promptVersion: 14 }))
+      if (kind !== 'continuity' && kind !== 'chapter-outline' && kind !== 'body') expect(buildStagePrompt({ ...base, kind, promptVersion: 15 }), kind).toBe(buildStagePrompt({ ...base, kind, promptVersion: 14 }))
     }
     const bodyReview = { ...base, kind: 'review' as const, reviewedKind: 'body' as const }
     expect(buildStagePrompt({ ...bodyReview, promptVersion: 11 })).toContain('task.metrics')

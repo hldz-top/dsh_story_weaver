@@ -2,7 +2,7 @@
 import { assertObjectJsonSchema, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
-import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, continuitySchemaLegacy, continuitySchemaV14, continuitySnapshotSchemaV14, reviewParagraphSchema, reviewParagraphSchemaV8, reviewParagraphSchemaV11, reviewParagraphSchemaV13, StageOutputSchemas } from './stage-output.ts'
+import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, chapterOutlineSchemaV15, continuitySchemaHook, continuitySchemaLegacy, continuitySchemaPlants, continuitySchemaV14, continuitySnapshotSchemaHook, continuitySnapshotSchemaPlants, continuitySnapshotSchemaV14, reviewParagraphSchema, reviewParagraphSchemaV8, reviewParagraphSchemaV11, reviewParagraphSchemaV13, StageOutputSchemas } from './stage-output.ts'
 import { CURRENT_PROMPT_VERSION, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 
 const nativeFields = new Set(['type', 'required', 'additionalProperties', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -71,24 +71,28 @@ export function projectNativeStageSchema(schema: object): ObjectJsonSchema {
  * Version 10 publishes the same schemas as version 9. Version 11 publishes the same schemas as version 10.
  * Advisory review metrics are task data, not output fields. Version 12 reviews add category `pov` and optional `paragraphId`.
  * Version 13 adds optional `poison` on each review issue. Version 14 publishes the same schemas as version 13.
- * Version 15 publishes optional `plants` on continuity and the continuity snapshot when the plant ledger is on.
- * `plantLedger: false` republishes the version-14 continuity schemas. Versions 1–14 never publish `plants`.
+ * Version 15 publishes optional `plants` when the plant ledger is on, and optional `hookType` when hook rotation is on.
+ * Either switch false omits that field. Versions 1–14 never publish `plants` or `hookType`.
  * @returns An object-root schema; the caller must still run canonical admission.
  */
-export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION, options?: { readonly plantLedger?: boolean }): ObjectJsonSchema {
+export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION, options?: { readonly plantLedger?: boolean; readonly hookRotation?: boolean }): ObjectJsonSchema {
   const plantsOn = promptVersion >= 15 && options?.plantLedger !== false
+  const hookOn = promptVersion >= 15 && options?.hookRotation !== false
+  const continuityPublished = plantsOn && hookOn ? StageOutputSchemas.continuity : plantsOn ? continuitySchemaPlants : hookOn ? continuitySchemaHook : continuitySchemaV14
+  const snapshotPublished = plantsOn && hookOn ? StageOutputSchemas['continuity-snapshot'] : plantsOn ? continuitySnapshotSchemaPlants : hookOn ? continuitySnapshotSchemaHook : continuitySnapshotSchemaV14
   const schema = kind === 'book-outline'
     ? promptVersion >= 7 ? bookOutlineSchemaV7 : bookOutlineSchemaLegacy
     : kind === 'chapter-outline'
-      ? promptVersion >= 7 ? chapterOutlineSchemaV7
-        : promptVersion === 1 ? chapterOutlineSchemaV1 : chapterOutlineSchemaLegacy
+      ? promptVersion >= 15 && hookOn ? chapterOutlineSchemaV15
+        : promptVersion >= 7 ? chapterOutlineSchemaV7
+          : promptVersion === 1 ? chapterOutlineSchemaV1 : chapterOutlineSchemaLegacy
       : kind === 'review' && promptVersion >= 13 ? reviewParagraphSchemaV13
         : kind === 'review' && promptVersion >= 12 ? reviewParagraphSchemaV11
           : kind === 'review' && promptVersion >= 8 ? reviewParagraphSchemaV8
             : kind === 'review' && promptVersion >= 7 ? reviewParagraphSchema
               : kind === 'continuity' && promptVersion < 9 ? continuitySchemaLegacy
-                : kind === 'continuity' && !plantsOn ? continuitySchemaV14
-                  : kind === 'continuity-snapshot' && !plantsOn ? continuitySnapshotSchemaV14
+                : kind === 'continuity' ? continuityPublished
+                  : kind === 'continuity-snapshot' ? snapshotPublished
                     : StageOutputSchemas[kind]
   return projectNativeStageSchema(z.toJSONSchema(schema, { io: 'input' }))
 }

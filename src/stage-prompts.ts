@@ -1,6 +1,7 @@
 /** Logged writing-stage instructions derived from Story V2 business roles. */
 import type { AiToneRepairFloor } from './ai-tone.ts'
 import type { ArtifactId, NovelId } from './contracts.ts'
+import { hookTypePromptLine } from './hook-type.ts'
 import { isOpenChecklistCode, openChecklistItems, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS_FACTS } from './stage-output.ts'
@@ -70,6 +71,16 @@ export interface StagePromptRequest {
    * Omitted means on. Ignored before version 15. Not stored on the run.
    */
   readonly plantLedger?: boolean
+  /**
+   * Version 15 hook rotation. False omits the hook sentence and keeps the version-14 chapter-outline schema.
+   * Omitted means on. Ignored before version 15. Not stored on the run.
+   */
+  readonly hookRotation?: boolean
+  /**
+   * Version 15 chapter-1 opening check. False omits the opening sentence.
+   * Omitted means on. Ignored before version 15. Not stored on the run.
+   */
+  readonly openingIn50?: boolean
 }
 
 /** Versions 1–6. Version 7 drops the scene-allocation clause; the per-scene ceiling rule stays, because that is the host rule already in this sentence. */
@@ -193,6 +204,7 @@ const BODY_MOTIVE = 'Show the viewpoint character’s present want inside the ch
 const CONTINUITY_MOTIVE = 'For a character the reviewed prose actually changes, record location, knowledge, condition and relationships only as that prose supports them. Each timeline.event states what the prose shows, with a quote from the reviewed body. Leave a fact unchanged when the chapter does not touch it. Mark an obligation fulfilled only when the prose performs it, not when a character merely intends it.'
 /** Version 15, and only when the plant ledger is on. Versions 1–14 do not receive these sentences. */
 const CHAPTER_PLANTS = 'When task.plantHints is present, each entry is an advisory reminder that a foreshadowing plant has stayed open for several chapters, or that a plant list was replaced by the previous ledger. It is not a required event and it does not block the outline.'
+const OPENING_IN_50 = 'Chapter 1 must show a person, an event, and a conflict inside the first 50 Story-counted words. A later mention does not pass. Other chapters are not checked.'
 const CONTINUITY_PLANTS = 'Carry forward every open plant from the previous continuity snapshot in optional plants. Keep its id, text, and plantedChapter, and set status to open or paid. A new plant must give plantedChapter as this chapter. Do not pay a plant that is already paid. Omit plants when nothing is open and this chapter plants nothing. A plant list the host cannot keep is replaced by the previous open ledger and does not fail the chapter.'
 const REVIEW_ACTION = 'Write each issue.message as one repair step: the location, the exact conflict or omission, and the smallest change that fixes it. A successful check.summary names the evidence that satisfied it. Do not request a full rewrite or a change to an accepted upstream source. A speculative risk, or a sentence that only might be read a certain way, is not a blocking issue. Open a blocking category only for a missing required event, a settings or persona contradiction (including a spatial impossibility or a non-physical thing written as an object), a cross-chapter continuity conflict, or a chapter-length violation the host already measured in task.measuredWordCount or task.measuredLength. Metaphor stacking, a narrator thesis, and a repeated sentence skeleton are category style and severity advisory: name the cited sentence and the smallest rewrite. Anything else, including thin motivation, plain wording and taste, is category style and severity advisory.'
 /** Version 8. The host rejects a blocking completeness or obligations issue whose briefQuote is not a verbatim brief excerpt. */
@@ -234,10 +246,16 @@ function qualityParagraphs(request: StagePromptRequest): readonly string[] {
       return [request.settingsDimensionKind !== undefined && ENUM_SETTINGS_KINDS.has(request.settingsDimensionKind) ? SETTINGS_CLASSIFICATION_BOUND : SETTINGS_PEOPLE, SETTINGS_READER, REVISION_SCOPE]
     case 'book-outline':
       return [BOOK_MOTIVE, REVISION_SCOPE]
-    case 'chapter-outline':
-      return (request.promptVersion ?? 1) >= 15 && request.plantLedger !== false ? [CHAPTER_MOTIVE, CHAPTER_PLANTS, REVISION_SCOPE] : [CHAPTER_MOTIVE, REVISION_SCOPE]
+    case 'chapter-outline': {
+      const version = request.promptVersion ?? 1
+      const lines = [CHAPTER_MOTIVE]
+      if (version >= 15 && request.plantLedger !== false) lines.push(CHAPTER_PLANTS)
+      if (version >= 15 && request.hookRotation !== false) lines.push(hookTypePromptLine())
+      lines.push(REVISION_SCOPE)
+      return lines
+    }
     case 'body':
-      return [BODY_MOTIVE]
+      return (request.promptVersion ?? 1) >= 15 && request.openingIn50 !== false ? [BODY_MOTIVE, OPENING_IN_50] : [BODY_MOTIVE]
     case 'continuity':
       return (request.promptVersion ?? 1) >= 15 && request.plantLedger !== false ? [CONTINUITY_MOTIVE, CONTINUITY_PLANTS] : [CONTINUITY_MOTIVE]
     case 'continuity-snapshot':

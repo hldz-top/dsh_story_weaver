@@ -22,6 +22,8 @@ import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
 import { blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseContinuitySnapshot, StageOutputSchemas, type BodyOutput, type ContinuityOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
 import { projectContinuitySnapshot } from './continuity-snapshot.ts'
+import { attachContinuityHook, repeatedHookInstruction } from './hook-type.ts'
+import { openingIn50Miss, openingIn50RepairInstruction } from './opening-in-50.ts'
 import { advisoryPlantHints, attachContinuityPlants, softenPlantField } from './plant-ledger.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
@@ -58,6 +60,17 @@ export interface WritingRunnerOptions {
    * A rejected plant list never fails the chapter: the previous open ledger is kept and the note is advisory.
    */
   readonly plantLedger?: boolean
+  /**
+   * Version 15 hook rotation. Default true. Not stored on the run.
+   * A repeated hookType fails the outline round and uses the existing outline repair budget.
+   * False keeps the version-14 chapter-outline schema and does not compare hook types.
+   */
+  readonly hookRotation?: boolean
+  /**
+   * Version 15 chapter-1 opening check. Default true. Not stored on the run.
+   * A miss is written into the existing body repair instruction. It does not add a failure signature.
+   */
+  readonly openingIn50?: boolean
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -624,7 +637,8 @@ export class WritingRunner {
     const projected = projectContinuitySnapshot({
       chapterNumber: applied.chapterNumber, inputRefs: refs, continuity, bodyText: assembleBody(body), earlier,
     })
-    const output = parseContinuitySnapshot(attachContinuityPlants(promptVersionOf(inv.run), this.options.plantLedger !== false, projected, continuity.plants), { inputRefs: refs, chapterNumber: applied.chapterNumber })
+    const withPlants = attachContinuityPlants(promptVersionOf(inv.run), this.options.plantLedger !== false, projected, continuity.plants)
+    const output = parseContinuitySnapshot(attachContinuityHook(promptVersionOf(inv.run), this.options.hookRotation !== false, withPlants, continuity.hookType), { inputRefs: refs, chapterNumber: applied.chapterNumber })
     const key = `continuity-snapshot/${applied.chapterNumber}/host`
     const candidate = await this.service.saveContinuitySnapshot(inv.actor, {
       novelId: inv.run.novelId, requestId: requestId(inv.run, key), ...target, childSessionId: null, output, snapshotThrough,
@@ -1205,7 +1219,7 @@ export class WritingRunner {
         result = await this.stage(inv, stageKey, target.kind, context.inputRefs, stageTask, feedback, undefined, undefined, undefined, repairMode, undefined, undefined, sameDefectNote)
         structured = result.structured
       }
-      if (target.kind === 'continuity') structured = this.prepareContinuityPlants(inv, structured, context.inputRefs, target.chapterNumber)
+      if (target.kind === 'continuity') structured = this.stampHookType(inv, this.prepareContinuityPlants(inv, structured, context.inputRefs, target.chapterNumber), context.inputRefs)
       let candidate: ManuscriptCandidateView
       try {
         candidate = await this.service.saveManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, target, researchPlanId: research.planId,
@@ -1257,7 +1271,9 @@ export class WritingRunner {
       const styleRepair = poison !== null && poison.spans.length > 0 && !poison.repeated && repair < repairCap
       if (styleRepair && poison !== null) previousPoisonKeys = new Set(poison.hitKeys)
       else if (poison === null || poison.spans.length === 0) previousPoisonKeys = null
-      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null
+      const hookInstruction = target.kind === 'chapter-outline' ? this.repeatedHook(inv, structured, target.chapterNumber) : null
+      const openingInstruction = target.kind === 'body' ? this.openingInstruction(inv, structured) : null
+      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && openingInstruction === null
       if (promptVersionOf(inv.run) >= 8 && reviewBlocked && reviewed.review !== null) {
         const fails = blockingIssueCount(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: reviewed.review.id }).text))
         const decision = checklistRepairDecision(heldReview?.fails ?? null, fails, 'does-not-decrease')
@@ -1269,7 +1285,7 @@ export class WritingRunner {
         }
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
-      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null
+      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && openingInstruction === null
       if (clean && !styleRepair) return { candidate: reviewed, convergence: null }
       if (promptVersionOf(inv.run) >= 14 && target.kind === 'body') {
         // Poison, style, and blocking AI-tone rounds are not a signed-off defect. They do not record a signature,
@@ -1295,16 +1311,17 @@ export class WritingRunner {
           }
         }
       } else pendingDefectNote = null
-      if (aiToneSpans.length > 0) { validationError = withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction); repairMode = 'review' }
-      else if (incomplete) { validationError = withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction); repairMode = 'review' }
-      else if (reviewed.length?.blocking) { validationError = withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction); repairMode = 'length' }
-      else if (eventInstruction !== null && reviewed.status !== 'blocked') { validationError = eventInstruction; repairMode = 'review' }
+      const hostChecks = [openingInstruction, hookInstruction]
+      if (aiToneSpans.length > 0) { validationError = withHostChecks(withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction), hostChecks); repairMode = 'review' }
+      else if (incomplete) { validationError = withHostChecks(withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction), hostChecks); repairMode = 'review' }
+      else if (reviewed.length?.blocking) { validationError = withHostChecks(withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction), hostChecks); repairMode = 'length' }
+      else if ((eventInstruction !== null || hookInstruction !== null || openingInstruction !== null) && reviewed.status !== 'blocked') { validationError = withHostChecks(eventInstruction ?? '', hostChecks); repairMode = 'review' }
       else if (clean && styleRepair && poison !== null) {
         if (promptVersionOf(inv.run) >= 13) cleanPoisonBody = reviewed
         validationError = aiTonePoisonRepairInstruction(poison.spans)
         repairMode = 'review'
       }
-      else { validationError = withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction); repairMode = 'review' }
+      else { validationError = withHostChecks(withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction), hostChecks); repairMode = 'review' }
       feedback = this.feedback(reviewed)
     }
     // Never auto-pass: a body still carrying blocking AI tone when repairs run out ends review-blocked and is not applied.
@@ -1623,8 +1640,10 @@ export class WritingRunner {
       ...(settingsDimensionCode === undefined ? {} : { settingsDimensionCode }), promptVersion,
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}),
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 13 ? { aiToneRepairFloor: aiToneRepairFloorOf(inv.run) } : {}),
-      ...(promptVersion >= 15 && this.options.plantLedger === false ? { plantLedger: false as const } : {}) })
-    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion, { plantLedger: this.options.plantLedger !== false }))
+      ...(promptVersion >= 15 && this.options.plantLedger === false ? { plantLedger: false as const } : {}),
+      ...(promptVersion >= 15 && this.options.hookRotation === false ? { hookRotation: false as const } : {}),
+      ...(promptVersion >= 15 && this.options.openingIn50 === false ? { openingIn50: false as const } : {}) })
+    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion, { plantLedger: this.options.plantLedger !== false, hookRotation: this.options.hookRotation !== false }))
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.
     const direct = batch !== 'consistency' && (kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot')
     return this.capture(inv, key, prompt, allRefs, schema, direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, stageWritingRole(kind), direct)
@@ -1646,6 +1665,44 @@ export class WritingRunner {
       this.plantAdvisories.set(key, [...(this.plantAdvisories.get(key) ?? []), softened.advisory])
     }
     return softened.value
+  }
+
+  /** Copy the chapter outline's hook onto continuity. A missing outline hook leaves the field off. */
+  private stampHookType(inv: Invocation, structured: unknown, refs: readonly ArtifactRef[]): unknown {
+    if (promptVersionOf(inv.run) < 15 || this.options.hookRotation === false) return stripHook(structured)
+    const outlineRef = refs.find(ref => ref.kind === 'chapter-outline')
+    if (outlineRef === undefined || structured === null || typeof structured !== 'object' || Array.isArray(structured)) return structured
+    const outline = StageOutputSchemas['chapter-outline'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outlineRef.id }).text))
+    if (outline.hookType === undefined) return stripHook(structured)
+    return { ...(structured as Record<string, unknown>), hookType: outline.hookType }
+  }
+
+  /** A repeated hook fails this outline round. The existing repair budget is the only retry. */
+  private repeatedHook(inv: Invocation, structured: unknown, chapterNumber: number): string | null {
+    if (promptVersionOf(inv.run) < 15 || this.options.hookRotation === false || chapterNumber < 2) return null
+    const outline = StageOutputSchemas['chapter-outline'].safeParse(structured)
+    if (!outline.success) return null
+    const manuscript = this.service.getManuscript(inv.actor, inv.run.novelId)
+    const applied = manuscript.appliedChapters.find(item => item.chapterNumber === chapterNumber - 1)
+    if (applied?.snapshot != null) {
+      const snapshot = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: applied.snapshot.id }).text))
+      return repeatedHookInstruction(outline.data.hookType, snapshot.hookType)
+    }
+    // Outlines are planned before any chapter is written, so the previous continuity does not exist yet.
+    // The previous outline's hookType is the value this host copies onto that chapter's continuity.
+    const prior = manuscript.heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === chapterNumber - 1)
+    if (prior === undefined) return null
+    const priorOutline = StageOutputSchemas['chapter-outline'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: prior.artifact.id }).text))
+    return repeatedHookInstruction(outline.data.hookType, priorOutline.hookType)
+  }
+
+  /** Chapter 1 opening miss. Other chapters, and a closed switch, are not a repair. */
+  private openingInstruction(inv: Invocation, structured: unknown): string | null {
+    if (promptVersionOf(inv.run) < 15 || this.options.openingIn50 === false) return null
+    const body = StageOutputSchemas.body.safeParse(structured)
+    if (!body.success) return null
+    const miss = openingIn50Miss({ chapterNumber: body.data.chapterNumber, bodyText: assembleBody(body.data) })
+    return miss === null ? null : openingIn50RepairInstruction(miss)
   }
 
   /** Advisory plant lines for a chapter outline. They do not fail the outline round. */
@@ -1886,6 +1943,19 @@ function storedResearchRequest(prompt: string, parentSessionId: ResearchStageReq
   }
 }
 /** @returns The prompt version a run started with; runs stored before versioning are version 1. */
+function withHostChecks(base: string, checks: readonly (string | null)[]): string {
+  const extra = checks.filter((item): item is string => item !== null)
+  if (extra.length === 0) return base
+  return base.length === 0 ? extra.join(' ') : `${extra.join(' ')} ${base}`
+}
+
+function stripHook(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !('hookType' in value)) return value
+  const copy = { ...(value as Record<string, unknown>) }
+  delete copy.hookType
+  return copy
+}
+
 function stripPlants(value: unknown): unknown {
   if (value === null || typeof value !== 'object' || Array.isArray(value) || !('plants' in value)) return value
   const copy = { ...(value as Record<string, unknown>) }

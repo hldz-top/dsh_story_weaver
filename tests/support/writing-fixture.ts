@@ -260,7 +260,7 @@ function generate(state: ChildState): object {
       const chapterNumber = required(task.chapterNumber, 'chapterNumber')
       const sceneIds = required(task.sceneIds, 'sceneIds')
       if (sceneIds.length === 0) throw new Error('Body fixture requires an actual scene plan')
-      const sentence = '林澜沿着潮湿的石阶走向灯塔，仔细辨认海面上的每一道光，确认航道安全后才向岸边的同伴发出信号。'
+      const sentence = '林澜推开潮湿的灯塔门，却仔细辨认海面上的每一道光，确认航道安全后才向岸边的同伴发出信号。'
       const scenes = sceneIds.map((sceneId, index) => ({ sceneId, text: `林澜在第${chapterNumber}章继续调查雾港。${index === 0 ? required(task.obligations, 'obligations').map(item => item.description).join('') : ''}${sentence.repeat(Math.floor(80 / sceneIds.length) + (index < 80 % sceneIds.length ? 1 : 0))}林澜把确认过的航标记入日志，与同伴一起守住归航的灯光。` }))
       if (state.data.requirements.includes(BODY_PATCH_REQUIREMENT)) {
         return { version: 1, changes: scenes.map((scene, index) => ({ op: 'set', path: `scenes[${index}].text`, value: scene.text })) }

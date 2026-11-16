@@ -6,6 +6,7 @@ import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { evidenceQuoteOccurs, reportQuoteRepair, resolveEvidenceQuote, type QuoteRepair } from './evidence-quote.ts'
 import { openChecklistItems, openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import { expandParagraphCitations, type NumberedParagraph } from './paragraphs.ts'
+import { HOOK_TYPES } from './hook-type.ts'
 import { checkPlantList, foreshadowPlantSchema } from './plant-ledger.ts'
 import { echo, parseModelOutput, StageValidationRejection } from './stage-rejection.ts'
 
@@ -175,10 +176,15 @@ export const chapterOutlineSchemaV7 = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), title: text, throughLine: text,
   constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
 })
-/** Admission accepts a historical `targetWords` and a version-7 outline that omits it. */
+/** Version 15 publication. Optional `hookType` from the fixed checklist. Versions 1–14 keep {@link chapterOutlineSchemaV7}. */
+export const chapterOutlineSchemaV15 = chapterOutlineSchemaV7.extend({
+  hookType: z.enum(HOOK_TYPES).optional().describe('One closing hook: suspense, danger, gain, misread, or promise. Do not repeat the previous chapter.'),
+})
+/** Admission accepts a historical `targetWords`, a version-7 outline that omits it, and an optional version-15 hookType. */
 const chapterOutlineSchema = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), title: text, targetWords: targetWords.optional(), throughLine: text,
   constraints: z.array(text), obligations: z.array(obligationSchema), scenes: sceneCard, stateNotes,
+  hookType: z.enum(HOOK_TYPES).optional(),
 })
 const bodySchema = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), scenes: z.array(z.strictObject({ sceneId: text, text })).nonempty(),
@@ -215,8 +221,19 @@ export const continuitySchemaV14 = inputsSchema.extend({
  * Admission, and the schema version 15 publishes when the plant ledger is on. `plants` is optional.
  * A present list is checked by {@link checkPlantList}. The runner replaces a rejected list with the previous ledger.
  */
+const hookTypeField = z.enum(HOOK_TYPES).optional().describe('Closing hook copied from the chapter outline. Omit it when the outline did not set one.')
+const plantsField = z.array(foreshadowPlantSchema).optional().describe('Optional foreshadowing ledger. Omit it when this chapter carries and plants nothing.')
+/** Version 15 continuity with plants and without hookType. */
+export const continuitySchemaPlants = continuitySchemaV14.extend({ plants: plantsField })
+/** Version 15 continuity with hookType and without plants. */
+export const continuitySchemaHook = continuitySchemaV14.extend({ hookType: hookTypeField })
+/**
+ * Admission, and the schema version 15 publishes when both switches are on.
+ * `plants` and `hookType` are optional.
+ */
 const continuitySchema = continuitySchemaV14.extend({
-  plants: z.array(foreshadowPlantSchema).optional().describe('Optional foreshadowing ledger. Omit it when this chapter carries and plants nothing.'),
+  plants: plantsField,
+  hookType: hookTypeField,
 })
 
 /** Exact immutable source identity declared by a stage output. */
@@ -252,8 +269,18 @@ export const continuitySnapshotSchemaV14 = inputsSchema.extend({
 /**
  * Admission, and the schema version 15 publishes when the plant ledger is on. `plants` is optional.
  */
+/** Version 15 snapshot with plants and without hookType. */
+export const continuitySnapshotSchemaPlants = continuitySnapshotSchemaV14.extend({
+  plants: z.array(foreshadowPlantSchema).optional().describe('Optional foreshadowing ledger copied from admitted continuity.'),
+})
+/** Version 15 snapshot with hookType and without plants. */
+export const continuitySnapshotSchemaHook = continuitySnapshotSchemaV14.extend({ hookType: hookTypeField })
+/**
+ * Admission, and the schema version 15 publishes when both switches are on.
+ */
 const continuitySnapshotSchema = continuitySnapshotSchemaV14.extend({
   plants: z.array(foreshadowPlantSchema).optional().describe('Optional foreshadowing ledger copied from admitted continuity.'),
+  hookType: hookTypeField,
 })
 /** One reviewed chapter's compact continuity snapshot. */
 export type ContinuitySnapshotOutput = z.infer<typeof continuitySnapshotSchema>
