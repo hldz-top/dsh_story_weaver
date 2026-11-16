@@ -20,6 +20,7 @@ import { WritingRunner, type StartWritingInput } from '../../src/writing-runner.
 import { registerWritingTools } from '../../src/tools.ts'
 import { registerResearchTools } from '../../src/research-tools.ts'
 import { researchNecessitySchema } from '../../src/research-planning.ts'
+import { BODY_PATCH_REQUIREMENT } from '../../src/body-repair.ts'
 import { OUTLINE_PATCH_REQUIREMENT } from '../../src/outline-repair.ts'
 import { StageOutputSchemas } from '../../src/stage-output.ts'
 import { settingsCollectionSchema } from '../../src/manuscript-records.ts'
@@ -93,6 +94,8 @@ export interface WritingFixtureOptions {
   readonly registerWebTools?: boolean
   /** Plugin flag for settings snapshot reuse. Default true. */
   readonly reuseSettingsSnapshot?: boolean
+  /** Passed to the runner. Omitted keeps the default, which asks for a complete body when a body patch does not apply. */
+  readonly bodyPatchFallback?: boolean
   /** Run-store raw output cap. Default 262144. */
   readonly maxOutputBytes?: number
   /** Creative brief stored on the fixture novel. Default is the fog-harbor premise, which states no numbered required events. */
@@ -258,7 +261,11 @@ function generate(state: ChildState): object {
       const sceneIds = required(task.sceneIds, 'sceneIds')
       if (sceneIds.length === 0) throw new Error('Body fixture requires an actual scene plan')
       const sentence = '林澜沿着潮湿的石阶走向灯塔，仔细辨认海面上的每一道光，确认航道安全后才向岸边的同伴发出信号。'
-      return { ...base, chapterNumber, scenes: sceneIds.map((sceneId, index) => ({ sceneId, text: `林澜在第${chapterNumber}章继续调查雾港。${index === 0 ? required(task.obligations, 'obligations').map(item => item.description).join('') : ''}${sentence.repeat(Math.floor(80 / sceneIds.length) + (index < 80 % sceneIds.length ? 1 : 0))}林澜把确认过的航标记入日志，与同伴一起守住归航的灯光。` })) }
+      const scenes = sceneIds.map((sceneId, index) => ({ sceneId, text: `林澜在第${chapterNumber}章继续调查雾港。${index === 0 ? required(task.obligations, 'obligations').map(item => item.description).join('') : ''}${sentence.repeat(Math.floor(80 / sceneIds.length) + (index < 80 % sceneIds.length ? 1 : 0))}林澜把确认过的航标记入日志，与同伴一起守住归航的灯光。` }))
+      if (state.data.requirements.includes(BODY_PATCH_REQUIREMENT)) {
+        return { version: 1, changes: scenes.map((scene, index) => ({ op: 'set', path: `scenes[${index}].text`, value: scene.text })) }
+      }
+      return { ...base, chapterNumber, scenes }
     }
     case 'review': {
       const reviewed = required(task.reviewed, 'reviewed')
@@ -403,7 +410,11 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
   fixture.ctx.effect(() => () => runs.close())
   registerWritingTools(fixture.ctx, service, '.dsh-story')
   registerResearchTools(fixture.ctx, service)
-  const runner = new WritingRunner(fixture.ctx, service, runs, executionLimits, new StageDeliveries(fixture.ctx, service, runs, '.dsh-story'), { allowIncompleteSettings: options.allowIncompleteSettings ?? true, ...(options.reuseSettingsSnapshot === undefined ? {} : { reuseSettingsSnapshot: options.reuseSettingsSnapshot }) })
+  const runner = new WritingRunner(fixture.ctx, service, runs, executionLimits, new StageDeliveries(fixture.ctx, service, runs, '.dsh-story'), {
+    allowIncompleteSettings: options.allowIncompleteSettings ?? true,
+    ...(options.reuseSettingsSnapshot === undefined ? {} : { reuseSettingsSnapshot: options.reuseSettingsSnapshot }),
+    ...(options.bodyPatchFallback === undefined ? {} : { bodyPatchFallback: options.bodyPatchFallback }),
+  })
   fixture.ctx.effect(() => () => runner.close())
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
   const actor: Actor = { sessionId: fixture.parent.session.id, workspace: workspace.displayPath }

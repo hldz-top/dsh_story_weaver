@@ -94,6 +94,15 @@ it('writes a missing brief event into the body repair instruction while the revi
       const present = (stage.task.validationError ?? null) === null
         ? '三本入门诀全部失败。落石砸下，雷击打中他。一指尚未击出。'
         : '三本入门诀全部失败。落石砸下，雷击打中他。撞木反噬。一指尚未击出。'
+      if ('changes' in output && Array.isArray(output.changes)) {
+        const changes = output.changes as { op?: unknown; path?: unknown; value?: unknown }[]
+        return {
+          version: 1,
+          changes: changes.map(change => change.path === 'scenes[0].text' && typeof change.value === 'string'
+            ? { ...change, value: change.value.replaceAll(invented.description, '') + present }
+            : change),
+        }
+      }
       const body = StageOutputSchemas.body.parse(output)
       return {
         ...body,

@@ -191,7 +191,9 @@ export async function executeDirectStage(ctx: Context, exec: ToolExecution, requ
     const structured = parseStageJson(raw)
     const violations = validateJsonSchemaValue(request.outputSchema, structured)
     if (violations.length > 0) {
-      throw new StageExecutionError('stage-malformed', `Writing stage's model response could not be decoded (${MALFORMED_RESPONSE_CODE}): ${bounded(violations.join('; '))}`)
+      const rejected = new StageExecutionError('stage-malformed', `Writing stage's model response could not be decoded (${MALFORMED_RESPONSE_CODE}): ${bounded(violations.join('; '))}`)
+      rejected.rejectedOutput = structured
+      throw rejected
     }
     await store('output', raw, 'Writing stage could not store its output on the current session')
     signal.throwIfAborted()

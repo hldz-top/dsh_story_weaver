@@ -68,6 +68,7 @@ export function projectNativeStageSchema(schema: object): ObjectJsonSchema {
  * require `targetWords`. Version 7 book and chapter outlines omit it, so the model is not asked for a word number.
  * Version 7 reviews cite `{ paragraphId, problem }` instead of a copied quote. Version 8 adds optional `briefQuote` on each issue.
  * Versions before 9 publish continuity characters as `{ name, state }` only. Version 9 adds optional `name_note`.
+ * Version 10 publishes the same schemas as version 9.
  * @returns An object-root schema; the caller must still run canonical admission.
  */
 export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION): ObjectJsonSchema {

@@ -80,6 +80,8 @@ it('publishes optional name_note on version 9 continuity and keeps versions 1–
   expect(parseContinuityOutput(legacy, expected)).toEqual(legacy)
   const prompt = { novelId: 'novel_00000000-0000-4000-8000-000000000000' as never, inputs: [{ artifactId: source.artifactId, sha256: '0'.repeat(64), kind: 'settings', chars: 10 }], task: '{"x":1}', requirements: ['r1'] }
   for (const kind of kinds) expect(buildStagePrompt({ ...prompt, kind, promptVersion: 9 }), kind).toBe(buildStagePrompt({ ...prompt, kind, promptVersion: 8 }))
+  for (const kind of kinds) expect(buildStagePrompt({ ...prompt, kind, promptVersion: 10 }), kind).toBe(buildStagePrompt({ ...prompt, kind, promptVersion: 9 }))
+  for (const kind of kinds) expect(JSON.stringify(nativeStageOutputSchema(kind, 10)), kind).toBe(JSON.stringify(nativeStageOutputSchema(kind, 9)))
 })
 
 it('publishes version 7 outlines without targetWords and keeps it required through version 6', () => {

@@ -5,6 +5,7 @@ import { countStoryWords } from '../src/body-text.ts'
 import { parseArtifactId } from '../src/contracts.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { expect, it } from 'vitest'
+import { BODY_PATCH_REQUIREMENT } from '../src/body-repair.ts'
 import { OUTLINE_PATCH_REQUIREMENT } from '../src/outline-repair.ts'
 import { StageOutputSchemas } from '../src/stage-output.ts'
 import { WritingRunner } from '../src/writing-runner.ts'
@@ -647,14 +648,14 @@ it.each([
   const gap = direction === 'over' ? `${total - max} over the maximum` : `${min - total} under the minimum`
   expect(repair.task?.validationError).toBe(`The host counted ${total} Story-counted words (accepted ${min}–${max}): ${gap}. Scene counts: chapter-1-scene-1 ${sceneCounts[0]}, chapter-1-scene-2 ${sceneCounts[1]}, chapter-1-scene-3 ${sceneCounts[2]}. Return the complete chapter at about ${min} words by ${direction === 'over' ? 'condensing' : 'expanding'} every scene proportionally; keep every required event, scene identity and the chapter's actual outcome.`)
   const repairRequirements = loggedRequirements(await loggedPrompt(fixture, repairId))
-  expect(repairRequirements).toContain(line)
-  expect(repairRequirements).toContain(lengthRepairLine)
-  expect(repairRequirements.some(item => item.includes('Preserve unaffected facts and passages'))).toBe(false)
+  expect(repairRequirements).toEqual([BODY_PATCH_REQUIREMENT])
+  expect(repairRequirements).not.toContain(lengthRepairLine)
+  expect(repair.prompt).not.toContain('return the entire candidate')
 })
 
 it.each([
   { kind: 'book-outline' as const, line: OUTLINE_PATCH_REQUIREMENT },
-  { kind: 'body' as const, line: reviewRepairLine },
+  { kind: 'body' as const, line: BODY_PATCH_REQUIREMENT },
 ])('keeps the repair instruction and the review message when a $kind review blocks', async ({ kind, line }) => {
   let blocked = false
   const fixture = await useWritingFixture({ intervene(stage, output) {
@@ -672,7 +673,7 @@ it.each([
   const requirements = loggedRequirements(await loggedPrompt(fixture, repairId))
   expect(requirements).toContain(line)
   expect(requirements).not.toContain(lengthRepairLine)
-  if (kind === 'book-outline') expect(requirements).not.toContain(reviewRepairLine)
+  if (kind === 'book-outline' || kind === 'body') expect(requirements).not.toContain(reviewRepairLine)
   expect(repair.task?.validationError).toBe('Resolve the blocking issues in the exact supplied review.')
 })
 
