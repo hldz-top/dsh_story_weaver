@@ -1,5 +1,6 @@
 /** Model-output admission for versioned novel-writing stages. */
 import { z } from 'zod'
+import { AI_TONE_POISONS } from './ai-tone.ts'
 import { artifactIdSchema, type ArtifactId } from './contracts.ts'
 import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { evidenceQuoteOccurs, reportQuoteRepair, resolveEvidenceQuote, type QuoteRepair } from './evidence-quote.ts'
@@ -69,6 +70,7 @@ export const reviewParagraphSchemaV8 = reviewParagraphSchema.extend({
     evidence: z.array(paragraphCitationSchema).nonempty(),
   })),
 })
+const poisonSchema = z.enum(AI_TONE_POISONS).optional().describe('Style issues only. Reviewer judgment of why a host marker is bad: false-target, synonym, or forced. none means the marker is a legitimate use. Omit it on every other issue.')
 /**
  * Prompt version 12 review publication. Adds category `pov` and optional `paragraphId`.
  * A `pov-limited` issue must set `paragraphId`. Versions before 12 keep {@link reviewParagraphSchemaV8}.
@@ -85,6 +87,20 @@ export const reviewParagraphSchemaV11 = inputsSchema.extend({
   })),
 })
 /**
+ * Prompt version 13 review publication. Same fields as version 12, plus optional `poison`.
+ * Versions 7–12 do not publish it. Admission keeps the field when a style issue sets it and rejects it on every other category.
+ */
+export const reviewParagraphSchemaV13 = reviewParagraphSchemaV11.extend({
+  issues: z.array(z.strictObject({
+    id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchemaV11,
+    location: text, message: text,
+    paragraphId: paragraphIdSchema.optional().describe('Required when this issue is the pov-limited check. One id from task.paragraphs.'),
+    briefQuote: text.optional().describe('Verbatim excerpt of the creative brief. Required when this blocking issue is completeness or obligations.'),
+    poison: poisonSchema,
+    evidence: z.array(paragraphCitationSchema).nonempty(),
+  })),
+})
+/**
  * Host marker on an issue none of whose evidence can be found in any admitted input: the issue is kept, made advisory,
  * and keeps its original citations so the marker can be re-verified on every readback. Never part of the model schema.
  */
@@ -97,14 +113,14 @@ const storedChecklistSchema = z.strictObject({
     id: text, status: z.enum(['pass', 'fail', 'na']), paragraphId: z.string().regex(/^p[1-9][0-9]*$/u).optional(),
   })).nonempty(),
 })
-/** The admitted (stored) review. Category `pov` and optional `paragraphId` read back; versions before 11 do not publish them. */
+/** The admitted (stored) review. Category `pov`, optional `paragraphId`, and optional `poison` read back. */
 const admittedReviewSchema = inputsSchema.extend({
   reviewed: inputRefSchema,
   checks: z.array(z.strictObject({ category: reviewCategorySchemaV11, summary: text, evidence: z.array(citationSchema).nonempty() })).nonempty(),
   issues: z.array(z.strictObject({
     id: text, severity: z.enum(['blocking', 'advisory']).describe('Style issues must be advisory; every other category must be blocking.'), category: reviewCategorySchemaV11,
     location: text, message: text, paragraphId: paragraphIdSchema.optional(), evidence: z.array(citationSchema).nonempty(),
-    briefQuote: text.optional(), hostDowngrade: hostDowngradeSchema.optional(),
+    briefQuote: text.optional(), poison: poisonSchema, hostDowngrade: hostDowngradeSchema.optional(),
   })),
   checklist: storedChecklistSchema.optional(),
 })
@@ -537,6 +553,7 @@ export function parseReviewOutput(value: unknown, expected: {
   const missingChecks = requiredChecks.filter(category => !output.checks.some(check => check.category === category))
   if (missingChecks.length > 0) throw new StageValidationRejection(`Review is missing a required check: ${missingChecks.join(', ')} (required: ${requiredChecks.join(', ')})`)
   for (const issue of output.issues) {
+    if (issue.poison !== undefined && issue.category !== 'style') throw new StageValidationRejection(`poison belongs only on a style issue: issue ${echo(issue.id)} is ${issue.category}`)
     if (issue.category === 'pov' || (expected.admission?.povLimited === true && (issue.id === 'pov-limited' || issue.id.startsWith('pov-limited-')))) {
       if (issue.category !== 'pov' || (issue.id !== 'pov-limited' && !issue.id.startsWith('pov-limited-'))) {
         throw new StageValidationRejection(`A pov-limited issue must use category pov and an id of pov-limited. Issue ${echo(issue.id)} is ${issue.category}.`)

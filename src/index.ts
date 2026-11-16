@@ -14,6 +14,7 @@ import { StageDeliveries, registerStageDeliveryProjection } from './stage-delive
 import type { ResearchLimits } from './contracts.ts'
 import { onQuoteRepair } from './evidence-quote.ts'
 import { assertVerifiedDshHost, resolvedSubagentPackageVersion } from './host-contract.ts'
+import { AI_TONE_REPAIR_FLOORS, type AiToneRepairFloor } from './ai-tone.ts'
 import { normalizeWritingModel } from './writing-model.ts'
 
 export { openWritingService, WritingService } from './service.ts'
@@ -51,6 +52,11 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
    * This version does not treat metric values as a veto.
    */
   metricsBlocking: boolean
+  /**
+   * Lowest AI-tone grade a poison repair will touch on prompt version 13. `heavy` repairs only heavy poisons; a notice
+   * is recorded and a hint is ignored. Frozen into each new version-13 run. Default `heavy`. It does not fail a chapter.
+   */
+  aiToneRepairFloor: AiToneRepairFloor
   /**
    * Writing-stage model route. `inherit` uses the parent Agent's configured model and subscription for every stage.
    * A map names planning, review and body. `opencode-go` is rejected: OpenCode Go is a host subscription, and this plugin registers no adapter.
@@ -90,6 +96,7 @@ export const Config: z<Config> = z.object({
   allowSettingsImport: z.boolean().default(false),
   aiToneBlocking: z.boolean().default(true),
   metricsBlocking: z.boolean().default(false),
+  aiToneRepairFloor: z.union([z.const('hint'), z.const('notice'), z.const('heavy')]).default('heavy'),
   writingModel: z.any().default('inherit'),
   researchEnabled: z.boolean().default(false),
   researchBudgetFloor: z.number().default(1),
@@ -126,6 +133,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.stageTimeoutMs > 2_147_483_647) throw new Error('stageTimeoutMs exceeds the supported timer range')
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
   if (typeof config.metricsBlocking !== 'boolean') throw new Error('metricsBlocking must be a boolean')
+  if (!AI_TONE_REPAIR_FLOORS.includes(config.aiToneRepairFloor)) throw new Error('aiToneRepairFloor must be hint, notice, or heavy')
   if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
   const writingModel = normalizeWritingModel(config.writingModel)
@@ -136,7 +144,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     maxStageRequests: config.maxStageRequests, stageTimeoutMs: config.stageTimeoutMs, maxRepairAttempts: config.maxRepairAttempts,
     maxParallelStages: config.maxParallelStages, settingsCandidateCount,
     minChapterWords: config.minChapterWords, maxChapterWords: config.maxChapterWords,
-    aiToneBlocking: config.aiToneBlocking, metricsBlocking: config.metricsBlocking, writingModel, researchEnabled: config.researchEnabled, researchBudgetFloor: config.researchBudgetFloor }
+    aiToneBlocking: config.aiToneBlocking, metricsBlocking: config.metricsBlocking, aiToneRepairFloor: config.aiToneRepairFloor, writingModel, researchEnabled: config.researchEnabled, researchBudgetFloor: config.researchBudgetFloor }
   const researchLimits: ResearchLimits = {
     maxResearchQuestions: config.maxResearchQuestions,
     maxResearchCalls: config.maxResearchCalls,

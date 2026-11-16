@@ -1,4 +1,5 @@
 /** Logged writing-stage instructions derived from Story V2 business roles. */
+import type { AiToneRepairFloor } from './ai-tone.ts'
 import type { ArtifactId, NovelId } from './contracts.ts'
 import { isOpenChecklistCode, openChecklistItems, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import type { SettingsDimensionKind } from './settings-catalog.ts'
@@ -18,10 +19,12 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * Version 11, for new runs only, tells a body review that task.metrics is advisory. Versions 1–10 stay frozen.
  * Version 12, for new runs only, adds the body-review `pov-limited` sentence and publishes category `pov`.
  * Versions 1–11 stay frozen.
+ * Version 13, for new runs only, tells a body review to set optional `poison` and repairs only a present poison other
+ * than `none` whose marker grade meets the run floor. Versions 1–12 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 12
+export const CURRENT_PROMPT_VERSION: PromptVersion = 13
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
@@ -51,6 +54,11 @@ export interface StagePromptRequest {
    * every other stage.
    */
   readonly aiToneBlocking?: boolean
+  /**
+   * Version 13 body reviews only. The sentence names this floor. Omitted means the default `heavy`.
+   * Ignored before version 13 and for every other stage.
+   */
+  readonly aiToneRepairFloor?: AiToneRepairFloor
 }
 
 /** Versions 1–6. Version 7 drops the scene-allocation clause; the per-scene ceiling rule stays, because that is the host rule already in this sentence. */
@@ -125,6 +133,20 @@ const aiToneGradedGuardrails: Partial<Record<StagePromptKind, readonly string[]>
     'When task.aiToneMarkers is present, it is a density-graded hint report of narration markers (after lieflat-less-ai-tone): each marker carries grade hint, notice, or heavy from its count per thousand narration Han characters. Report a real notice or heavy instance as a style issue with severity advisory, quoting the narration; a hint may be omitted. Dialogue and panels are exempt. A dash or a 、 list is only this graded hint. Style and AI-tone findings never fail the chapter and never block application. Ignore false positives, and never treat questions, metaphors, sentence-length rhythm, passive voice or long sentences as AI tone.',
   ],
 }
+/**
+ * Version 13 body reviews replace the version-7 sentence. The reviewer names a poison on each style issue.
+ * The host repairs only when that poison is present and not `none` and the covered marker grade meets the run floor.
+ * Style still cannot fail the chapter. Versions 1–12 do not receive this sentence.
+ */
+function poisonReviewSentence(floor: AiToneRepairFloor): string {
+  const effect = floor === 'notice'
+    ? 'The floor is notice: a notice or heavy poison is repaired, and a hint is ignored.'
+    : floor === 'hint'
+      ? 'The floor is hint: a hint, notice, or heavy poison is repaired.'
+      : 'The floor is heavy: a heavy poison is repaired, a notice is recorded only, and a hint is ignored.'
+  return `When task.aiToneMarkers is present, it is a density-graded report of narration markers (after lieflat-less-ai-tone): each marker carries grade hint, notice, or heavy from its count per thousand narration Han characters. The marker rule is host evidence of where the pattern is. On a style issue set optional poison to false-target, synonym, forced, or none: false-target means the sentence aims at the wrong thing, synonym means a swapped near-synonym, and forced means a forced contrast. none means that host marker is a legitimate use. Omit poison unless the issue is style. Report a real notice or heavy instance as a style issue with severity advisory. Do not file a hint. Dialogue and panels are exempt. The host repairs a passage only when poison is present and is not none and the covered marker grade meets the run's aiToneRepairFloor. ${effect} Style and AI-tone findings never fail the chapter and never block application. Ignore false positives, and never treat questions, metaphors, sentence-length rhythm, passive voice or long sentences as AI tone.`
+}
+
 const aiToneBlockingGuardrails: Partial<Record<StagePromptKind, readonly string[]>> = {
   review: [
     'When task.aiToneMarkers is present, review the narration for AI tone using those host-detected markers (after lieflat-less-ai-tone): reversal framing (不是…而是), dense 、 lists, revealing dashes, set openers (说白了), nominalised summaries, translationese (当…时, 对于…来说, sentence-initial 然而/因此/此外, 这意味着) and zero-subject paragraph comments. Report each real instance as a style issue with severity advisory and an id starting with "ai-tone-", and quote the offending narration from the reviewed body as its evidence, copied character for character as one exact excerpt of the body. Keep these issues advisory: the host itself blocks the chapter and returns it for repair for every such issue whose quote, found verbatim in the narration (outside dialogue and panels), fully covers a host-detected marker; an AI-tone issue without such a quote is recorded but does not block. Ignore dialogue and panels, never treat questions, metaphors, sentence-length rhythm, passive voice or long sentences as AI tone, and do not report markers that are false positives.',
@@ -317,6 +339,7 @@ function guardrailLines(request: StagePromptRequest): readonly string[] {
 function aiToneLines(request: StagePromptRequest): readonly string[] {
   const version = request.promptVersion ?? 1
   if (version < 3 || (request.kind === 'review' && request.reviewedKind !== 'body')) return []
+  if (version >= 13 && request.kind === 'review') return [poisonReviewSentence(request.aiToneRepairFloor ?? 'heavy')]
   if (version >= 7 && request.kind === 'review') return aiToneGradedGuardrails.review ?? []
   if (version >= 5 && request.aiToneBlocking === true && request.kind === 'review') return aiToneBlockingGuardrails.review ?? []
   return aiToneGuardrails[request.kind] ?? []

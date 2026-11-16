@@ -8,6 +8,7 @@ import { defineDomain, domainTable, type Domain, type DomainFacility } from '@de
 import { z } from 'zod'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { StageInputRef } from './stage-output.ts'
+import { AI_TONE_REPAIR_FLOORS } from './ai-tone.ts'
 import { CURRENT_PROMPT_VERSION, type PromptVersion } from './stage-prompts.ts'
 import { artifactIdSchema, novelIdSchema, requestIdSchema, type Actor, type NovelId } from './contracts.ts'
 
@@ -44,6 +45,11 @@ const executionLimitsSchema = z.strictObject({
    * read the flag as a veto.
    */
   metricsBlocking: z.boolean().exactOptional(),
+  /**
+   * Prompt version 13 and later only. Lowest AI-tone grade a poison repair will touch. Recorded on every such run
+   * (begin fills `heavy` when the caller passed none). Absent on earlier runs, which do not poison-repair.
+   */
+  aiToneRepairFloor: z.enum(AI_TONE_REPAIR_FLOORS).exactOptional(),
   /** Per-stage route captured for the run. Absent on runs stored before stage routing; those keep the parent model. */
   writingModel: z.strictObject({
     planning: writingModelChoiceSchema, review: writingModelChoiceSchema, body: writingModelChoiceSchema,
@@ -130,7 +136,7 @@ const runSchema = z.strictObject({
   startedBy: sessionIdSchema, lastResumedBy: sessionIdSchema,
   attempts: z.array(attemptSchema), error: z.string().nullable(),
   // Prompt text version fixed at creation so a resume rebuilds identical prompts; absent on runs created before versioning (= 1).
-  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12)]).optional(),
+  promptVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9), z.literal(10), z.literal(11), z.literal(12), z.literal(13)]).optional(),
 })
 /** Detached progress metadata; raw stage outputs are read explicitly. */
 export type WritingRun = Omit<RunRecord, 'attempts'> & { readonly attempts: readonly WritingAttempt[] }
@@ -453,16 +459,19 @@ function pickRequest(run: RunRecord) {
 
 /**
  * A run on prompt version 5 or later always records aiToneBlocking (default on when the caller passed none); an older run
- * never does, so its body reviews stay advisory regardless of the deployment's current switch.
+ * never does, so its body reviews stay advisory regardless of the deployment's current switch. Prompt version 11 also
+ * records metricsBlocking (default false). Prompt version 13 also records aiToneRepairFloor (default heavy). Earlier
+ * runs omit a field even when the caller passed one.
  */
 function withAiToneBlocking(input: BeginRunInput, promptVersion: PromptVersion): BeginRunInput {
-  const { aiToneBlocking, metricsBlocking, ...limits } = input.executionLimits
+  const { aiToneBlocking, metricsBlocking, aiToneRepairFloor, ...limits } = input.executionLimits
   return {
     ...input,
     executionLimits: {
       ...limits,
       ...(promptVersion >= 5 ? { aiToneBlocking: aiToneBlocking ?? true } : {}),
       ...(promptVersion >= 11 ? { metricsBlocking: metricsBlocking ?? false } : {}),
+      ...(promptVersion >= 13 ? { aiToneRepairFloor: aiToneRepairFloor ?? 'heavy' } : {}),
     },
   }
 }

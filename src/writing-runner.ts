@@ -5,14 +5,14 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { paragraphsOfStoredCandidate } from './candidate-paragraphs.ts'
 import { nativeStageOutputSchema, openChecklistNativeSchema } from './native-stage-schema.ts'
 import { checklistRepairDecision, isOpenChecklistCode, openChecklistItems, type OpenChecklistCode } from './open-dimension-checklist.ts'
-import { AiToneReviewBlockedError, aiToneRepairInstruction, ImportRefusedError, ImportReviewBlockedError, SettingsIncompleteError, WritingError, parseArtifactId, parseRequestId, type Actor, type ArtifactId, type ArtifactRef, type ImportItem } from './contracts.ts'
+import { AiToneReviewBlockedError, aiTonePoisonRepairInstruction, aiToneRepairInstruction, ImportRefusedError, ImportReviewBlockedError, SettingsIncompleteError, WritingError, parseArtifactId, parseRequestId, type Actor, type ArtifactId, type ArtifactRef, type ImportItem } from './contracts.ts'
 import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
 import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
-import { aiToneHits, gradeAiTone } from './ai-tone.ts'
+import { aiToneHits, gradeAiTone, selectPoisonRepairHits, type AiToneRepairFloor } from './ai-tone.ts'
 import { buildResearchPrompt, validateResearchStageResult, RESEARCH_STAGE_OUTPUT_SCHEMA, researchStageTools, researchToolAuthorization, type ResearchStageRequest } from './research-stage.ts'
 import { buildResearchPlanningPrompt, researchNecessity, RESEARCH_PLANNING_OUTPUT_SCHEMA, type ResearchNecessity } from './research-planning.ts'
 import { attemptSettingsOfficialRetrieval, isSettingsOutputTarget, officialExcerptsFromPrompt, settingsLocalNecessity, storedResearchTask } from './settings-retrieval.ts'
@@ -403,6 +403,10 @@ export class WritingRunner {
     for (const key of ['minChapterWords', 'maxChapterWords'] as const) if (run.executionLimits[key] !== bounds[key]) mismatched.push({ key, saved: run.executionLimits[key], current: bounds[key] })
     if (promptVersionOf(run) >= 5 && aiToneBlockingOf(run) !== this.aiToneBlocking) mismatched.push({ key: 'aiToneBlocking', saved: aiToneBlockingOf(run), current: this.aiToneBlocking })
     if (promptVersionOf(run) >= 11 && metricsBlockingOf(run) !== this.metricsBlocking) mismatched.push({ key: 'metricsBlocking', saved: metricsBlockingOf(run), current: this.metricsBlocking })
+    if (promptVersionOf(run) >= 13) {
+      const saved = aiToneRepairFloorOf(run)
+      if (saved !== this.aiToneRepairFloor) mismatched.push({ key: 'aiToneRepairFloor', saved, current: this.aiToneRepairFloor })
+    }
     // Absent on archives stored before stage routing. Do not coerce a missing value to the live default before comparing:
     // that would either refuse every such run or treat a missing researchEnabled as false and skip research.
     if (run.executionLimits.writingModel !== undefined) {
@@ -423,6 +427,8 @@ export class WritingRunner {
   private get aiToneBlocking(): boolean { return this.limits.aiToneBlocking ?? true }
   /** The deployment's metrics flag for new runs; the plugin config default is off. Metric values are not a veto. */
   private get metricsBlocking(): boolean { return this.limits.metricsBlocking ?? false }
+  /** The deployment's poison-repair floor for new runs. The plugin config default is heavy. */
+  private get aiToneRepairFloor(): AiToneRepairFloor { return this.limits.aiToneRepairFloor ?? 'heavy' }
 
   /**
    * The host's AI-tone decision for one reviewed body, made in code (the reviewer files every style issue as advisory, which
@@ -436,8 +442,8 @@ export class WritingRunner {
    * @returns The blocking spans with the identities of the hits each covers (for repeat detection), and the body's text.
    */
   private aiToneGate(inv: Invocation, candidate: ManuscriptCandidateView): { readonly spans: ReadonlyMap<string, readonly string[]>; readonly body: string } | null {
-    // Prompt version 7 reports AI tone as a density grade. Style and AI tone do not block application, including a single
-    // dash or 、 list. Versions 5 and 6 keep the gate their prompts describe.
+    // Prompt version 7 reports AI tone as a density grade and does not block. Version 13 repairs a heavy poison in
+    // poisonRepair and still does not fail the chapter here. Versions 5 and 6 keep the gate their prompts describe.
     if (promptVersionOf(inv.run) >= 7) return null
     if (candidate.target.kind !== 'body' || candidate.review === null || candidate.aiTone === null || !aiToneBlockingOf(inv.run)) return null
     const body = proseView('body', this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id }).text)
@@ -454,6 +460,23 @@ export class WritingRunner {
       }
     }
     return { spans, body }
+  }
+
+  /**
+   * Prompt version 13 body repair. A style issue is repaired only when its poison is present and not `none` and the covered
+   * marker's grade meets the run floor. The host rule is evidence, not the poison value. Notice below the floor is left on the review. A hint below the floor is ignored.
+   * The returned spans never fail the chapter: the caller applies the body when nothing else blocks.
+   * @returns Null before version 13. Otherwise the excerpts to rewrite, their hit keys, and whether a prior repair already
+   * covered one of those hits.
+   */
+  private poisonRepair(inv: Invocation, candidate: ManuscriptCandidateView, previous: ReadonlySet<string> | null): { readonly spans: readonly string[]; readonly hitKeys: readonly string[]; readonly repeated: boolean } | null {
+    if (promptVersionOf(inv.run) < 13 || candidate.target.kind !== 'body' || candidate.review === null || candidate.aiTone === null) return null
+    const body = proseView('body', this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id }).text)
+    const { narration, hits } = aiToneHits(body)
+    const grades = new Map(gradeAiTone(candidate.aiTone).markers.map(marker => [marker.rule, marker.grade]))
+    const review = JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.review.id }).text) as { issues: readonly { category: string; poison?: string; evidence: readonly { artifactId: string; quote: string }[]; hostDowngrade?: unknown }[] }
+    const selected = selectPoisonRepairHits({ narration, hits, grades, floor: aiToneRepairFloorOf(inv.run), issues: review.issues, bodyArtifactId: candidate.artifact.id })
+    return { spans: selected.spans, hitKeys: selected.hitKeys, repeated: previous !== null && selected.hitKeys.some(key => previous.has(key)) }
   }
 
   /** Mark the latest admitted review of this candidate as AI-tone blocked, so the block is visible on the stored run record. */
@@ -1122,6 +1145,9 @@ export class WritingRunner {
     let validationError: string | null = null
     // AI-tone gate state (body, prompt version 5, aiToneBlocking on): the previous reviewed round's blocking spans and body text.
     let previousAiTone: { readonly hitKeys: ReadonlySet<string>; readonly body: string } | null = null
+    let previousPoisonKeys: ReadonlySet<string> | null = null
+    // Last body that was already clean and entered further rounds only to repair a heavy AI-tone poison (version 13).
+    let cleanPoisonBody: ManuscriptCandidateView | null = null
     let aiToneSpans: string[] = []
     let heldReview: { readonly candidate: ManuscriptCandidateView; readonly fails: number } | null = null
     // The last admitted book or chapter outline. From prompt version 7, a later repair patches this instead of rewriting it.
@@ -1178,7 +1204,19 @@ export class WritingRunner {
       // Required events are a host hit against the brief. The review is not asked to rediscover them.
       const missingEvents = target.kind === 'body' ? this.missingBodyEvents(inv, context.inputRefs, context.obligations, structured) : []
       const eventInstruction = missingEvents.length === 0 ? null : requiredEventRepairInstruction(missingEvents)
-      const reviewed = await this.reviewManuscript(inv, stageKey, candidate, context.requiredChecks)
+      let reviewed: ManuscriptCandidateView
+      try {
+        reviewed = await this.reviewManuscript(inv, stageKey, candidate, context.requiredChecks)
+      } catch (cause) {
+        // A later poison-repair round that cannot be admitted must not fail a chapter that already had a clean body.
+        if (promptVersionOf(inv.run) >= 13 && cleanPoisonBody !== null && cause instanceof WritingError && cause.code === 'review-blocked') {
+          validationError = cause.message
+          const held = cleanPoisonBody
+          feedback = held.review === null ? [held.artifact] : [held.artifact, held.review]
+          continue
+        }
+        throw cause
+      }
       const unfulfilled = target.kind === 'continuity' ? StageOutputSchemas.continuity.parse(structured).obligations.filter(item => item.status !== 'fulfilled') : []
       const incomplete = unfulfilled.length > 0
       const gate = this.aiToneGate(inv, reviewed)
@@ -1198,11 +1236,15 @@ export class WritingRunner {
         const last = repair === repairCap
         await this.markAiToneBlock(inv, stageKey, { reason: !last ? 'ai-tone' : repair === 0 ? 'ai-tone' : 'ai-tone-exhausted', spans: aiToneSpans })
       } else previousAiTone = null
+      const poison = this.poisonRepair(inv, reviewed, previousPoisonKeys)
+      const styleRepair = poison !== null && poison.spans.length > 0 && !poison.repeated && repair < repairCap
+      if (styleRepair && poison !== null) previousPoisonKeys = new Set(poison.hitKeys)
+      else if (poison === null || poison.spans.length === 0) previousPoisonKeys = null
       const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null
       if (promptVersionOf(inv.run) >= 8 && reviewBlocked && reviewed.review !== null) {
         const fails = blockingIssueCount(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: reviewed.review.id }).text))
         const decision = checklistRepairDecision(heldReview?.fails ?? null, fails, 'does-not-decrease')
-        if (decision === 'apply-previous') {
+        if (decision === 'apply-previous' && !(promptVersionOf(inv.run) >= 13 && cleanPoisonBody !== null)) {
           const held = heldReview
           if (held?.candidate.review == null) throw new WritingError('corrupt-artifact', 'Outline or manuscript convergence has no candidate to apply')
           await this.service.recordManuscriptConvergence(inv.actor, { novelId: inv.run.novelId, candidateId: held.candidate.artifact.id, reviewId: held.candidate.review.id, failCount: held.fails })
@@ -1210,16 +1252,25 @@ export class WritingRunner {
         }
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
-      if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null) return { candidate: reviewed, convergence: null }
+      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null
+      if (clean && !styleRepair) return { candidate: reviewed, convergence: null }
       if (aiToneSpans.length > 0) { validationError = withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction); repairMode = 'review' }
       else if (incomplete) { validationError = withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction); repairMode = 'review' }
       else if (reviewed.length?.blocking) { validationError = withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction); repairMode = 'length' }
       else if (eventInstruction !== null && reviewed.status !== 'blocked') { validationError = eventInstruction; repairMode = 'review' }
+      else if (clean && styleRepair && poison !== null) {
+        if (promptVersionOf(inv.run) >= 13) cleanPoisonBody = reviewed
+        validationError = aiTonePoisonRepairInstruction(poison.spans)
+        repairMode = 'review'
+      }
       else { validationError = withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction); repairMode = 'review' }
       feedback = this.feedback(reviewed)
     }
     // Never auto-pass: a body still carrying blocking AI tone when repairs run out ends review-blocked and is not applied.
     if (aiToneSpans.length > 0) throw new AiToneReviewBlockedError(repairCap === 0 ? 'ai-tone' : 'ai-tone-exhausted', aiToneSpans, key)
+    // Version 13: extra rounds that existed only to repair a heavy poison, and did not converge, apply the last clean body.
+    // The unresolved poison stays an advisory note on that review. AI tone does not leave the chapter review-blocked.
+    if (promptVersionOf(inv.run) >= 13 && cleanPoisonBody?.review != null) return { candidate: cleanPoisonBody, convergence: null }
     throw new WritingError('review-blocked', `Repair limit was exhausted for ${key}${validationError === null ? '' : `: ${validationError}`}`)
   }
 
@@ -1520,7 +1571,8 @@ export class WritingRunner {
       ], ...(settingsDimensionKind === undefined ? {} : { settingsDimensionKind }), ...(settingsCollectionKinds === undefined ? {} : { settingsCollectionKinds }),
       ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}),
       ...(settingsDimensionCode === undefined ? {} : { settingsDimensionCode }), promptVersion,
-      ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}) })
+      ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}),
+      ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 13 ? { aiToneRepairFloor: aiToneRepairFloorOf(inv.run) } : {}) })
     const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion))
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.
     const direct = batch !== 'consistency' && (kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot')
@@ -1755,6 +1807,11 @@ function metricsBlockingOf(run: WritingRun): boolean {
   if (promptVersionOf(run) < 11) return false
   if (run.executionLimits.metricsBlocking === undefined) throw new RunStoreError('corrupt-run', 'A prompt-version-11 run has no recorded metricsBlocking setting; it cannot resume. Stop it and begin a new request')
   return run.executionLimits.metricsBlocking
+}
+function aiToneRepairFloorOf(run: WritingRun): AiToneRepairFloor {
+  const floor = run.executionLimits.aiToneRepairFloor
+  if (floor === undefined) throw new RunStoreError('corrupt-run', 'A prompt-version-13 run has no recorded aiToneRepairFloor; it cannot resume. Stop it and begin a new request')
+  return floor
 }
 function previousSnapshot(sources: readonly { readonly kind: string; readonly text: string }[], chapterNumber: number): PreviousChapterSnapshot | null {
   let best: { chapterNumber: number; unrecoveredForeshadowing: { note: string }[] } | null = null

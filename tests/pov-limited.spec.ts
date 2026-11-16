@@ -82,7 +82,7 @@ it('passes an other-mind hint to the version-12 reviewer and still applies the c
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status, outcome.value.error ?? '').toBe('completed')
-  expect(outcome.value.promptVersion).toBe(12)
+  expect(outcome.value.promptVersion).toBe(13)
   const review = [...fixture.stages.values()].find(stage => stage.kind === 'review' && typeof stage.task?.measuredWordCount === 'number')
   if (review === undefined) throw new Error('body review did not run')
   const task = taskOf(review.prompt)
