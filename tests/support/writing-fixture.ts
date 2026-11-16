@@ -20,6 +20,7 @@ import { WritingRunner, type StartWritingInput } from '../../src/writing-runner.
 import { registerWritingTools } from '../../src/tools.ts'
 import { registerResearchTools } from '../../src/research-tools.ts'
 import { researchNecessitySchema } from '../../src/research-planning.ts'
+import { hookLabel, hookTypeForChapter } from '../../src/hook-rotation.ts'
 import { OUTLINE_PATCH_REQUIREMENT } from '../../src/outline-repair.ts'
 import { StageOutputSchemas } from '../../src/stage-output.ts'
 import { settingsCollectionSchema } from '../../src/manuscript-records.ts'
@@ -241,7 +242,7 @@ function generate(state: ChildState): object {
       // Versions before 7 publish a schema that requires targetWords and inject the acceptance range as a planning budget.
       const planWords = state.data.requirements.some(item => item.includes('chapter-total range'))
       return { ...base, contentMarkdown: `# 雾港航标\n\n林澜逐章查明航标的秘密，最终护送船队返航。${revision}`, ending: '林澜重燃港口灯塔，让船队安全返航。', characterArcs: [{ character: '林澜', development: '从独自怀疑转向依据证据与同伴合作。' }],
-        chapters: Array.from({ length: required(task.chapterCount, 'chapterCount') }, (_, index) => ({ chapterNumber: index + 1, title: `第${index + 1}章 雾港航标`, purpose: `林澜查明第${index + 1}处航标并记录证据。`, ...(planWords ? { targetWords: 4000 } : {}), obligations: [{ id: `signal-${index + 1}`, description: `林澜查明第${index + 1}处航标并记录证据。` }] })) }
+        chapters: Array.from({ length: required(task.chapterCount, 'chapterCount') }, (_, index) => ({ chapterNumber: index + 1, title: `第${index + 1}章 雾港航标`, purpose: `林澜查明第${index + 1}处航标并记录证据。${hookLabel(hookTypeForChapter(index + 1))}`, ...(planWords ? { targetWords: 4000 } : {}), obligations: [{ id: `signal-${index + 1}`, description: `林澜查明第${index + 1}处航标并记录证据。` }] })) }
     }
     case 'chapter-outline': {
       const chapterNumber = required(task.chapterNumber, 'chapterNumber')
@@ -250,7 +251,7 @@ function generate(state: ChildState): object {
       }
       const obligations = required(task.obligations, 'obligations')
       const planWords = state.data.requirements.some(item => item.includes('chapter-total range'))
-      return { ...base, chapterNumber, title: `第${chapterNumber}章 雾港航标`, ...(planWords ? { targetWords: 4000 } : {}), throughLine: `林澜走向第${chapterNumber}处航标，确认灯光信号并帮助船只返航。${revision}`, constraints: ['保持林澜已知的信息边界。'], obligations,
+      return { ...base, chapterNumber, title: `第${chapterNumber}章 雾港航标`, ...(planWords ? { targetWords: 4000 } : {}), throughLine: `林澜走向第${chapterNumber}处航标，确认灯光信号并帮助船只返航。${revision}${hookLabel(hookTypeForChapter(chapterNumber))}`, constraints: ['保持林澜已知的信息边界。'], obligations,
         scenes: [{ id: `chapter-${chapterNumber}-scene-1`, purpose: '在雾中确认航道并记录证据。', action: obligations.map(item => item.description).join(''), obligationIds: obligations.map(item => item.id) }] }
     }
     case 'body': {

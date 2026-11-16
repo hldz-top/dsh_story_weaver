@@ -42,11 +42,32 @@ export function measureBeats(output: BodyOutput): BodyBeats {
   return { totalChars, scenes, panels }
 }
 
+/** One Story word: a Han character, or one ASCII word or number. A new pattern each call, so a global regex cannot keep `lastIndex`. */
+function storyWordPattern(): RegExp {
+  return /[\u3400-\u4dbf\u4e00-\u9fff]|[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/gu
+}
+
 /** @param text - Reader-facing chapter prose. @returns The Story word count. */
 export function countStoryWords(text: string): number {
   let count = 0
-  for (const _match of text.matchAll(/[\u3400-\u4dbf\u4e00-\u9fff]|[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/g)) count += 1
+  for (const _match of text.matchAll(storyWordPattern())) count += 1
   return count
+}
+
+/**
+ * Prefix that contains the first `words` Story words.
+ * @param text - Reader-facing prose.
+ * @param words - Positive count. The same counter as {@link countStoryWords}.
+ * @returns The text through the end of that word, or the whole text when it has fewer words.
+ */
+export function prefixByStoryWords(text: string, words: number): string {
+  if (!Number.isSafeInteger(words) || words < 1) throw new RangeError('words must be a positive safe integer')
+  let count = 0
+  for (const match of text.matchAll(storyWordPattern())) {
+    count += 1
+    if (count === words) return text.slice(0, (match.index ?? 0) + match[0].length)
+  }
+  return text
 }
 
 /** @param output - Validated scene text in planned order. @param bounds - Positive safe integer inclusive chapter bounds; invalid or reversed limits throw RangeError. @returns Unmodified prose, measured words, and a blocking finding when outside the range. */

@@ -24,6 +24,8 @@ import { blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseCo
 import { projectContinuitySnapshot } from './continuity-snapshot.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
+import { hookRotationRepairInstruction, missingHookTypes } from './hook-rotation.ts'
+import { openingIn50Miss, openingIn50RepairInstruction } from './opening-in-50.ts'
 import { extractRequiredEvents, missingRequiredEvents, requiredEventRepairInstruction, type MissingRequiredEvent } from './required-events.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
 import { applyOutlinePatch, buildOutlineRepairPrompt, OUTLINE_PATCH_OUTPUT_SCHEMA, outlineRepairUsesPatch, type OutlineRepairKind } from './outline-repair.ts'
@@ -1155,6 +1157,9 @@ export class WritingRunner {
       // Required events are a host hit against the brief. The review is not asked to rediscover them.
       const missingEvents = target.kind === 'body' ? this.missingBodyEvents(inv, context.inputRefs, context.obligations, structured) : []
       const eventInstruction = missingEvents.length === 0 ? null : requiredEventRepairInstruction(missingEvents)
+      const openingInstruction = target.kind === 'body' ? this.openingInstruction(inv, structured) : null
+      const hookInstruction = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? this.hookInstruction(target.kind, structured) : null
+      const hostInstruction = joinInstructions(openingInstruction, eventInstruction, hookInstruction)
       const reviewed = await this.reviewManuscript(inv, stageKey, candidate, context.requiredChecks)
       const unfulfilled = target.kind === 'continuity' ? StageOutputSchemas.continuity.parse(structured).obligations.filter(item => item.status !== 'fulfilled') : []
       const incomplete = unfulfilled.length > 0
@@ -1175,7 +1180,7 @@ export class WritingRunner {
         const last = repair === repairCap
         await this.markAiToneBlock(inv, stageKey, { reason: !last ? 'ai-tone' : repair === 0 ? 'ai-tone' : 'ai-tone-exhausted', spans: aiToneSpans })
       } else previousAiTone = null
-      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null
+      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && hostInstruction === null
       if (promptVersionOf(inv.run) >= 8 && reviewBlocked && reviewed.review !== null) {
         const fails = blockingIssueCount(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: reviewed.review.id }).text))
         const decision = checklistRepairDecision(heldReview?.fails ?? null, fails, 'does-not-decrease')
@@ -1187,12 +1192,12 @@ export class WritingRunner {
         }
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
-      if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null) return { candidate: reviewed, convergence: null }
-      if (aiToneSpans.length > 0) { validationError = withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction); repairMode = 'review' }
-      else if (incomplete) { validationError = withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction); repairMode = 'review' }
-      else if (reviewed.length?.blocking) { validationError = withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction); repairMode = 'length' }
-      else if (eventInstruction !== null && reviewed.status !== 'blocked') { validationError = eventInstruction; repairMode = 'review' }
-      else { validationError = withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction); repairMode = 'review' }
+      if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && hostInstruction === null) return { candidate: reviewed, convergence: null }
+      if (aiToneSpans.length > 0) { validationError = withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, hostInstruction); repairMode = 'review' }
+      else if (incomplete) { validationError = withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, hostInstruction); repairMode = 'review' }
+      else if (reviewed.length?.blocking) { validationError = withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), hostInstruction); repairMode = 'length' }
+      else if (hostInstruction !== null && reviewed.status !== 'blocked') { validationError = hostInstruction; repairMode = 'review' }
+      else { validationError = withRequiredEvents('Resolve the blocking issues in the exact supplied review.', hostInstruction); repairMode = 'review' }
       feedback = this.feedback(reviewed)
     }
     // Never auto-pass: a body still carrying blocking AI tone when repairs run out ends review-blocked and is not applied.
@@ -1551,6 +1556,38 @@ export class WritingRunner {
     return missingRequiredEvents(assembleBody(body.data), extractRequiredEvents({ briefText, obligations }))
   }
 
+  /**
+   * Chapter 1 must hit the brief's opening requirement inside the first 50 Story-counted words.
+   * Other chapters, and a brief that states no opening, are not a miss.
+   */
+  private openingInstruction(inv: Invocation, structured: unknown): string | null {
+    const novelId = inv.run.novelId
+    const brief = this.service.getNovel(inv.actor, novelId).brief
+    if (brief.id !== inv.run.briefArtifactId) throw new WritingError('revision-conflict', 'Creative brief changed during writing')
+    const briefText = this.service.getArtifact(inv.actor, { novelId, artifactId: brief.id }).text
+    const body = StageOutputSchemas.body.safeParse(structured)
+    if (!body.success) throw new WritingError('corrupt-artifact', 'Admitted chapter body cannot be read for the openingIn50 check')
+    const miss = openingIn50Miss({ chapterNumber: body.data.chapterNumber, bodyText: assembleBody(body.data), briefText })
+    return miss === null ? null : openingIn50RepairInstruction(miss)
+  }
+
+  /**
+   * Each chapter names the hook type assigned from its chapter number. The label lives in existing prose fields.
+   * @param kind - Book outline checks every chapter purpose. Chapter outline checks that chapter's throughLine.
+   */
+  private hookInstruction(kind: 'book-outline' | 'chapter-outline', structured: unknown): string | null {
+    if (kind === 'book-outline') {
+      const parsed = StageOutputSchemas['book-outline'].safeParse(structured)
+      if (!parsed.success) throw new WritingError('corrupt-artifact', 'Admitted book outline cannot be read for the hook-type check')
+      const missing = missingHookTypes(parsed.data.chapters.map(chapter => ({ chapterNumber: chapter.chapterNumber, text: chapter.purpose })))
+      return missing.length === 0 ? null : hookRotationRepairInstruction(missing)
+    }
+    const parsed = StageOutputSchemas['chapter-outline'].safeParse(structured)
+    if (!parsed.success) throw new WritingError('corrupt-artifact', 'Admitted chapter outline cannot be read for the hook-type check')
+    const missing = missingHookTypes([{ chapterNumber: parsed.data.chapterNumber, text: parsed.data.throughLine }])
+    return missing.length === 0 ? null : hookRotationRepairInstruction(missing)
+  }
+
   private feedback(candidate: SettingsCandidateView | ManuscriptCandidateView): ArtifactRef[] {
     return candidate.review === null ? [candidate.artifact] : [candidate.artifact, candidate.review]
   }
@@ -1621,9 +1658,15 @@ function chapterRangeRequirement(kind: StagePromptKind, limits: Pick<RunExecutio
 function chapterAim(limits: Pick<RunExecutionLimits, 'minChapterWords' | 'maxChapterWords'>, promptVersion: PromptVersion): number {
   return promptVersion >= 7 ? limits.minChapterWords : Math.round((limits.minChapterWords + limits.maxChapterWords) / 2)
 }
-/** Puts the host hit-check ahead of any other repair text. A null instruction leaves the base unchanged. */
+/** Puts host hit-checks ahead of any other repair text. A null instruction leaves the base unchanged. */
 function withRequiredEvents(base: string, eventInstruction: string | null): string {
   return eventInstruction === null ? base : `${eventInstruction} ${base}`
+}
+
+/** @param parts - Host check instructions. Null parts are omitted. @returns One instruction, or null when every part is null. */
+function joinInstructions(...parts: readonly (string | null)[]): string | null {
+  const present = parts.filter((part): part is string => part !== null)
+  return present.length === 0 ? null : present.join(' ')
 }
 
 /** Length repair guidance from the host's own measurement: the exact count, the accepted range, the overage, every scene's count from the same Story counter (separators add no words, so they sum to the count) and the aim. */
