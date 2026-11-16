@@ -389,6 +389,23 @@ it('rejects planned content substituted for a reviewed continuity snapshot', asy
       scenes: [{ id: 'key', purpose: 'Find the key.', action: 'The keeper searches.', obligationIds: ['key'] }] } })).rejects.toThrow(/input/i)
 })
 
+it.each(['json', 'sqlite'] as const)('%s reads a previously stored continuity snapshot back after restart', async backend => {
+  const { h, actor, novel, apply, body, continuity } = await completedPair(backend)
+  await h.service.applyChapter(actor, apply)
+  const snapshotRefs = [body.artifact, continuity.artifact].map(ref => ({ artifactId: ref.id, sha256: ref.sha256 }))
+  const output = { version: 1, inputRefs: snapshotRefs, chapterNumber: 1, characterStatus: [{ name: 'Keeper', status: 'Has the log.' }],
+    unrecoveredForeshadowing: [{ note: 'The key is still missing.' }], usedPlotBridges: [{ note: 'The log was recovered.' }] }
+  const snapshot = await h.service.saveContinuitySnapshot(actor, { novelId: novel.id, requestId: parseRequestId('snapshot'), chapterNumber: 1,
+    bodyId: body.artifact.id, continuityId: continuity.artifact.id, childSessionId: child, snapshotThrough: 0, output })
+  const snapshotReview = await reviewVersion(h, actor, novel.id, snapshot, 'snapshot-review', 'Has the log.')
+  await h.service.attachContinuitySnapshot(actor, { novelId: novel.id, chapterNumber: 1, bodyId: body.artifact.id, continuityId: continuity.artifact.id, snapshotId: snapshot.artifact.id, reviewId: snapshotReview.reviewId })
+  await h.restart()
+  const chapter = h.service.getManuscript(actor, novel.id).appliedChapters[0]
+  expect(chapter?.snapshot?.id).toBe(snapshot.artifact.id)
+  expect(JSON.parse(h.service.getArtifact(actor, { novelId: novel.id, artifactId: snapshot.artifact.id }).text)).toEqual(output)
+  expect(h.service.getManuscript(actor, novel.id).history.find(item => item.artifact.id === snapshot.artifact.id)).toMatchObject({ status: 'applied', childSessionId: child })
+})
+
 it('rejects invalid chapter bounds without opening a writing domain', async () => {
   for (const bounds of [{ minChapterWords: 0, maxChapterWords: 5000 }, { minChapterWords: 3000, maxChapterWords: Infinity }, { minChapterWords: 5000, maxChapterWords: 3000 }]) {
     await expect(useStorage('json', limits, undefined, undefined, bounds)).rejects.toMatchObject({ code: 'invalid-input' })

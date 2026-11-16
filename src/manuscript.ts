@@ -46,7 +46,7 @@ export interface ManuscriptContext {
 /** Exact applied chapter a snapshot is extracted from. `snapshotThrough` is the highest earlier chapter whose snapshot may be read. */
 export interface SaveContinuitySnapshotRequest {
   readonly novelId: NovelId; readonly requestId: RequestId; readonly chapterNumber: number
-  readonly bodyId: ArtifactId; readonly continuityId: ArtifactId; readonly childSessionId: SessionId
+  readonly bodyId: ArtifactId; readonly continuityId: ArtifactId; readonly childSessionId: SessionId | null
   readonly output: unknown; readonly snapshotThrough?: number
 }
 /** Attach one passing snapshot to the applied chapter pair it describes. */
@@ -697,7 +697,7 @@ export class ManuscriptStore {
         return { kind: 'settings' as const, output }
       }
       if (candidate.target.kind === 'continuity-snapshot') {
-        if (candidate.researchPlanId !== null || candidate.childSessionId === null || candidate.revisionOf !== null) throw new Error('Continuity snapshot provenance is incomplete')
+        if (candidate.researchPlanId !== null || candidate.revisionOf !== null) throw new Error('Continuity snapshot provenance is incomplete')
         const output = parseContinuitySnapshot(value, { inputRefs: candidate.inputRefs, chapterNumber: candidate.target.chapterNumber })
         const body = sources.at(-2)
         const continuity = sources.at(-1)

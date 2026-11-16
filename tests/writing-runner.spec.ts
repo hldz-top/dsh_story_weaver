@@ -336,8 +336,8 @@ it('threads the host chapter-total range and settings kind-awareness correctly a
     }
     checked += 1
   }
-  // settings draft, consistency review, book-outline/chapter-outline/body/continuity/snapshot and each manuscript review.
-  expect(checked).toBe(12)
+  // settings draft, consistency review, book-outline/chapter-outline/body/continuity and each manuscript review. The snapshot is host-copied and has no model stage.
+  expect(checked).toBe(10)
   // The counting rule and the not-a-defect sentence reach the body and its review. The aim reaches only the body.
   expect(seen).toEqual({ counting: 2, aim: 1, notDefect: 1 })
 })
