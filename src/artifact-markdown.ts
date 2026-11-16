@@ -134,7 +134,10 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
   } else if (artifact.kind === 'continuity') {
     const continuity = parseContent(StageOutputSchemas.continuity, artifact.text)
     sections.push(`# Chapter ${continuity.chapterNumber} continuity`, '## Summary', style.text(continuity.summary))
-    for (const character of continuity.characters) sections.push('## Character', 'Name', style.text(character.name), 'State', style.text(character.state))
+    for (const character of continuity.characters) {
+      sections.push('## Character', 'Name', style.text(character.name), 'State', style.text(character.state))
+      if (character.name_note !== undefined) sections.push('Name note', style.text(character.name_note))
+    }
     for (const event of continuity.timeline) sections.push('## Timeline event', style.text(event.event), ...evidenceSections(style, event.evidence))
     for (const obligation of continuity.obligations) sections.push('## Required event', 'ID', style.text(obligation.id), `Status: ${obligation.status}`, 'Explanation', style.text(obligation.explanation), ...evidenceSections(style, obligation.evidence))
     for (const input of continuity.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)

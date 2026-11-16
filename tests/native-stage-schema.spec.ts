@@ -4,7 +4,8 @@ import { nativeStageOutputSchema, projectNativeStageSchema } from '../src/native
 import type { StagePromptKind } from '../src/stage-prompts.ts'
 import { parseArtifactId } from '../src/contracts.ts'
 import { executeStage, type StageExecutionConfig } from '../src/stage-executor.ts'
-import { parseSettingsDimensionOutput, StageOutputSchemas } from '../src/stage-output.ts'
+import { parseContinuityOutput, parseSettingsDimensionOutput, StageOutputSchemas } from '../src/stage-output.ts'
+import { buildStagePrompt } from '../src/stage-prompts.ts'
 import { call } from './support/model.ts'
 import { useStageFixture } from './support/stage-fixture.ts'
 
@@ -54,6 +55,31 @@ it.each(kinds)('captures %s through the actual native child structured-output to
   expect(outcome).toMatchObject({ status: 'fulfilled', value: { structured: output } })
   expect(fixture.childRequests).toHaveLength(1)
   expect(fixture.ctx.agents.list()).toEqual([fixture.parent])
+})
+
+it('publishes optional name_note on version 9 continuity and keeps versions 1–8 on { name, state }', () => {
+  const legacy = outputs.continuity
+  const noted = { ...legacy, characters: [{ name: 'The keeper', state: 'Holds the log.', name_note: 'The crew calls her Lan.' }] }
+  const frozen = JSON.stringify(nativeStageOutputSchema('continuity', 1))
+  expect(frozen).not.toContain('name_note')
+  for (const promptVersion of [1, 2, 3, 4, 5, 6, 7, 8] as const) {
+    expect(JSON.stringify(nativeStageOutputSchema('continuity', promptVersion)), String(promptVersion)).toBe(frozen)
+    expect(validateJsonSchemaValue(nativeStageOutputSchema('continuity', promptVersion), noted), String(promptVersion)).not.toEqual([])
+    expect(validateJsonSchemaValue(nativeStageOutputSchema('continuity', promptVersion), legacy), String(promptVersion)).toEqual([])
+  }
+  const current = nativeStageOutputSchema('continuity')
+  expect(JSON.stringify(current)).toContain('name_note')
+  expect(current.properties?.characters?.items?.properties?.name_note).toMatchObject({ type: 'string' })
+  expect(current.properties?.characters?.items?.required).toEqual(['name', 'state'])
+  expect(validateJsonSchemaValue(current, noted)).toEqual([])
+  expect(validateJsonSchemaValue(current, legacy)).toEqual([])
+  expect(validateJsonSchemaValue(current, { ...legacy, characters: [{ name: 'The keeper', state: 'Holds the log.', extra: true }] })).not.toEqual([])
+  const source = legacy.inputRefs[0]!
+  const expected = { inputRefs: [source], chapterNumber: 1, obligationIds: [] as string[], reviewedBodyId: source.artifactId, evidenceSources: [{ artifactId: source.artifactId, text: 'The keeper opens the log.' }] }
+  expect(parseContinuityOutput(noted, expected).characters[0]).toEqual(noted.characters[0])
+  expect(parseContinuityOutput(legacy, expected)).toEqual(legacy)
+  const prompt = { novelId: 'novel_00000000-0000-4000-8000-000000000000' as never, inputs: [{ artifactId: source.artifactId, sha256: '0'.repeat(64), kind: 'settings', chars: 10 }], task: '{"x":1}', requirements: ['r1'] }
+  for (const kind of kinds) expect(buildStagePrompt({ ...prompt, kind, promptVersion: 9 }), kind).toBe(buildStagePrompt({ ...prompt, kind, promptVersion: 8 }))
 })
 
 it('publishes version 7 outlines without targetWords and keeps it required through version 6', () => {
