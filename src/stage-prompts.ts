@@ -15,10 +15,11 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * The prompt text is unchanged from version 8. Version 10, for new runs only, keeps that same prompt text and the
  * same published stage schemas. Once a body has been admitted, a later repair asks for a patch of the changed fields
  * or paragraphs. Versions 1–9 still ask for the complete body, so a resume rebuilds those repair prompts byte for byte.
+ * Version 11, for new runs only, tells a body review that task.metrics is advisory. Versions 1–10 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 10
+export const CURRENT_PROMPT_VERSION: PromptVersion = 11
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
@@ -171,6 +172,15 @@ function reviewConstraintLines(request: StagePromptRequest): readonly string[] {
   return [REVIEW_BRIEF_ONLY, REVIEW_CHINESE]
 }
 
+/** Version 11 body reviews. The figures are host measurements. A keyword miss only reminds; it does not veto the draft. */
+const REVIEW_METRICS = 'task.metrics reports the host-measured wordCount, dialogueRatio, hookWindow, beatPositions and eventHits of this assembled chapter. metricsBlocking is the recorded host flag and defaults to false. These figures are advisory: an eventHits miss only reminds and is not a pass condition or a veto of the draft. Do not replace the host count with an estimate. Do not write percentage positions or per-beat word quotas into a book outline or a chapter outline.'
+
+/** @param request - The stage being prompted. @returns The version-11 metrics sentence for a body review, or none. */
+function metricsLines(request: StagePromptRequest): readonly string[] {
+  if ((request.promptVersion ?? 1) < 11 || request.kind !== 'review' || request.reviewedKind !== 'body') return []
+  return [REVIEW_METRICS]
+}
+
 /** @param request - The stage being prompted. @returns Version-6 sentences for that stage, or none before version 6. */
 function qualityParagraphs(request: StagePromptRequest): readonly string[] {
   if ((request.promptVersion ?? 1) < 6) return []
@@ -316,6 +326,7 @@ export function buildStagePrompt(request: StagePromptRequest): string {
     ...((request.promptVersion ?? 1) >= 4 ? aiToneWritingGuardrails[request.kind] ?? [] : []),
     ...qualityParagraphs(request),
     ...reviewConstraintLines(request),
+    ...metricsLines(request),
   ]
   return [...instructions, 'TASK_DATA', JSON.stringify({
     novelId: request.novelId, kind: request.kind, inputs: request.inputs, task: request.task, requirements: request.requirements,

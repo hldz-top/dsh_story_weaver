@@ -42,10 +42,27 @@ export function measureBeats(output: BodyOutput): BodyBeats {
   return { totalChars, scenes, panels }
 }
 
+/** The Story counter: one Han character in the published ranges, or one ASCII word. A fresh pattern each call, so lastIndex cannot leak. */
+function storyWordPattern(): RegExp {
+  return /[\u3400-\u4dbf\u4e00-\u9fff]|[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/g
+}
+
 /** @param text - Reader-facing chapter prose. @returns The Story word count. */
 export function countStoryWords(text: string): number {
   let count = 0
-  for (const _match of text.matchAll(/[\u3400-\u4dbf\u4e00-\u9fff]|[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/g)) count += 1
+  for (const _match of text.matchAll(storyWordPattern())) count += 1
+  return count
+}
+
+/**
+ * Han characters counted by {@link countStoryWords}. ASCII words in that same counter are not included.
+ * @param text - Reader-facing chapter prose.
+ */
+export function countHanChars(text: string): number {
+  let count = 0
+  for (const match of text.matchAll(storyWordPattern())) {
+    if (/^[\u3400-\u4dbf\u4e00-\u9fff]$/u.test(match[0])) count += 1
+  }
   return count
 }
 

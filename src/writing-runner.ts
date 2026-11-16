@@ -24,6 +24,7 @@ import { blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseCo
 import { projectContinuitySnapshot } from './continuity-snapshot.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
+import { measureChapterMetrics, type PreviousChapterSnapshot } from './review-metrics.ts'
 import { extractRequiredEvents, missingRequiredEvents, requiredEventRepairInstruction, type MissingRequiredEvent } from './required-events.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
 import { applyOutlinePatch, buildOutlineRepairPrompt, OUTLINE_PATCH_OUTPUT_SCHEMA, outlineRepairUsesPatch, type OutlineRepairKind } from './outline-repair.ts'
@@ -400,6 +401,7 @@ export class WritingRunner {
     }
     for (const key of ['minChapterWords', 'maxChapterWords'] as const) if (run.executionLimits[key] !== bounds[key]) mismatched.push({ key, saved: run.executionLimits[key], current: bounds[key] })
     if (promptVersionOf(run) >= 5 && aiToneBlockingOf(run) !== this.aiToneBlocking) mismatched.push({ key: 'aiToneBlocking', saved: aiToneBlockingOf(run), current: this.aiToneBlocking })
+    if (promptVersionOf(run) >= 11 && metricsBlockingOf(run) !== this.metricsBlocking) mismatched.push({ key: 'metricsBlocking', saved: metricsBlockingOf(run), current: this.metricsBlocking })
     // Absent on archives stored before stage routing. Do not coerce a missing value to the live default before comparing:
     // that would either refuse every such run or treat a missing researchEnabled as false and skip research.
     if (run.executionLimits.writingModel !== undefined) {
@@ -418,6 +420,8 @@ export class WritingRunner {
 
   /** The deployment's switch for new runs; the plugin config default is on. */
   private get aiToneBlocking(): boolean { return this.limits.aiToneBlocking ?? true }
+  /** The deployment's metrics flag for new runs; the plugin config default is off. Metric values are not a veto. */
+  private get metricsBlocking(): boolean { return this.limits.metricsBlocking ?? false }
 
   /**
    * The host's AI-tone decision for one reviewed body, made in code (the reviewer files every style issue as advisory, which
@@ -1295,12 +1299,34 @@ export class WritingRunner {
       ...('length' in candidate ? { measuredWordCount: candidate.wordCount, measuredLength: candidate.length } : {}),
       // Version-1 runs keep their original task text; later runs hand the body review host-measured positions to cite.
       ...('beats' in candidate && candidate.beats !== null && promptVersionOf(inv.run) >= 2 ? { measuredBeats: candidate.beats } : {}),
+      // Version 11 body reviews also get advisory measurements. Versions 1–10 omit them, so their task bytes stay put.
+      ...this.reviewMetrics(inv, reviewedKind, stored.text, refs),
       // Version 3 body reviews also get host-detected AI-tone markers in narration (advisory evidence only).
       ...('aiTone' in candidate && candidate.aiTone !== null && promptVersionOf(inv.run) >= 3 ? { aiToneMarkers: promptVersionOf(inv.run) >= 7 ? gradeAiTone(candidate.aiTone) : candidate.aiTone } : {}),
       ...(settingsDimensionKind === undefined ? {} : { dimensionKind: settingsDimensionKind }),
       ...(settingsCollectionKinds === undefined ? {} : { dimensionKinds: settingsCollectionKinds }) },
       [candidate.artifact], settingsDimensionKind, settingsCollectionKinds, reviewedKind, undefined,
       openCode === undefined ? undefined : openChecklistNativeSchema(openCode), openCode)
+  }
+
+  /**
+   * Advisory body measurements for a version-11 review. Older runs and every other review omit the fields.
+   * `metricsBlocking` is the recorded flag. Metric rows, including a missed eventHits keyword, do not change admission.
+   */
+  private reviewMetrics(inv: Invocation, reviewedKind: StagePromptKind, storedText: string, sources: readonly { readonly id: string; readonly kind: string; readonly text: string }[]): { readonly metrics: ReturnType<typeof measureChapterMetrics>; readonly metricsBlocking: boolean } | Record<string, never> {
+    if (promptVersionOf(inv.run) < 11 || reviewedKind !== 'body') return {}
+    let output: BodyOutput
+    try { output = StageOutputSchemas.body.parse(JSON.parse(storedText)) }
+    catch { throw new WritingError('corrupt-artifact', 'Admitted chapter body cannot be measured') }
+    const brief = sources.find(source => source.kind === 'creative-brief' && source.id === inv.run.briefArtifactId)
+    if (brief === undefined) throw new WritingError('corrupt-artifact', 'Body review has no creative brief for chapter metrics')
+    const metrics = measureChapterMetrics({
+      text: assembleBody(output),
+      previousSnapshot: previousSnapshot(sources, output.chapterNumber),
+      briefText: brief.text,
+      settingsTexts: sources.filter(source => source.kind === 'settings' || source.kind === 'settings-dimension').map(source => proseView(source.kind, source.text)),
+    })
+    return { metrics, metricsBlocking: metricsBlockingOf(inv.run) }
   }
 
   private async research(inv: Invocation, key: string, refs: readonly ArtifactRef[], purpose: string, outputTarget: object) {
@@ -1690,6 +1716,27 @@ function aiToneBlockingOf(run: WritingRun): boolean {
   if (promptVersionOf(run) < 5) return false
   if (run.executionLimits.aiToneBlocking === undefined) throw new RunStoreError('corrupt-run', 'A prompt-version-5 run has no recorded aiToneBlocking setting; it cannot resume. Stop it and begin a new request')
   return run.executionLimits.aiToneBlocking
+}
+/**
+ * @returns The recorded metrics flag. Runs before prompt version 11 have none and compare as off.
+ * A version-11 run without the recorded value is corrupt and is refused.
+ */
+function metricsBlockingOf(run: WritingRun): boolean {
+  if (promptVersionOf(run) < 11) return false
+  if (run.executionLimits.metricsBlocking === undefined) throw new RunStoreError('corrupt-run', 'A prompt-version-11 run has no recorded metricsBlocking setting; it cannot resume. Stop it and begin a new request')
+  return run.executionLimits.metricsBlocking
+}
+function previousSnapshot(sources: readonly { readonly kind: string; readonly text: string }[], chapterNumber: number): PreviousChapterSnapshot | null {
+  let best: { chapterNumber: number; unrecoveredForeshadowing: { note: string }[] } | null = null
+  for (const source of sources) {
+    if (source.kind !== 'continuity-snapshot') continue
+    let parsed: { chapterNumber: number; unrecoveredForeshadowing: { note: string }[] }
+    try { parsed = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(source.text)) }
+    catch { throw new WritingError('corrupt-artifact', 'Admitted continuity snapshot cannot be read for chapter metrics') }
+    if (parsed.chapterNumber >= chapterNumber) continue
+    if (best === null || parsed.chapterNumber >= best.chapterNumber) best = parsed
+  }
+  return best === null ? null : { unrecoveredForeshadowing: best.unrecoveredForeshadowing.map(item => ({ note: item.note })) }
 }
 function inputRef(ref: ArtifactRef): StageInputRef { return { artifactId: ref.id, sha256: ref.sha256 } }
 function withoutSignal(actor: Actor): Actor { return { sessionId: actor.sessionId, workspace: actor.workspace } }
