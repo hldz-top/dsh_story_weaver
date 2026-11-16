@@ -114,7 +114,24 @@ describe('version 3 AI-tone review', () => {
 })
 
 describe('version 2 guardrails', () => {
-  it('is followed by version 11 for new runs', () => { expect(CURRENT_PROMPT_VERSION).toBe(11) })
+  it('is followed by version 12 for new runs', () => {
+    expect(CURRENT_PROMPT_VERSION).toBe(12)
+    const replayKinds = [...kinds, 'continuity-snapshot'] as const
+    for (const kind of replayKinds) {
+      expect(buildStagePrompt({ ...base, kind, promptVersion: 11 }), kind).toBe(buildStagePrompt({ ...base, kind, promptVersion: 10 }))
+      expect(buildStagePrompt({ ...base, kind, promptVersion: 12 }), kind).toBe(buildStagePrompt({ ...base, kind, promptVersion: 11 }))
+      expect(buildStagePrompt({ ...base, kind, promptVersion: 11 }), kind).not.toContain('pov-limited')
+    }
+    const bodyReview = { ...base, kind: 'review' as const, reviewedKind: 'body' as const }
+    expect(buildStagePrompt({ ...bodyReview, promptVersion: 11 })).toContain('task.metrics')
+    expect(buildStagePrompt({ ...bodyReview, promptVersion: 11 })).not.toContain('pov-limited')
+    const currentBody = buildStagePrompt({ ...bodyReview, promptVersion: 12 })
+    expect(currentBody).toContain('task.metrics')
+    expect(currentBody).toContain('fixed check pov-limited')
+    expect(currentBody).toContain('task.povHeuristic')
+    expect(currentBody).not.toBe(buildStagePrompt({ ...bodyReview, promptVersion: 11 }))
+    expect(buildStagePrompt({ ...base, kind: 'review', reviewedKind: 'chapter-outline', promptVersion: 12 })).toBe(buildStagePrompt({ ...base, kind: 'review', reviewedKind: 'chapter-outline', promptVersion: 11 }))
+  })
 
   it('appends each sentence only to its own stage', () => {
     for (const kind of kinds) {
@@ -239,15 +256,17 @@ describe('runs keep their prompt version', () => {
     expect(bodyReview?.prompt).not.toContain('the host itself blocks the chapter')
   })
 
-  it('starts new runs on version 11 and hands body reviews advisory metrics, host-measured beats and graded AI-tone markers', { timeout: 120_000 }, async () => {
+  it('starts new runs on version 12 and hands body reviews advisory metrics, pov-limited, host-measured beats and graded AI-tone markers', { timeout: 120_000 }, async () => {
     const record = recorder()
     const fixture = await useWritingFixture({ maxReadChars: 8192, onChildRequest: record.onChildRequest })
     const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
     if (outcome.status === 'rejected') throw outcome.reason
-    expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 11, executionLimits: { aiToneBlocking: true, metricsBlocking: false } })
+    expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 12, executionLimits: { aiToneBlocking: true, metricsBlocking: false } })
     expect(record.seen.find(item => item.stage.kind === 'settings')?.prompt).toContain('Do not expand this classification into motives')
     expect(record.seen.find(item => item.stage.kind === 'book-outline')?.prompt).toContain('starting want, the pressure that changes it')
     expect(record.seen.find(item => item.stage.kind === 'chapter-outline')?.prompt).toContain('who chooses, what they want in that moment')
+    expect(record.seen.find(item => item.stage.kind === 'chapter-outline')?.prompt).not.toContain('pov-limited')
+    expect(record.seen.find(item => item.stage.kind === 'body')?.prompt).not.toContain('pov-limited')
     expect(record.seen.find(item => item.stage.kind === 'chapter-outline')?.prompt).not.toContain('pacing guidance for scene allocation')
     expect(record.seen.find(item => item.stage.kind === 'book-outline')?.prompt).not.toContain('3000–5000')
     expect(record.seen.find(item => item.stage.kind === 'body')?.prompt).toContain('aim for about 3000')
@@ -266,6 +285,7 @@ describe('runs keep their prompt version', () => {
     expect(bodyReview.prompt).toContain(AI_TONE_PHRASE)
     expect(bodyReview.prompt).toContain('density-graded hint report')
     expect(bodyReview.prompt).toContain('briefQuote')
+    expect(bodyReview.prompt).toContain('fixed check pov-limited')
     expect(bodyReview.prompt).toContain('in Chinese')
     expect(bodyReview.prompt).toContain('task.metrics')
     expect(bodyReview.prompt).not.toContain('the host itself blocks the chapter')

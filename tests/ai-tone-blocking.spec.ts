@@ -19,7 +19,7 @@ function lastLine(text: string | null | undefined): Record<string, unknown> {
 }
 
 describe('prompt version 5', () => {
-  it('is no longer the version new runs record', () => { expect(CURRENT_PROMPT_VERSION).toBe(11) })
+  it('is no longer the version new runs record', () => { expect(CURRENT_PROMPT_VERSION).toBe(12) })
 
   it('keeps every stage byte-identical to version 4 unless a body review has the switch on', () => {
     for (const kind of kinds) for (const reviewedKind of [undefined, ...kinds]) {
@@ -376,7 +376,7 @@ describe('resume rules', () => {
   it('(3) refuses a current-version run whose recorded value differs from the current config, in the limit-mismatch style', async () => {
     const fixture = await useWritingFixture()
     const stopped = await begin(fixture, { ...fixture.runner.limits, aiToneBlocking: false })
-    expect(stopped).toMatchObject({ promptVersion: 11, executionLimits: { aiToneBlocking: false, metricsBlocking: false } })
+    expect(stopped).toMatchObject({ promptVersion: 12, executionLimits: { aiToneBlocking: false, metricsBlocking: false } })
     const outcome = await fixture.run(exec => fixture.runner.resume(exec, stopped.id, false))
     expect(outcome).toMatchObject({ status: 'rejected', reason: { code: 'run-limits', message: expect.stringContaining('Restore the captured writing and research limits before resuming') } })
     if (outcome.status !== 'rejected') throw new Error('Resume was not refused')

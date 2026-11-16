@@ -45,7 +45,7 @@ This parser is structural, so stored candidates and replayed requests always par
 | `reviewed` | Exact candidate `StageInputRef`; both ID and hash must match the host request. |
 | `checks` | Nonempty array of `{ category, summary, evidence }`. Each summary is nonblank and each evidence array is nonempty. |
 | `issues` | Array of `{ id, severity, category, location, message, evidence }`. IDs, locations, and messages are nonblank; evidence is nonempty. The array may be empty when the reviewer detects no issues. |
-| `category` | `completeness`, `consistency`, `obligations`, `continuity`, `length`, or `style`. |
+| `category` | `completeness`, `consistency`, `obligations`, `continuity`, `length`, or `style`. Version 12 also publishes `pov`. |
 | `severity` | `advisory` for `style` issues; `blocking` for every other category. The parser rejects mismatched category/severity pairs without changing them. The host also enforces mandatory mechanical checks before adoption. |
 
 All citations must identify either the exact reviewed candidate or a declared input, and their quotes must occur in supplied text. There is no model-authored approval field. The host derives whether a validated review permits progress from its issues and the independent mechanical checks.
@@ -53,6 +53,8 @@ All citations must identify either the exact reviewed candidate or a declared in
 Prompt version 7 publishes `{ paragraphId, problem }` in place of `{ artifactId, quote }`. The host re-splits the reviewed candidate body into paragraphs (`p1`, `p2`, …), maps the id to that paragraph, and then runs the verbatim quote check on the paragraph text. The same text splits to the same ids and content hashes; a repair re-splits the new text. An unknown id is admitted as a quote of `problem`, so the existing quote rejection and citation repair still apply. Versions before 7 keep copied quotes. `admitOpenDimensionChecklist` accepts a g4 or g7 checklist of fixed `pass | fail | na` items. A fail must name a paragraph id. The stored review records `checklist.failCount` and keeps each fail as an advisory style issue.
 
 Prompt version 8 publishes optional `briefQuote` on each issue. On admission of a version-8 model review, `check.summary`, `issue.message`, and `evidence.problem` must contain a Han character, and a blocking `completeness` or `obligations` issue must set `briefQuote` to a verbatim excerpt of the creative brief. A missing or non-matching excerpt rejects the review. Stored reviews from earlier versions omit the field and are read back without those checks. The version-7 published schema does not include `briefQuote`.
+
+Prompt version 12 publishes category `pov` and optional `paragraphId` on each issue. A body review must include the fixed check `pov-limited` (category `pov`). A violation uses id `pov-limited`, category `pov`, severity `blocking`, and `paragraphId` from the host paragraph split. Omitting `paragraphId` rejects that review. Versions 1–11 do not publish `pov` or issue-level `paragraphId`. A stored review that never used them still reads back. Version 11 body reviews still receive advisory `task.metrics`.
 
 ## Book outline
 
@@ -77,7 +79,7 @@ Prompt versions before 7 also stored a required `targetWords` on each chapter. A
 | `chapterNumber` | Positive integer matching the requested chapter. |
 | `title`, `throughLine` | Nonblank title and continuous line of action. |
 | `targetWords` | Accepted when a version before 7 stored it. Version 7 does not publish the field, and the preview does not render it. It is not a per-scene ceiling and it does not replace the host body count. |
-| `constraints` | Explicit array of nonblank constraints; may be empty. |
+| `constraints` | Explicit array of nonblank constraints; may be empty. A viewpoint may be named here as `视角人物：Name`. The host does not require that line. |
 | `obligations` | `{ id, description }` entries with unique IDs matching the requested obligations. |
 | `scenes` | Nonempty ordered array of `{ id, purpose, action, obligationIds }`. IDs, purposes, and actions are nonblank. Scene IDs are unique; a scene cannot repeat the same obligation ID. One obligation may span multiple scenes. |
 

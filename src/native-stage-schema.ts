@@ -2,7 +2,7 @@
 import { assertObjectJsonSchema, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { openChecklistModelSchema, type OpenChecklistCode } from './open-dimension-checklist.ts'
-import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, continuitySchemaLegacy, reviewParagraphSchema, reviewParagraphSchemaV8, StageOutputSchemas } from './stage-output.ts'
+import { bookOutlineSchemaLegacy, bookOutlineSchemaV7, chapterOutlineSchemaLegacy, chapterOutlineSchemaV1, chapterOutlineSchemaV7, continuitySchemaLegacy, reviewParagraphSchema, reviewParagraphSchemaV8, reviewParagraphSchemaV11, StageOutputSchemas } from './stage-output.ts'
 import { CURRENT_PROMPT_VERSION, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 
 const nativeFields = new Set(['type', 'required', 'additionalProperties', 'enum', 'const', 'description', 'title', 'default', 'examples'])
@@ -69,16 +69,16 @@ export function projectNativeStageSchema(schema: object): ObjectJsonSchema {
  * Version 7 reviews cite `{ paragraphId, problem }` instead of a copied quote. Version 8 adds optional `briefQuote` on each issue.
  * Versions before 9 publish continuity characters as `{ name, state }` only. Version 9 adds optional `name_note`.
  * Version 10 publishes the same schemas as version 9. Version 11 publishes the same schemas as version 10.
- * Advisory review metrics are task data, not output fields.
+ * Advisory review metrics are task data, not output fields. Version 12 reviews add category `pov` and optional `paragraphId`.
  * @returns An object-root schema; the caller must still run canonical admission.
  */
 export function nativeStageOutputSchema(kind: StagePromptKind, promptVersion: PromptVersion = CURRENT_PROMPT_VERSION): ObjectJsonSchema {
-  const outline = kind === 'book-outline' || kind === 'chapter-outline'
-  const schema = outline && promptVersion >= 7
-    ? kind === 'book-outline' ? bookOutlineSchemaV7 : chapterOutlineSchemaV7
+  const schema = kind === 'book-outline'
+    ? promptVersion >= 7 ? bookOutlineSchemaV7 : bookOutlineSchemaLegacy
     : kind === 'chapter-outline'
-      ? promptVersion === 1 ? chapterOutlineSchemaV1 : chapterOutlineSchemaLegacy
-      : kind === 'book-outline' ? bookOutlineSchemaLegacy
+      ? promptVersion >= 7 ? chapterOutlineSchemaV7
+        : promptVersion === 1 ? chapterOutlineSchemaV1 : chapterOutlineSchemaLegacy
+      : kind === 'review' && promptVersion >= 12 ? reviewParagraphSchemaV11
         : kind === 'review' && promptVersion >= 8 ? reviewParagraphSchemaV8
           : kind === 'review' && promptVersion >= 7 ? reviewParagraphSchema
             : kind === 'continuity' && promptVersion < 9 ? continuitySchemaLegacy
