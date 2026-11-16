@@ -214,18 +214,19 @@ describe('prompt version 6 still blocks AI tone when the run froze the switch on
   })
 
   it('(c) ends review-blocked when repair attempts run out, never applying or passing the body', { timeout: 120_000 }, async () => {
-    const markers = ['说白了', '说穿了', '先说结论']
+    // A body candidate loop allows one more replacement than maxRepairAttempts, so 2 exhausts on the fourth body.
+    const markers = ['说白了', '说穿了', '先说结论', '这意味着']
     const { fixture, counts } = await scripted({ prefix: attempt => `${markers[attempt]}，雾港的灯第${attempt}次熄灭。`, quotes: review => [markers[review]!] }, { executionLimits: { maxRepairAttempts: 2 } })
     const run = await write(fixture, 6)
     expect(run.status).toBe('failed')
     const line = lastLine(run.error)
-    expect(line).toEqual({ code: 'review-blocked', reason: 'ai-tone-exhausted', spans: ['先说结论'] })
+    expect(line).toEqual({ code: 'review-blocked', reason: 'ai-tone-exhausted', spans: ['这意味着'] })
     expect(line).not.toHaveProperty('importItems')
-    expect(counts()).toEqual({ bodies: 3, reviews: 3 })
+    expect(counts()).toEqual({ bodies: 4, reviews: 4 })
     expect(applied(fixture)).toBe(false)
-    expect(reviewBlocks(fixture, run)).toEqual(['ai-tone', 'ai-tone', 'ai-tone-exhausted'])
+    expect(reviewBlocks(fixture, run)).toEqual(['ai-tone', 'ai-tone', 'ai-tone', 'ai-tone-exhausted'])
     // Every body and review call is an ordinary durable attempt counted against the run's attempt budget.
-    expect(fixture.runs.get(fixture.actor, run.id).attempts.filter(attempt => attempt.key.startsWith('body/1/candidate/') && !attempt.key.includes('/review') && !attempt.key.includes('/research'))).toHaveLength(3)
+    expect(fixture.runs.get(fixture.actor, run.id).attempts.filter(attempt => attempt.key.startsWith('body/1/candidate/') && !attempt.key.includes('/review') && !attempt.key.includes('/research'))).toHaveLength(4)
   })
 
   for (const [label, prefix, quote] of [
