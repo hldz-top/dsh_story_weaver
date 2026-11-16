@@ -22,7 +22,7 @@ it('resumes a pre-stage-routing archive under the default plugin limits without 
   expect(writingModel).toEqual({ planning: 'inherit', review: 'inherit', body: 'inherit' })
   expect(plugin.researchEnabled).toBe(false)
   expect(plugin.researchBudgetFloor).toBe(1)
-  expect(CURRENT_PROMPT_VERSION).toBe(14)
+  expect(CURRENT_PROMPT_VERSION).toBe(15)
   // The live comparison target is what apply() stores: the inherit map, researchEnabled false and floor 1.
   // The writing fixture's own default opts research in, so this run overrides that and would mismatch an absent archive.
   const fixture = await useWritingFixture({ executionLimits: { writingModel, researchEnabled: plugin.researchEnabled, researchBudgetFloor: plugin.researchBudgetFloor } })
@@ -35,7 +35,7 @@ it('resumes a pre-stage-routing archive under the default plugin limits without 
     ...fixture.input, chapterCount: 1, throughChapter: 1, revision: null, executionLimits: archived,
     serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits },
   })
-  expect(begun.promptVersion).toBe(14)
+  expect(begun.promptVersion).toBe(15)
   expect(begun.executionLimits.aiToneRepairFloor).toBe('heavy')
   expect(begun.executionLimits.metricsBlocking).toBe(false)
   expect(begun.executionLimits).not.toHaveProperty('writingModel')
@@ -45,7 +45,7 @@ it('resumes a pre-stage-routing archive under the default plugin limits without 
   const outcome = await fixture.run(exec => fixture.runner.resume(exec, stopped.id, false))
   if (outcome.status === 'rejected') throw outcome.reason
   const run = fixture.runs.get(fixture.actor, stopped.id)
-  expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 14, id: stopped.id })
+  expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 15, id: stopped.id })
   expect(run.executionLimits).not.toHaveProperty('writingModel')
   expect(run.executionLimits).not.toHaveProperty('researchEnabled')
   expect(run.executionLimits).not.toHaveProperty('researchBudgetFloor')

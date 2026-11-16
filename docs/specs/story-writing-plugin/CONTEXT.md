@@ -40,7 +40,9 @@ This glossary defines the novel-writing terms used by the [plugin specification]
 
 **Continuity state**: The established story facts after an applied chapter: actual events, character state, chronology and outstanding obligations. Chapter plans do not establish these facts.
 
-**Continuity snapshot**: A compact note taken after a chapter is applied: character status, unrecovered foreshadowing and used plot bridges. The host copies it from the admitted continuity. Later chapters read these notes. The snapshot is not a narrative-state graph and it is not attached until its review passes.
+**Continuity snapshot**: A compact note taken after a chapter is applied: character status, unrecovered foreshadowing and used plot bridges. The host copies it from the admitted continuity. Later chapters read these notes. The snapshot is not a narrative-state graph and it is not attached until its review passes. Prompt version 15 may also store optional plants: an id, one sentence, the chapter that planted it, and whether it is still open or paid.
+
+**Plants ledger**: Optional rows for foreshadowing the reviewed prose plants or pays off. Continuity carries each previous open plant forward, keeping it open or marking it paid. A plant that has stayed open for five chapters adds an advisory hint when the next chapter outline is planned. The hint does not block. A run whose snapshots have no plants skips that check.
 
 **Needs update**: An existing output whose upstream inputs have changed. Its history remains readable while its suitability for subsequent writing requires review.
 

@@ -498,8 +498,12 @@ export class ManuscriptStore {
       if (!sameRefs(actualBodySources, expectedBodySources)) throw new WritingError('corrupt-artifact', 'Continuity and body use different chapter source versions')
       if (index + 2 !== sources.length) throw new WritingError('corrupt-artifact', 'Chapter input roles are incomplete')
       const evidenceSources = [{ artifactId: body.id, text: assembleBody(bodyOutput) }, ...snapshots.map(snapshot => ({ artifactId: snapshot.id, text: snapshot.text }))]
+      const earlierPlants = snapshots.map(snapshot => {
+        const parsed = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(snapshot.text))
+        return parsed.plants === undefined ? {} : { plants: parsed.plants }
+      })
       return { kind: 'continuity' as const, output: parseContinuityOutput(value, { inputRefs: refs, chapterNumber: target.chapterNumber,
-        obligationIds: chapter.obligations.map(item => item.id), reviewedBodyId: body.id, evidenceSources }) }
+        obligationIds: chapter.obligations.map(item => item.id), reviewedBodyId: body.id, evidenceSources, earlierPlants }) }
     }
     if (index !== sources.length) throw new WritingError('corrupt-artifact', 'Chapter input roles are incomplete')
     if (target.kind === 'body') return { kind: 'body' as const, output: parseBodyOutput(value, { inputRefs: refs, chapterNumber: target.chapterNumber, sceneIds }) }

@@ -22,6 +22,7 @@ import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
 import { blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseContinuitySnapshot, StageOutputSchemas, type BodyOutput, type ContinuityOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
 import { projectContinuitySnapshot } from './continuity-snapshot.ts'
+import { advisoryPlantHints, attachContinuityPlants } from './plant-ledger.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
 import { measureChapterMetrics, type PreviousChapterSnapshot } from './review-metrics.ts'
@@ -612,9 +613,10 @@ export class WritingRunner {
     const continuity = StageOutputSchemas.continuity.parse(JSON.parse(continuityArtifact.text))
     const body = StageOutputSchemas.body.parse(JSON.parse(read(applied.body.id).text))
     const earlier = inputs.filter(ref => ref.kind === 'continuity-snapshot').map(ref => StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(read(ref.id).text)))
-    const output = parseContinuitySnapshot(projectContinuitySnapshot({
+    const projected = projectContinuitySnapshot({
       chapterNumber: applied.chapterNumber, inputRefs: refs, continuity, bodyText: assembleBody(body), earlier,
-    }), { inputRefs: refs, chapterNumber: applied.chapterNumber })
+    })
+    const output = parseContinuitySnapshot(attachContinuityPlants(promptVersionOf(inv.run), projected, continuity.plants), { inputRefs: refs, chapterNumber: applied.chapterNumber })
     const key = `continuity-snapshot/${applied.chapterNumber}/host`
     const candidate = await this.service.saveContinuitySnapshot(inv.actor, {
       novelId: inv.run.novelId, requestId: requestId(inv.run, key), ...target, childSessionId: null, output, snapshotThrough,
@@ -1160,11 +1162,12 @@ export class WritingRunner {
     // Version 14 body repairs. Earlier versions leave both null, so their prompts stay the version they started with.
     let defect: FailureStreak | null = null
     let pendingDefectNote: string | null = null
+    const plantHints = target.kind === 'chapter-outline' ? this.openPlantHints(inv, context.inputRefs, target.chapterNumber) : []
     for (let repair = 0; repair <= repairCap; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       const sameDefectNote = promptVersionOf(inv.run) >= 14 && target.kind === 'body' ? pendingDefectNote ?? undefined : undefined
       aiToneSpans = []
-      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError }
+      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError, ...(plantHints.length > 0 ? { plantHints } : {}) }
       const outlineKind: OutlineRepairKind | null = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? target.kind : null
       const outlinePatching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
       const bodyPatching = target.kind === 'body' && bodyRepairUsesPatch(promptVersionOf(inv.run), target.kind, priorBody !== null)
@@ -1615,6 +1618,18 @@ export class WritingRunner {
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.
     const direct = batch !== 'consistency' && (kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot')
     return this.capture(inv, key, prompt, allRefs, schema, direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, stageWritingRole(kind), direct)
+  }
+
+  /**
+   * Advisory hints for plants that have stayed open. Version 14 and earlier, and a snapshot with no plants, return nothing.
+   * The hints are task text. They are not review issues and they do not block the outline.
+   */
+  private openPlantHints(inv: Invocation, refs: readonly ArtifactRef[], chapterNumber: number): readonly string[] {
+    if (promptVersionOf(inv.run) < 15) return []
+    const latest = refs.filter(ref => ref.kind === 'continuity-snapshot').at(-1)
+    if (latest === undefined) return []
+    const parsed = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: latest.id }).text))
+    return advisoryPlantHints(parsed.plants, chapterNumber)
   }
 
   private feedChars(inv: Invocation, ref: ArtifactRef, chapterNumber: number): number {
