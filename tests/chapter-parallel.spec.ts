@@ -27,6 +27,9 @@ it('writes two chapter bodies from the same applied snapshots and gives the next
   const applied = fixture.service.getManuscript(fixture.actor, fixture.novel.id).appliedChapters
   expect(applied.map(chapter => chapter.chapterNumber)).toEqual([1, 2, 3])
   expect(applied.every(chapter => chapter.snapshot?.kind === 'continuity-snapshot')).toBe(true)
+  expect([...fixture.stages.values()].some(stage => stage.kind === 'continuity-snapshot')).toBe(false)
+  expect([...fixture.stages.values()].some(stage => stage.kind === 'review' && stage.task?.reviewed !== undefined && stage.sources.get(stage.task.reviewed.artifactId)?.kind === 'continuity-snapshot')).toBe(false)
+  expect(outcome.value.attempts.some(attempt => attempt.key.includes('continuity-snapshot'))).toBe(false)
   const outlineChapters = [...fixture.stages.values()].filter(stage => stage.kind === 'chapter-outline').map(stage => stage.task?.chapterNumber)
   expect(outlineChapters.sort()).toEqual([1, 2, 3])
   const firstBody = bodyStages.find(stage => stage.task?.chapterNumber === 1)

@@ -70,7 +70,7 @@ Input ID/hash equality is unordered and rejects duplicates; ordered scenes, chap
 
 A short or long body remains complete and repairable. Its view reports a blocking length finding; no text is truncated or relabeled as complete. Continuity output can preserve an open obligation with a nonblank explanation and empty evidence, but that obligation will block chapter application. Fulfilled obligations must quote the actual reviewed body. Continuity evidence sources are actual body text and the continuity snapshots supplied as inputs, not planned book or chapter events.
 
-`saveContinuitySnapshot` stores one compact snapshot for an applied body and continuity pair. `attachContinuitySnapshot` requires its latest review to pass and then records that snapshot on the applied chapter. A blocking review is not attached. The snapshot lists character status, unrecovered foreshadowing and used plot bridges. It is not a narrative-state graph.
+`saveContinuitySnapshot` stores one compact snapshot for an applied body and continuity pair. `attachContinuitySnapshot` requires its latest review to pass and then records that snapshot on the applied chapter. A blocking review is not attached. The snapshot lists character status, unrecovered foreshadowing and used plot bridges. It is not a narrative-state graph. The writing runner copies that snapshot from the admitted continuity after the chapter is applied: `characters[].name` and `characters[].state` become `characterStatus[].name` and `characterStatus[].status`; fulfilled obligation explanations become `usedPlotBridges` (timeline events when there is no fulfilled explanation, and one clipped body excerpt when neither field has a note); unrecovered notes are earlier snapshot notes this chapter did not recover, then any open-obligation explanations. An applied chapter has no open obligations. The copy stays inside the existing character, note, and length caps, and `parseContinuitySnapshot` admits it before it is stored. The host snapshot has no generating child (`childSessionId` null) and a host review, not a model stage. A snapshot already stored with a generating child still reads back.
 
 <a id="reviews"></a>
 ## Review and standalone adoption
@@ -114,7 +114,7 @@ The returned `AppliedChapterView` contains `chapterNumber`, full `body`, `bodyRe
 | `target` | Settings selection or generated stage scope. |
 | `artifact` | Exact full manuscript artifact reference; each immutable document has revision 1. |
 | `inputRefs` | Original source ID/hash pairs. |
-| `childSessionId` | Generating native child provenance, or `null` for program-assembled settings. |
+| `childSessionId` | Generating native child provenance, or `null` for a program-assembled settings collection and for a host-copied continuity snapshot. |
 | `revisionOf` | Exact earlier applied outline retained as revision lineage, or `null`. |
 | `status` | `candidate`, `reviewed`, `blocked`, or `applied`. A body outside current length bounds is blocked before application, even without a review. |
 | `review` | Latest exact review reference, or `null`. |

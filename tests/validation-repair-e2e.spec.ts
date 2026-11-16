@@ -2,7 +2,7 @@
  * Offline end-to-end proof for the unified output-validation repair loop.
  *
  * The fake stage provider runs the live prompt (settings roots a4, a5 and e1 as one batch draft and one consistency
- * review, then one book outline, then three chapters of outline, body, continuity and a reviewed continuity snapshot).
+ * review, then one book outline, then three chapters of outline, body and continuity). The host copies each continuity snapshot.
  * One violation of every kind is injected into the first attempt of at least one stage of every injected stage kind
  * (tests/support/validation-injections.ts). With maxRepairAttempts 1 each is repaired by exactly one replacement and
  * the run completes; the validation-repair-zero-*.spec.ts files show that with

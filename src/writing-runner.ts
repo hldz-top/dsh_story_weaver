@@ -20,13 +20,14 @@ import { batchDimensionKind, batchFactStatement, dimensionDocument, parseSetting
 import { StageValidationRejection } from './stage-rejection.ts'
 import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
-import { blockingIssueCount, EvidenceRejection, StageOutputSchemas, type BodyOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
+import { blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseContinuitySnapshot, StageOutputSchemas, type BodyOutput, type ContinuityOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
+import { projectContinuitySnapshot } from './continuity-snapshot.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
 import { extractRequiredEvents, missingRequiredEvents, requiredEventRepairInstruction, type MissingRequiredEvent } from './required-events.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
 import { applyOutlinePatch, buildOutlineRepairPrompt, OUTLINE_PATCH_OUTPUT_SCHEMA, outlineRepairUsesPatch, type OutlineRepairKind } from './outline-repair.ts'
-import { collectQuoteRepairs } from './evidence-quote.ts'
+import { collectQuoteRepairs, evidenceQuoteOccurs } from './evidence-quote.ts'
 import type { AppliedChapterView, GeneratedManuscriptTarget, ManuscriptCandidateView, ManuscriptTarget } from './manuscript.ts'
 import type { ImportSettingsRequest, SettingsCandidateView } from './settings.ts'
 import { writingActor } from './tools.ts'
@@ -510,6 +511,7 @@ export class WritingRunner {
   /**
    * Generate every requested chapter outline before any body, then write bodies in batches of at most three.
    * A body reads the outline plus snapshots of chapters applied before its batch, never an unfinished sibling.
+   * After continuity is applied, the host copies that chapter's snapshot. It does not call a model.
    */
   private async chapters(inv: Invocation): Promise<void> {
     const width = chapterBatchWidth(inv.run.executionLimits.maxParallelStages)
@@ -560,35 +562,37 @@ export class WritingRunner {
     }
   }
 
-  /** One short extraction plus its review. A blocking review is not attached. */
+  /**
+   * Copy one compact snapshot from the admitted continuity and attach it.
+   * A chapter that already has a snapshot is unchanged. This starts no model call.
+   */
   private async publishSnapshot(inv: Invocation, applied: AppliedChapterView, snapshotThrough: number): Promise<void> {
     if (applied.snapshot != null) return
-    const key = `continuity-snapshot/${applied.chapterNumber}`
+    inv.actor.signal?.throwIfAborted()
     const target = { kind: 'continuity-snapshot' as const, chapterNumber: applied.chapterNumber, bodyId: applied.body.id, continuityId: applied.continuity.id }
-    let feedback: ArtifactRef[] = []
-    let validationError: string | null = null
-    for (let repair = 0; repair <= inv.run.executionLimits.maxRepairAttempts; repair += 1) {
-      const stageKey = `${key}/candidate/${repair}`
-      const inputs = this.service.continuitySnapshotInputs(inv.actor, { novelId: inv.run.novelId, ...target, snapshotThrough })
-      const result = await this.stage(inv, stageKey, 'continuity-snapshot', inputs, { chapterNumber: applied.chapterNumber, validationError }, feedback)
-      let candidate
-      try {
-        candidate = await this.service.saveContinuitySnapshot(inv.actor, { novelId: inv.run.novelId, requestId: requestId(inv.run, stageKey),
-          ...target, childSessionId: result.childSessionId, output: result.structured, snapshotThrough })
-      } catch (cause) {
-        if (!isOutputError(cause)) throw cause
-        validationError = cause.message
-        continue
-      }
-      const reviewed = await this.reviewManuscript(inv, stageKey, candidate, ['consistency', 'continuity'])
-      if (reviewed.status !== 'blocked' && reviewed.review !== null) {
-        await this.service.attachContinuitySnapshot(inv.actor, { novelId: inv.run.novelId, ...target, snapshotId: reviewed.artifact.id, reviewId: reviewed.review.id })
-        return
-      }
-      validationError = 'Resolve the blocking issues in the exact supplied review.'
-      feedback = this.feedback(reviewed)
-    }
-    throw new WritingError('review-blocked', `Repair limit was exhausted for ${key}${validationError === null ? '' : `: ${validationError}`}`)
+    const inputs = this.service.continuitySnapshotInputs(inv.actor, { novelId: inv.run.novelId, ...target, snapshotThrough })
+    const refs = inputs.map(inputRef)
+    const read = (id: ArtifactRef['id']) => this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: id })
+    const continuityArtifact = read(applied.continuity.id)
+    const continuity = StageOutputSchemas.continuity.parse(JSON.parse(continuityArtifact.text))
+    const body = StageOutputSchemas.body.parse(JSON.parse(read(applied.body.id).text))
+    const earlier = inputs.filter(ref => ref.kind === 'continuity-snapshot').map(ref => StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(read(ref.id).text)))
+    const output = parseContinuitySnapshot(projectContinuitySnapshot({
+      chapterNumber: applied.chapterNumber, inputRefs: refs, continuity, bodyText: assembleBody(body), earlier,
+    }), { inputRefs: refs, chapterNumber: applied.chapterNumber })
+    const key = `continuity-snapshot/${applied.chapterNumber}/host`
+    const candidate = await this.service.saveContinuitySnapshot(inv.actor, {
+      novelId: inv.run.novelId, requestId: requestId(inv.run, key), ...target, childSessionId: null, output, snapshotThrough,
+    })
+    const quote = continuityReviewQuote(continuity)
+    if (!evidenceQuoteOccurs(quote, continuityArtifact.text)) throw new WritingError('corrupt-artifact', 'Host continuity snapshot review cannot cite the admitted continuity')
+    const reviewed = candidate.review !== null ? candidate : await this.service.saveManuscriptReview(inv.actor, {
+      novelId: inv.run.novelId, candidateId: candidate.artifact.id, expectedReviewId: null,
+      requestId: requestId(inv.run, `${key}/review`), childSessionId: inv.actor.sessionId,
+      output: passingSnapshotReview(candidate.artifact, applied.continuity, candidate.inputRefs, quote),
+    })
+    if (reviewed.review === null) throw new WritingError('corrupt-artifact', 'Host continuity snapshot review was not stored')
+    await this.service.attachContinuitySnapshot(inv.actor, { novelId: inv.run.novelId, ...target, snapshotId: reviewed.artifact.id, reviewId: reviewed.review.id })
   }
 
   private async revision(inv: Invocation): Promise<void> {
@@ -1656,6 +1660,24 @@ function batchRequirement(batch: 'draft' | 'consistency' | 'repair'): string {
   if (batch === 'consistency') return 'This is the cross-dimension consistency review, not generation. Return only {"issues":[{"dimension":"code","kind":"conflict|gap","quote":"exact excerpt"}]}. Name only conflicts and gaps. Quote an exact excerpt of that dimension body. Return {"issues":[]} when nothing conflicts and nothing is missing. Do not score style.'
   if (batch === 'repair') return 'This is the targeted settings repair. Return only {"dimensions":[{"code":"code","body":"markdown"}]} for task.codes, the dimensions named by the consistency review. Do not return any other dimension. The host binds inputRefs; do not include them.'
   return 'This is the dimension-batch draft. Return only {"dimensions":[{"code":"code","body":"markdown"}]} with one body for every code in task.codes, and no other code. body is reader-facing Markdown for that dimension. The host binds inputRefs; do not include them.'
+}
+
+function passingSnapshotReview(snapshot: ArtifactRef, continuity: ArtifactRef, inputRefs: readonly StageInputRef[], quote: string): object {
+  const evidence = [{ artifactId: continuity.id, quote }]
+  return {
+    version: 1, inputRefs, reviewed: { artifactId: snapshot.id, sha256: snapshot.sha256 },
+    checks: [
+      { category: 'consistency', summary: 'Character status is copied from the admitted continuity.', evidence },
+      { category: 'continuity', summary: 'Unrecovered notes and used bridges are copied from the admitted continuity and earlier snapshots.', evidence },
+    ],
+    issues: [],
+  }
+}
+
+function continuityReviewQuote(continuity: Pick<ContinuityOutput, 'summary' | 'characters' | 'obligations' | 'timeline'>): string {
+  const source = [continuity.summary, ...continuity.characters.map(item => item.state), ...continuity.obligations.map(item => item.explanation), ...continuity.timeline.map(item => item.event)].find(item => item.trim().length > 0)
+  if (source === undefined) throw new WritingError('corrupt-artifact', 'Admitted continuity has no text to cite for its snapshot')
+  return [...source].slice(0, MAX_SNAPSHOT_NOTE_CHARS).join('')
 }
 
 function passingReview(artifact: ArtifactRef, inputRefs: readonly StageInputRef[], quote: string): object {

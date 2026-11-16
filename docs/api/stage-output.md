@@ -5,7 +5,7 @@ description: "Strict model-output schemas and version, evidence, scene, and obli
 
 ## Summary
 
-[stage-output.ts](../../src/stage-output.ts) parses decoded model JSON for settings, review, book outline, chapter outline, body, continuity, and continuity snapshots. Its exported TypeScript types and `StageOutputSchemas` define the fields. The host supplies expected versions and stage requirements; successful parsing returns a detached candidate without saving or applying it. [The writing specification](../specs/story-writing-plugin/spec.md) owns the complete review and application requirements.
+[stage-output.ts](../../src/stage-output.ts) parses decoded model JSON for settings, review, book outline, chapter outline, body, continuity, and continuity snapshots. The same continuity-snapshot parser admits the snapshot the writing runner copies from admitted continuity. Its exported TypeScript types and `StageOutputSchemas` define the fields. The host supplies expected versions and stage requirements; successful parsing returns a detached candidate without saving or applying it. [The writing specification](../specs/story-writing-plugin/spec.md) owns the complete review and application requirements.
 
 ## Model schemas and shared fields
 

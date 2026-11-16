@@ -3,8 +3,8 @@
  *
  * The fake stage provider runs the live prompt: settings roots a4, a5 and e1 (closure a1–a5 and e1) as one batch draft
  * and one consistency review, then one book outline, then three chapters. Outlines are written before bodies. Each
- * chapter has research and review for its outline, body and continuity, plus a reviewed continuity snapshot after the
- * body is applied. One violation of every kind is injected into the first attempt of at least one stage of every stage
+ * chapter has research and review for its outline, body and continuity. The host copies the continuity snapshot after
+ * the body is applied and does not call a model for it. One violation of every kind is injected into the first attempt of at least one stage of every stage
  * kind that the injections name. With maxRepairAttempts 1 each is repaired by exactly one replacement and the run
  * completes; with maxRepairAttempts 0 each fails the run with its specific message.
  */
@@ -36,8 +36,8 @@ export interface Injection {
 }
 
 export const LIVE_ROOTS = ['a4', 'a5', 'e1']
-/** Logical stage keys after stripping planning captures and repair indices: one settings draft, one consistency review, book-outline research/candidate/review, and for each of three chapters outline, body and continuity research/candidate/review plus a snapshot candidate and review. */
-export const PIPELINE_STAGES = 38
+/** Logical stage keys after stripping planning captures and repair indices: one settings draft, one consistency review, book-outline research/candidate/review, and for each of three chapters outline, body and continuity research/candidate/review. Snapshots are host-copied and are not stage keys. */
+export const PIPELINE_STAGES = 32
 
 const planningTarget = (stage: WritingFixtureStage): Record<string, unknown> | undefined => stage.data.kind === 'research-planning' ? stage.data.outputTarget : undefined
 const reviewed = (stage: WritingFixtureStage) => stage.kind === 'review' && stage.task?.reviewed !== undefined ? stage.sources.get(stage.task.reviewed.artifactId) : undefined
