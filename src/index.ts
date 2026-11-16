@@ -68,6 +68,13 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
    */
   openingIn50: boolean
   /**
+   * Parse e5/e6 character cards on prompt version 15. Default true. Not stored on the run and not a field of story_writing.json.
+   * A card that does not parse is stored as free text and does not fail settings.
+   */
+  characterSheet: boolean
+  /** Maximum characters in one e5 or e6 dimension. Default 12. Not stored on the run. */
+  maxCharacters: number
+  /**
    * Lowest AI-tone grade a poison repair will touch on prompt version 13. `heavy` repairs only heavy poisons; a notice
    * is recorded and a hint is ignored. Frozen into each new version-13 run. Default `heavy`. It does not fail a chapter.
    */
@@ -114,6 +121,8 @@ export const Config: z<Config> = z.object({
   plantLedger: z.boolean().default(true),
   hookRotation: z.boolean().default(true),
   openingIn50: z.boolean().default(true),
+  characterSheet: z.boolean().default(true),
+  maxCharacters: z.number().default(12),
   aiToneRepairFloor: z.union([z.const('hint'), z.const('notice'), z.const('heavy')]).default('heavy'),
   writingModel: z.any().default('inherit'),
   researchEnabled: z.boolean().default(false),
@@ -154,6 +163,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (typeof config.plantLedger !== 'boolean') throw new Error('plantLedger must be a boolean')
   if (typeof config.hookRotation !== 'boolean') throw new Error('hookRotation must be a boolean')
   if (typeof config.openingIn50 !== 'boolean') throw new Error('openingIn50 must be a boolean')
+  if (typeof config.characterSheet !== 'boolean') throw new Error('characterSheet must be a boolean')
+  if (!Number.isSafeInteger(config.maxCharacters) || config.maxCharacters < 1) throw new Error('maxCharacters must be a finite positive integer')
   if (!AI_TONE_REPAIR_FLOORS.includes(config.aiToneRepairFloor)) throw new Error('aiToneRepairFloor must be hint, notice, or heavy')
   if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
@@ -195,7 +206,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
   deliveryProjection = await registerStageDeliveryProjection(ctx)
-  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot, plantLedger: config.plantLedger, hookRotation: config.hookRotation, openingIn50: config.openingIn50 })
+  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot, plantLedger: config.plantLedger, hookRotation: config.hookRotation, openingIn50: config.openingIn50, characterSheet: config.characterSheet, maxCharacters: config.maxCharacters })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)
   registerWritingTools(ctx, service, config.previewDirectory)

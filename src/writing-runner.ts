@@ -10,7 +10,8 @@ import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
-import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
+import { CharacterSheetRejection, DEFAULT_MAX_CHARACTERS } from './character-sheet.ts'
+import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, characterDimensionsForStage, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
 import { aiToneHits, gradeAiTone, selectPoisonRepairHits, type AiToneRepairFloor } from './ai-tone.ts'
 import { buildResearchPrompt, validateResearchStageResult, RESEARCH_STAGE_OUTPUT_SCHEMA, researchStageTools, researchToolAuthorization, type ResearchStageRequest } from './research-stage.ts'
@@ -71,6 +72,13 @@ export interface WritingRunnerOptions {
    * A miss is written into the existing body repair instruction. It does not add a failure signature.
    */
   readonly openingIn50?: boolean
+  /**
+   * Parse e5/e6 character cards on prompt version 15. Default true. Not stored on the run.
+   * A card that does not parse is stored as free text and does not fail the settings stage.
+   */
+  readonly characterSheet?: boolean
+  /** Cap for one e5 or e6 dimension. Default 12. Not stored on the run. */
+  readonly maxCharacters?: number
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -862,7 +870,7 @@ export class WritingRunner {
       if (saved !== undefined) { await this.ensureApplied(inv, saved, old?.artifact.id); continue }
       const revisionOf = old?.artifact.id
       const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, revisionOf).map(inputRef)
-      let candidate = await this.service.saveSettingsCandidate(inv.actor, {
+      let candidate = await this.saveSettingsOrFreeText(inv, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, keyOf(code)), dimensionCode: code, researchPlanId: planId, childSessionId, output: dimensionDocument(code, body, refs),
         ...(revisionOf === undefined ? {} : { revisionOf }),
       })
@@ -899,7 +907,7 @@ export class WritingRunner {
       const existing = this.service.findSettingsByRequest(inv.actor, inv.run.novelId, requestId(inv.run, key))
       if (existing !== undefined) { await this.ensureApplied(inv, existing, item.artifact.id); continue }
       const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, item.artifact.id).map(inputRef)
-      const candidate = await this.service.saveSettingsCandidate(inv.actor, {
+      const candidate = await this.saveSettingsOrFreeText(inv, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, key), dimensionCode: code, researchPlanId: planId, childSessionId: inv.actor.sessionId,
         output: { version: 1, inputRefs: refs, dimensionCode: code, facts: source.facts, contentMarkdown: source.contentMarkdown }, revisionOf: item.artifact.id,
       })
@@ -935,7 +943,7 @@ export class WritingRunner {
       const revisionOf = old?.artifact.id
       const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, revisionOf).map(inputRef)
       const output = { version: 1 as const, inputRefs: refs, dimensionCode: code, facts: source.facts, contentMarkdown: source.contentMarkdown }
-      let candidate = await this.service.saveSettingsCandidate(inv.actor, {
+      let candidate = await this.saveSettingsOrFreeText(inv, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, `settings/rebind/${brief.id}/save/${code}`), dimensionCode: code, researchPlanId: planId,
         childSessionId: inv.actor.sessionId, output, ...(revisionOf === undefined ? {} : { revisionOf }),
       })
@@ -1131,7 +1139,7 @@ export class WritingRunner {
     }, input.feedback, input.dimension.kind)
     let candidate: SettingsCandidateView
     try {
-      candidate = await this.service.saveSettingsCandidate(inv.actor, { novelId: inv.run.novelId, requestId: requestId(inv.run, input.stageKey), dimensionCode: input.code,
+      candidate = await this.saveSettingsOrFreeText(inv, { novelId: inv.run.novelId, requestId: requestId(inv.run, input.stageKey), dimensionCode: input.code,
         researchPlanId: input.researchPlanId, childSessionId: stage.childSessionId, output: stage.structured, ...(input.revision === undefined ? {} : { revisionOf: input.revision.baseArtifactId }) })
     } catch (cause) {
       if (!isOutputError(cause)) throw cause
@@ -1618,6 +1626,7 @@ export class WritingRunner {
     const batch = settingsBatchKind(task)
     const feedChapter = kind === 'body' && promptVersion >= 7 && typeof (task as { chapterNumber?: unknown }).chapterNumber === 'number' ? (task as { chapterNumber: number }).chapterNumber : undefined
     const fed = (ref: ArtifactRef) => feedChapter !== undefined && (ref.kind === 'book-outline' || ref.kind === 'chapter-outline')
+    const characterDimensions = promptVersion >= 15 && this.options.characterSheet !== false && kind === 'settings' ? characterDimensionsForStage(task) : []
     const prompt = buildStagePrompt({ kind, novelId: inv.run.novelId,
       inputs: allRefs.map(ref => ({ artifactId: ref.id, sha256: ref.sha256, kind: ref.kind,
         chars: fed(ref) ? this.feedChars(inv, ref, feedChapter!) : prose ? this.proseChars(inv, ref) : ref.chars,
@@ -1642,7 +1651,8 @@ export class WritingRunner {
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 13 ? { aiToneRepairFloor: aiToneRepairFloorOf(inv.run) } : {}),
       ...(promptVersion >= 15 && this.options.plantLedger === false ? { plantLedger: false as const } : {}),
       ...(promptVersion >= 15 && this.options.hookRotation === false ? { hookRotation: false as const } : {}),
-      ...(promptVersion >= 15 && this.options.openingIn50 === false ? { openingIn50: false as const } : {}) })
+      ...(promptVersion >= 15 && this.options.openingIn50 === false ? { openingIn50: false as const } : {}),
+      ...(characterDimensions.length === 0 ? {} : { characterDimensions, maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS }) })
     const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion, { plantLedger: this.options.plantLedger !== false, hookRotation: this.options.hookRotation !== false }))
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.
     const direct = batch !== 'consistency' && (kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot')
@@ -1665,6 +1675,22 @@ export class WritingRunner {
       this.plantAdvisories.set(key, [...(this.plantAdvisories.get(key) ?? []), softened.advisory])
     }
     return softened.value
+  }
+
+  /**
+   * Store a settings candidate. An e5/e6 card that does not parse is stored again as free text.
+   * The second save does not enforce the card, so the settings stage continues.
+   */
+  private async saveSettingsOrFreeText(inv: Invocation, request: Parameters<WritingService['saveSettingsCandidate']>[1]): Promise<SettingsCandidateView> {
+    const gate = promptVersionOf(inv.run) >= 15 && this.options.characterSheet !== false
+      ? { characterSheet: { promptVersion: promptVersionOf(inv.run), maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS, characterSheet: true as const, enforce: true as const } }
+      : {}
+    try {
+      return await this.service.saveSettingsCandidate(inv.actor, { ...request, ...gate })
+    } catch (cause) {
+      if (!(cause instanceof CharacterSheetRejection)) throw cause
+      return await this.service.saveSettingsCandidate(inv.actor, request)
+    }
   }
 
   /** Copy the chapter outline's hook onto continuity. A missing outline hook leaves the field off. */
