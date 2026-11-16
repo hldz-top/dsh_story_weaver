@@ -29,7 +29,7 @@ const runSchema = {
     chapterCount: integer, fromChapter: integer, throughChapter: integer, mode: { ...text, enum: ['write', 'update', 'revise'] },
     status: { ...text, enum: ['running', 'interrupted', 'completed', 'failed', 'stopped'] },
     revision: { required: true, oneOf: [{ type: 'object', additionalProperties: false, properties: { baseArtifactId: text, instructions: text } }, { type: 'null' }] },
-    startedBy: text, lastResumedBy: text, error: nullableText, promptVersion: { type: 'integer', enum: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] },
+    startedBy: text, lastResumedBy: text, error: nullableText, promptVersion: { type: 'integer', enum: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] },
     limits: { type: 'object', required: true, additionalProperties: false, properties: { maxAttempts: integer, maxOutputBytes: integer } },
     serviceLimits: { required: true, oneOf: [{ type: 'object', additionalProperties: false, properties: {
       maxArtifactBytes: integer, maxReadChars: integer, maxResearchQuestions: integer, maxResearchCalls: integer,
@@ -38,6 +38,7 @@ const runSchema = {
     executionLimits: { type: 'object', required: true, additionalProperties: false, properties: {
       maxRepairAttempts: integer, maxParallelStages: integer, settingsCandidateCount: { type: 'integer' }, maxStageRequests: integer, stageTimeoutMs: integer,
       maxDelegationDepth: integer, minChapterWords: integer, maxChapterWords: integer, stageProvider: text, aiToneBlocking: { type: 'boolean' }, metricsBlocking: { type: 'boolean' },
+      aiToneRepairFloor: { type: 'string', enum: ['hint', 'notice', 'heavy'] },
       researchEnabled: { type: 'boolean' }, researchBudgetFloor: { type: 'integer' },
       writingModel: { type: 'object', additionalProperties: false, properties: {
         planning: { required: true, oneOf: [{ type: 'string', enum: ['inherit'] }, { type: 'object', additionalProperties: false, properties: { provider: text, model: text } }] },

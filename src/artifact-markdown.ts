@@ -94,6 +94,7 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
     for (const [index, issue] of review.issues.entries()) {
       sections.push(`## Issue ${index + 1}`, `Severity: ${issue.severity === 'blocking' ? 'Blocking' : 'Advisory'}`,
         `Category: ${reviewCategories[issue.category]}`, 'Issue ID', style.text(issue.id), 'Location', style.text(issue.location),
+        ...(issue.poison === undefined ? [] : [`Poison: ${issue.poison}`]),
         'Finding', style.text(issue.message), ...evidenceSections(style, issue.evidence))
     }
     provenance.push(`Reviewed artifact: ${review.reviewed.artifactId}`, `Reviewed SHA-256: ${review.reviewed.sha256}`)

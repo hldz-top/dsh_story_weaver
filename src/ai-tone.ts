@@ -27,6 +27,19 @@ export interface AiToneReport { readonly source: 'lieflat-less-ai-tone@27d2923 (
 export type AiToneGrade = 'hint' | 'notice' | 'heavy'
 export interface GradedAiToneMarker extends AiToneMarker { readonly grade: AiToneGrade }
 export interface GradedAiToneReport extends Omit<AiToneReport, 'markers'> { readonly markers: readonly GradedAiToneMarker[] }
+/**
+ * Reviewer judgment of why a host marker is bad. `false-target` aims at the wrong thing, `synonym` swaps a near-synonym,
+ * and `forced` is a forced contrast. `none` is a legitimate use of the marker. The host rule stays separate evidence.
+ * Prompt version 13 publishes this on a style issue. Repair requires a present poison other than `none`.
+ */
+export const AI_TONE_POISONS = ['false-target', 'synonym', 'forced', 'none'] as const
+export type AiTonePoison = (typeof AI_TONE_POISONS)[number]
+/** Lowest marker grade that a poison repair will touch. The plugin default is `heavy`. */
+export const AI_TONE_REPAIR_FLOORS = ['hint', 'notice', 'heavy'] as const
+export type AiToneRepairFloor = (typeof AI_TONE_REPAIR_FLOORS)[number]
+/** What the host does with one covered poison hit. `record` and `ignore` both leave the chapter applied. */
+export type AiToneRepairAction = 'repair' | 'record' | 'ignore'
+const GRADE_RANK: Record<AiToneGrade, number> = { hint: 0, notice: 1, heavy: 2 }
 
 const SPAN = '[^，。！？；\\n]'
 const patterns: readonly { readonly rule: Exclude<AiToneRule, 'zero-subject-comment'>; readonly skillRule: string; readonly pattern: RegExp }[] = [
@@ -96,6 +109,32 @@ export function detectAiTone(text: string): AiToneReport {
 export function gradeAiTone(report: AiToneReport): GradedAiToneReport {
   const grade = (perThousandHan: number): AiToneGrade => perThousandHan < 1 ? 'hint' : perThousandHan < 5 ? 'notice' : 'heavy'
   return { ...report, markers: report.markers.map(marker => ({ ...marker, grade: grade(marker.perThousandHan) })) }
+}
+
+/**
+ * Whether a marker grade is high enough for the run's repair floor. `heavy` admits only `heavy`; `notice` also admits
+ * `notice`; `hint` admits every grade.
+ */
+export function gradeMeetsRepairFloor(grade: AiToneGrade, floor: AiToneRepairFloor): boolean {
+  return GRADE_RANK[grade] >= GRADE_RANK[floor]
+}
+
+/**
+ * Host decision for one style issue's covered marker.
+ * A missing poison, `none`, or an unknown poison does not repair. The poison is the reviewer's reason, not the host rule.
+ * A grade below the floor is ignored when it is `hint` and recorded when it is higher. Neither fails the chapter.
+ * @param input - The issue's poison, the covered marker, and the run floor.
+ */
+export function aiToneRepairAction(input: {
+  readonly poison: string | undefined
+  readonly rule: AiToneRule | undefined
+  readonly grade: AiToneGrade | undefined
+  readonly floor: AiToneRepairFloor
+}): AiToneRepairAction {
+  if (input.poison === undefined || input.poison === 'none' || input.rule === undefined || input.grade === undefined) return 'ignore'
+  if (!AI_TONE_POISONS.includes(input.poison as AiTonePoison)) return 'ignore'
+  if (!gradeMeetsRepairFloor(input.grade, input.floor)) return input.grade === 'hint' ? 'ignore' : 'record'
+  return 'repair'
 }
 
 /** One detector hit located in the narration view, with a position-independent identity for repeat detection. */
@@ -184,4 +223,60 @@ export function aiToneHits(text: string): AiToneHits {
     ordinals.set(marker, ordinal + 1)
     return { ...hit, keys: [`${marker}\u0000#${ordinal}`] }
   }) }
+}
+
+/** @returns Hits whose narration span sits inside at least one verbatim occurrence of the quote. */
+function hitsCoveredByQuote<T extends { readonly start: number; readonly end: number }>(narration: string, quote: string, hits: readonly T[]): T[] {
+  const covered = new Set<T>()
+  for (let at = narration.indexOf(quote); at >= 0; at = narration.indexOf(quote, at + 1)) {
+    for (const hit of hits) if (hit.start >= at && hit.end <= at + quote.length) covered.add(hit)
+  }
+  return [...covered]
+}
+
+/** One style issue the poison selector reads. Evidence is the admitted `{ artifactId, quote }` shape. */
+export interface PoisonRepairIssue {
+  readonly category: string
+  readonly poison?: string
+  /** Set when the host downgraded the issue because its evidence was found nowhere. Those issues are not repaired. */
+  readonly hostDowngrade?: unknown
+  readonly evidence: readonly { readonly artifactId: string; readonly quote: string }[]
+}
+
+/**
+ * The narration excerpts a prompt-version-13 body repair should rewrite.
+ * A style issue contributes a hit only when its poison is present and not `none`, the hit's grade meets the floor, and the
+ * issue's quote covers the hit. The host rule stays the evidence of where the marker is. A quote that itself occurs in the narration must cover the hit by offset. A quote that
+ * does not (a paragraph that also contains dialogue) counts when it contains the hit text. Hint grades below the floor
+ * are ignored. Notice grades below the floor stay recorded on the review and are absent here. Nothing in this list fails
+ * the chapter.
+ * @param input - Narration hits, per-rule grades, the run floor, and the admitted review issues.
+ */
+export function selectPoisonRepairHits(input: {
+  readonly narration: string
+  readonly hits: readonly AiToneHit[]
+  readonly grades: ReadonlyMap<AiToneRule, AiToneGrade>
+  readonly floor: AiToneRepairFloor
+  readonly issues: readonly PoisonRepairIssue[]
+  readonly bodyArtifactId: string
+}): { readonly spans: readonly string[]; readonly hitKeys: readonly string[] } {
+  const keys = new Set<string>()
+  const spans: string[] = []
+  const seenSpans = new Set<string>()
+  for (const issue of input.issues) {
+    if (issue.category !== 'style' || issue.hostDowngrade !== undefined) continue
+    for (const evidence of issue.evidence) {
+      if (evidence.artifactId !== input.bodyArtifactId || evidence.quote.trim().length === 0) continue
+      const candidates = input.narration.includes(evidence.quote)
+        ? hitsCoveredByQuote(input.narration, evidence.quote, input.hits)
+        : input.hits.filter(hit => evidence.quote.includes(input.narration.slice(hit.start, hit.end)))
+      for (const hit of candidates) {
+        if (aiToneRepairAction({ poison: issue.poison, rule: hit.rule, grade: input.grades.get(hit.rule), floor: input.floor }) !== 'repair') continue
+        for (const key of hit.keys) keys.add(key)
+        const span = input.narration.slice(hit.start, hit.end)
+        if (!seenSpans.has(span)) { seenSpans.add(span); spans.push(span) }
+      }
+    }
+  }
+  return { spans, hitKeys: [...keys] }
 }

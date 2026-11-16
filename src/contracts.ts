@@ -267,3 +267,13 @@ export function aiToneRepairInstruction(spans: readonly string[]): string {
   const kept = spans.slice(0, AI_TONE_MAX_SPANS).map(span => [...span].slice(0, AI_TONE_SPAN_CHARS).join(''))
   return `The body review reported AI tone in these exact passages of the narration; rewrite each one so that it no longer reads as AI tone, keeping the facts, events and voice, and return the complete chapter. Repeating a quoted passage unchanged stops the run for human review.\n${reviewBlockedLine({ code: 'review-blocked', reason: 'ai-tone', spans: kept })}`
 }
+
+/**
+ * Prompt version 13. The next body should rewrite these heavy-poison excerpts. The line is not a chapter failure:
+ * a repeated passage is recorded and the chapter can still be applied.
+ * @param spans - Narration excerpts whose poison met the repair floor.
+ */
+export function aiTonePoisonRepairInstruction(spans: readonly string[]): string {
+  const kept = spans.slice(0, AI_TONE_MAX_SPANS).map(span => [...span].slice(0, AI_TONE_SPAN_CHARS).join(''))
+  return `The body review reported a heavy AI-tone poison in these exact narration passages. Rewrite each one so the poison is gone, keeping the facts, events and voice, and return the complete chapter. A style finding does not fail the chapter: if the same passage remains, the host records it and continues.\n${JSON.stringify({ code: 'style-repair', reason: 'ai-tone-poison', spans: kept })}`
+}

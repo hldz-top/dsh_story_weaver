@@ -56,6 +56,8 @@ Prompt version 8 publishes optional `briefQuote` on each issue. On admission of 
 
 Prompt version 12 publishes category `pov` and optional `paragraphId` on each issue. A body review must include the fixed check `pov-limited` (category `pov`). A violation uses id `pov-limited`, category `pov`, severity `blocking`, and `paragraphId` from the host paragraph split. Omitting `paragraphId` rejects that review. Versions 1–11 do not publish `pov` or issue-level `paragraphId`. A stored review that never used them still reads back. Version 11 body reviews still receive advisory `task.metrics`.
 
+Prompt version 13 publishes optional `poison` on each issue: `false-target`, `synonym`, `forced`, or `none`. `false-target` means the sentence aims at the wrong thing, `synonym` means a swapped near-synonym, and `forced` means a forced contrast. `none` means the host marker is a legitimate use. Omit it unless the issue is `style`. Admission rejects `poison` on an issue that is not `style`, and rejects any other value. Versions 7–12 do not publish the field. A stored review that omits it still reads back. Style severity stays advisory.
+
 ## Book outline
 
 `parseBookOutlineOutput(value, { inputRefs, chapterCount })` returns `BookOutlineOutput`. Chapters must appear in order from 1 through the exact requested count. Obligation IDs are unique across the entire book outline.
