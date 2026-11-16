@@ -61,6 +61,10 @@ export const Config: z<Config> = z.object({
   maxDelegationDepth: z.number().default(2),
   maxStageRequests: z.number().default(96),
   stageTimeoutMs: z.number().default(600_000),
+  /**
+   * Replacements after the first attempt. The default 2 is the cap for settings, outlines, continuity, snapshots, reviews and research.
+   * A manuscript body candidate receives one more round, so the default body cap is 3. Zero turns repair off for every class, including the body.
+   */
   maxRepairAttempts: z.number().default(2),
   maxParallelStages: z.number().default(3),
   /**

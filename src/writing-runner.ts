@@ -169,6 +169,26 @@ export function chapterSnapshotThrough(chapterNumber: number, fromChapter: numbe
   return start - 1
 }
 
+/**
+ * Stage classes that choose a repair cap. Only a manuscript body candidate sits above the configured budget.
+ * Continuity and continuity snapshots stay on that budget, including where they share a loop with the body.
+ */
+export type RepairCapKind = 'settings' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot' | 'review' | 'research'
+
+/**
+ * Replacements allowed after the first attempt of one local repair loop.
+ * Settings, outlines, continuity, snapshots, reviews and research use `configured` (the plugin default is 2).
+ * A manuscript body candidate gets one more round, so that default gives the body 3.
+ * A configured 0 stays 0 for the body as well: that value turns repair off.
+ * @param kind - The stage class being repaired.
+ * @param configured - The run's `maxRepairAttempts`.
+ * @returns The replacement cap for that class.
+ */
+export function repairAttemptCap(kind: RepairCapKind, configured: number): number {
+  if (kind === 'body' && configured > 0 && configured < Number.MAX_SAFE_INTEGER) return configured + 1
+  return configured
+}
+
 /** Owns in-process execution; durable stores own versions and recovery receipts. */
 export class WritingRunner {
   private readonly active = new Map<RunId, ActiveRun>()
@@ -1090,7 +1110,9 @@ export class WritingRunner {
     let heldReview: { readonly candidate: ManuscriptCandidateView; readonly fails: number } | null = null
     // The last admitted book or chapter outline. From prompt version 7, a later repair patches this instead of rewriting it.
     let priorOutline: unknown = null
-    for (let repair = 0; repair <= inv.run.executionLimits.maxRepairAttempts; repair++) {
+    // Body candidates get one more replacement than the configured budget. Outlines and continuity keep that budget.
+    const repairCap = repairAttemptCap(target.kind, inv.run.executionLimits.maxRepairAttempts)
+    for (let repair = 0; repair <= repairCap; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       aiToneSpans = []
       const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError }
@@ -1142,7 +1164,7 @@ export class WritingRunner {
           }
         }
         previousAiTone = { hitKeys: new Set([...gate.spans.values()].flat()), body: gate.body }
-        const last = repair === inv.run.executionLimits.maxRepairAttempts
+        const last = repair === repairCap
         await this.markAiToneBlock(inv, stageKey, { reason: !last ? 'ai-tone' : repair === 0 ? 'ai-tone' : 'ai-tone-exhausted', spans: aiToneSpans })
       } else previousAiTone = null
       const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0
@@ -1165,7 +1187,7 @@ export class WritingRunner {
       feedback = this.feedback(reviewed)
     }
     // Never auto-pass: a body still carrying blocking AI tone when repairs run out ends review-blocked and is not applied.
-    if (aiToneSpans.length > 0) throw new AiToneReviewBlockedError(inv.run.executionLimits.maxRepairAttempts === 0 ? 'ai-tone' : 'ai-tone-exhausted', aiToneSpans, key)
+    if (aiToneSpans.length > 0) throw new AiToneReviewBlockedError(repairCap === 0 ? 'ai-tone' : 'ai-tone-exhausted', aiToneSpans, key)
     throw new WritingError('review-blocked', `Repair limit was exhausted for ${key}${validationError === null ? '' : `: ${validationError}`}`)
   }
 
