@@ -139,9 +139,28 @@ const chapterOutlineSchema = inputsSchema.extend({
 const bodySchema = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), scenes: z.array(z.strictObject({ sceneId: text, text })).nonempty(),
 })
-const continuitySchema = inputsSchema.extend({
+/**
+ * Prompt versions 1–8 publish this schema. Property order matches the frozen schema: each character is only
+ * `{ name, state }`. Admission does not use it.
+ */
+export const continuitySchemaLegacy = inputsSchema.extend({
   chapterNumber: z.number().int().positive(), summary: text,
   characters: z.array(z.strictObject({ name: text, state: text })),
+  timeline: z.array(z.strictObject({ event: text, evidence: z.array(citationSchema).nonempty() })),
+  obligations: z.array(z.strictObject({
+    id: text, status: z.enum(['open', 'fulfilled']), explanation: text, evidence: z.array(citationSchema),
+  })),
+})
+/**
+ * Admission, and the schema version 9 publishes. `name_note` is optional, so a stored `{ name, state }` character
+ * still reads back. A present note must be nonblank. The host keeps it and does not treat it as a separate fact.
+ */
+const continuitySchema = inputsSchema.extend({
+  chapterNumber: z.number().int().positive(), summary: text,
+  characters: z.array(z.strictObject({
+    name: text, state: text,
+    name_note: text.optional().describe('Optional note about the name. Omit it when there is nothing to add.'),
+  })),
   timeline: z.array(z.strictObject({ event: text, evidence: z.array(citationSchema).nonempty() })),
   obligations: z.array(z.strictObject({
     id: text, status: z.enum(['open', 'fulfilled']), explanation: text, evidence: z.array(citationSchema),

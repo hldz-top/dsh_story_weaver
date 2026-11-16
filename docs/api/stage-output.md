@@ -95,7 +95,7 @@ The parser preserves scene text without assembling it, counting it, or inserting
 | --- | --- |
 | `chapterNumber` | Positive integer matching the requested chapter. |
 | `summary` | Nonblank proposed chapter summary, still subject to semantic review. |
-| `characters` | Explicit array of `{ name, state }` with nonblank strings and unique names. States remain proposed claims until reviewed. |
+| `characters` | Explicit array of `{ name, state, name_note? }` with nonblank strings and unique names. `name_note` is optional. A character that has only `{ name, state }` still admits, and a present note is kept. States remain proposed claims until reviewed. Version 9 publishes `name_note`. Versions 1–8 publish `{ name, state }` only, so those runs rebuild their previous schema. |
 | `timeline` | Explicit array of `{ event, evidence }`. Events are nonblank, and each evidence array is nonempty with verified quotations. |
 | `obligations` | Complete array of `{ id, status, explanation, evidence }` with unique IDs matching the host request. Status is `open` or `fulfilled`; explanation is nonblank. |
 

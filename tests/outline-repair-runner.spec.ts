@@ -62,7 +62,7 @@ it('stores a patched book and chapter outline when a repair is requested, and th
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
-  expect(outcome.value.promptVersion).toBe(8)
+  expect(outcome.value.promptVersion).toBe(9)
 
   const bookDraft = [...fixture.stages.values()].find(stage => stage.kind === 'book-outline' && stage.task?.validationError == null)
   const bookRepair = [...fixture.stages.values()].find(stage => stage.kind === 'book-outline' && stage.task?.validationError != null)
@@ -129,7 +129,7 @@ it('rejects an unapplicable outline patch and does not store a partial outline',
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a1'], chapterCount: 1, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.status).toBe('failed')
-  expect(outcome.value.promptVersion).toBe(8)
+  expect(outcome.value.promptVersion).toBe(9)
   expect(outcome.value.error).toContain('no-such-field')
   expect(outcome.value.error).toContain('Repair limit was exhausted for book-outline/book')
   const repairStage = [...fixture.stages.values()].find(stage => stage.kind === 'book-outline' && stage.task?.validationError != null)

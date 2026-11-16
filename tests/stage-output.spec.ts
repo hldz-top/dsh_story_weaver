@@ -77,6 +77,10 @@ it('requires actual reviewed-body evidence for fulfilled obligations and preserv
   const expected = { inputRefs: [brief, candidate], chapterNumber: 2, obligationIds: ['recover-log', 'find-key'], reviewedBodyId: candidate.artifactId,
     evidenceSources: [{ artifactId: candidate.artifactId, text: 'The keeper found the log.' }, { artifactId: brief.artifactId, text: 'The keeper will find the log.' }] }
   expect(parseContinuityOutput(output, expected)).toEqual(output)
+  expect(parseContinuityOutput(output, expected).characters[0]).not.toHaveProperty('name_note')
+  const noted = { ...output, characters: [{ name: 'The keeper', state: 'Has the recovered log.', name_note: 'She is called Lan by the crew.' }] }
+  expect(parseContinuityOutput(noted, expected).characters[0]).toEqual(noted.characters[0])
+  expect(() => parseContinuityOutput({ ...output, characters: [{ name: 'The keeper', state: 'Has the recovered log.', name_note: '   ' }] }, expected)).toThrow()
   expect(() => parseContinuityOutput({ ...output, obligations: [output.obligations[0], { ...output.obligations[1], explanation: '' }] }, expected)).toThrow()
   expect(() => parseContinuityOutput({ ...output, obligations: [{ ...output.obligations[0], evidence: [] }, output.obligations[1]] }, expected)).toThrow(/body/i)
   expect(() => parseContinuityOutput({ ...output, obligations: [{ ...output.obligations[0], evidence: [{ artifactId: brief.artifactId, quote: 'will find the log' }] }, output.obligations[1]] }, expected)).toThrow(/body/i)
