@@ -22,7 +22,8 @@ import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
 import { blockingIssueCount, EvidenceRejection, StageOutputSchemas, type BodyOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
-import { countStoryWords } from './body-text.ts'
+import { assembleBody, countStoryWords } from './body-text.ts'
+import { extractRequiredEvents, missingRequiredEvents, requiredEventRepairInstruction, type MissingRequiredEvent } from './required-events.ts'
 import { buildCitationRepairPrompt, CITATION_REPAIR_OUTPUT_SCHEMA, mergeCitationRepair } from './citation-repair.ts'
 import { applyOutlinePatch, buildOutlineRepairPrompt, OUTLINE_PATCH_OUTPUT_SCHEMA, outlineRepairUsesPatch, type OutlineRepairKind } from './outline-repair.ts'
 import { collectQuoteRepairs } from './evidence-quote.ts'
@@ -1147,6 +1148,9 @@ export class WritingRunner {
       }
       if (outlineKind !== null && promptVersionOf(inv.run) >= 7) priorOutline = JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id }).text) as unknown
       await this.deliver(inv, candidate.artifact)
+      // Required events are a host hit against the brief. The review is not asked to rediscover them.
+      const missingEvents = target.kind === 'body' ? this.missingBodyEvents(inv, context.inputRefs, context.obligations, structured) : []
+      const eventInstruction = missingEvents.length === 0 ? null : requiredEventRepairInstruction(missingEvents)
       const reviewed = await this.reviewManuscript(inv, stageKey, candidate, context.requiredChecks)
       const unfulfilled = target.kind === 'continuity' ? StageOutputSchemas.continuity.parse(structured).obligations.filter(item => item.status !== 'fulfilled') : []
       const incomplete = unfulfilled.length > 0
@@ -1167,7 +1171,7 @@ export class WritingRunner {
         const last = repair === repairCap
         await this.markAiToneBlock(inv, stageKey, { reason: !last ? 'ai-tone' : repair === 0 ? 'ai-tone' : 'ai-tone-exhausted', spans: aiToneSpans })
       } else previousAiTone = null
-      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0
+      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null
       if (promptVersionOf(inv.run) >= 8 && reviewBlocked && reviewed.review !== null) {
         const fails = blockingIssueCount(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: reviewed.review.id }).text))
         const decision = checklistRepairDecision(heldReview?.fails ?? null, fails, 'does-not-decrease')
@@ -1179,11 +1183,12 @@ export class WritingRunner {
         }
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
-      if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0) return { candidate: reviewed, convergence: null }
-      if (aiToneSpans.length > 0) { validationError = `${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`; repairMode = 'review' }
-      else if (incomplete) { validationError = `Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`; repairMode = 'review' }
-      else if (reviewed.length?.blocking) { validationError = lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)); repairMode = 'length' }
-      else { validationError = 'Resolve the blocking issues in the exact supplied review.'; repairMode = 'review' }
+      if (reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null) return { candidate: reviewed, convergence: null }
+      if (aiToneSpans.length > 0) { validationError = withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction); repairMode = 'review' }
+      else if (incomplete) { validationError = withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction); repairMode = 'review' }
+      else if (reviewed.length?.blocking) { validationError = withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction); repairMode = 'length' }
+      else if (eventInstruction !== null && reviewed.status !== 'blocked') { validationError = eventInstruction; repairMode = 'review' }
+      else { validationError = withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction); repairMode = 'review' }
       feedback = this.feedback(reviewed)
     }
     // Never auto-pass: a body still carrying blocking AI tone when repairs run out ends review-blocked and is not applied.
@@ -1515,6 +1520,33 @@ export class WritingRunner {
     return this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === target.kind
       && (!('chapterNumber' in target) || ('chapterNumber' in item.target && item.target.chapterNumber === target.chapterNumber)))
   }
+  /**
+   * Keyword hit for brief-grounded required events. Outline obligations the brief does not state are not in the list.
+   * @param structured - The admitted body. @returns Events the assembled chapter does not hit.
+   */
+  private missingBodyEvents(inv: Invocation, refs: readonly ArtifactRef[], bookObligations: readonly { id: string; description: string }[], structured: unknown): MissingRequiredEvent[] {
+    const novelId = inv.run.novelId
+    const brief = this.service.getNovel(inv.actor, novelId).brief
+    if (brief.id !== inv.run.briefArtifactId) throw new WritingError('revision-conflict', 'Creative brief changed during writing')
+    const briefText = this.service.getArtifact(inv.actor, { novelId, artifactId: brief.id }).text
+    const outlineRef = refs.find(ref => ref.kind === 'chapter-outline')
+    let outlineObligations: { id: string; description: string }[] = []
+    if (outlineRef !== undefined) {
+      const text = this.service.getArtifact(inv.actor, { novelId, artifactId: outlineRef.id }).text
+      let value: unknown
+      try { value = JSON.parse(text) as unknown }
+      catch { throw new WritingError('corrupt-artifact', 'Admitted chapter outline cannot be read for the required-event check') }
+      const parsed = StageOutputSchemas['chapter-outline'].safeParse(value)
+      if (!parsed.success) throw new WritingError('corrupt-artifact', 'Admitted chapter outline cannot be read for the required-event check')
+      outlineObligations = parsed.data.obligations
+    }
+    const seen = new Set(outlineObligations.map(item => item.id))
+    const obligations = [...outlineObligations, ...bookObligations.filter(item => !seen.has(item.id))]
+    const body = StageOutputSchemas.body.safeParse(structured)
+    if (!body.success) throw new WritingError('corrupt-artifact', 'Admitted chapter body cannot be read for the required-event check')
+    return missingRequiredEvents(assembleBody(body.data), extractRequiredEvents({ briefText, obligations }))
+  }
+
   private feedback(candidate: SettingsCandidateView | ManuscriptCandidateView): ArtifactRef[] {
     return candidate.review === null ? [candidate.artifact] : [candidate.artifact, candidate.review]
   }
@@ -1585,6 +1617,11 @@ function chapterRangeRequirement(kind: StagePromptKind, limits: Pick<RunExecutio
 function chapterAim(limits: Pick<RunExecutionLimits, 'minChapterWords' | 'maxChapterWords'>, promptVersion: PromptVersion): number {
   return promptVersion >= 7 ? limits.minChapterWords : Math.round((limits.minChapterWords + limits.maxChapterWords) / 2)
 }
+/** Puts the host hit-check ahead of any other repair text. A null instruction leaves the base unchanged. */
+function withRequiredEvents(base: string, eventInstruction: string | null): string {
+  return eventInstruction === null ? base : `${eventInstruction} ${base}`
+}
+
 /** Length repair guidance from the host's own measurement: the exact count, the accepted range, the overage, every scene's count from the same Story counter (separators add no words, so they sum to the count) and the aim. */
 function lengthRepairError(wordCount: number | null, status: 'too-short' | 'too-long', body: BodyOutput, limits: Pick<RunExecutionLimits, 'minChapterWords' | 'maxChapterWords'>, promptVersion: PromptVersion): string {
   if (wordCount === null) throw new WritingError('corrupt-artifact', 'A length-blocked body has no measured word count')
