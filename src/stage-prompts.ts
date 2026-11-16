@@ -21,10 +21,13 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * Versions 1–11 stay frozen.
  * Version 13, for new runs only, tells a body review to set optional `poison` and repairs only a present poison other
  * than `none` whose marker grade meets the run floor. Versions 1–12 stay frozen.
+ * Version 14, for new runs only, keeps the version 13 prompt text and published schemas. The first signed-off
+ * body failure appends one repair sentence to the next round. A second identical signature stops before another
+ * round. Versions 1–13 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 13
+export const CURRENT_PROMPT_VERSION: PromptVersion = 14
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'

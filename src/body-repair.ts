@@ -97,10 +97,13 @@ export function buildBodyRepairPrompt(request: {
   inputs: readonly { artifactId: string; sha256: string; kind: string; chars: number }[]
   task: object
   inputRefs: readonly unknown[]
+  /** Version 14 only. Present on the repair that follows the first signed-off failure. Omitted when the signature changed or the round is stopping. */
+  sameDefectNote?: string
 }): string {
   const task = { ...request.task, inputRefs: request.inputRefs, bodyFields: bodyFields(request.prior) }
+  const requirements = request.sameDefectNote === undefined ? PATCH_REQUIREMENTS : [...PATCH_REQUIREMENTS, request.sameDefectNote]
   return [...PATCH_INSTRUCTIONS, 'TASK_DATA', JSON.stringify({
-    novelId: request.novelId, kind: 'body', inputs: request.inputs, task: JSON.stringify(task), requirements: PATCH_REQUIREMENTS,
+    novelId: request.novelId, kind: 'body', inputs: request.inputs, task: JSON.stringify(task), requirements,
   }, null, 2)].join('\n\n')
 }
 
