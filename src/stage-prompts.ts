@@ -1,6 +1,9 @@
 /** Logged writing-stage instructions derived from Story V2 business roles. */
 import type { AiToneRepairFloor } from './ai-tone.ts'
 import type { ArtifactId, NovelId } from './contracts.ts'
+import { CHARACTER_SHEET_PROMPT_VERSION, DEFAULT_MAX_CHARACTERS } from './character-sheet.ts'
+import { SCENE_CAST_PROMPT_VERSION } from './scene-cast.ts'
+import { hookTypePromptLine } from './hook-type.ts'
 import { isOpenChecklistCode, openChecklistItems, type OpenChecklistCode } from './open-dimension-checklist.ts'
 import type { SettingsDimensionKind } from './settings-catalog.ts'
 import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS_FACTS } from './stage-output.ts'
@@ -24,10 +27,13 @@ import { ENUM_SETTINGS_KINDS, MAX_ENUM_SETTINGS_CONTENT_CHARS, MAX_ENUM_SETTINGS
  * Version 14, for new runs only, keeps the version 13 prompt text and published schemas. The first signed-off
  * body failure appends one repair sentence to the next round. A second identical signature stops before another
  * round. Versions 1–13 stay frozen.
+ * Version 15, for new runs only, is the gate for plants, hook rotation, the chapter-1 opening, character cards,
+ * scene cast and character review. Each of those sentences is added by its own check and only when that check is on.
+ * Versions 1–14 stay frozen.
  */
-export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14
+export type PromptVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
 /** The version new runs record. */
-export const CURRENT_PROMPT_VERSION: PromptVersion = 14
+export const CURRENT_PROMPT_VERSION: PromptVersion = 15
 
 /** Business purpose of one independently executed stage. */
 export type StagePromptKind = 'settings' | 'review' | 'book-outline' | 'chapter-outline' | 'body' | 'continuity' | 'continuity-snapshot'
@@ -62,6 +68,41 @@ export interface StagePromptRequest {
    * Ignored before version 13 and for every other stage.
    */
   readonly aiToneRepairFloor?: AiToneRepairFloor
+  /**
+   * Version 15 plant ledger. False omits the plant sentences and keeps the version-14 continuity prompt.
+   * Omitted means on. Ignored before version 15. Not stored on the run.
+   */
+  readonly plantLedger?: boolean
+  /**
+   * Version 15 hook rotation. False omits the hook sentence and keeps the version-14 chapter-outline schema.
+   * Omitted means on. Ignored before version 15. Not stored on the run.
+   */
+  readonly hookRotation?: boolean
+  /**
+   * Version 15 chapter-1 opening check. False omits the opening sentence.
+   * Omitted means on. Ignored before version 15. Not stored on the run.
+   */
+  readonly openingIn50?: boolean
+  /**
+   * e5 and/or e6 being written by this settings stage. Version 15 appends the double-table instruction.
+   * Omitted, empty, or any version before 15 leaves the prompt unchanged.
+   */
+  readonly characterDimensions?: readonly ('e5' | 'e6')[]
+  /** Character cap named by the version-15 e5/e6 instruction. Ignored unless `characterDimensions` is nonempty. */
+  readonly maxCharacters?: number
+  /**
+   * Version 15 scene cast. False omits the cast sentences. Omitted means on. Ignored before version 15.
+   * Not stored on the run.
+   */
+  readonly sceneCast?: boolean
+  /** Version 15 body card injection. False omits the body sentence. Omitted means on. */
+  readonly castInjection?: boolean
+  /**
+   * Version 15 body reviews. False omits the character checks and keeps the version-14 review text.
+   * Omitted means on. Ignored before version 15 and for every stage that is not a body review.
+   * Not stored on the run.
+   */
+  readonly characterReview?: boolean
 }
 
 /** Versions 1–6. Version 7 drops the scene-allocation clause; the per-scene ceiling rule stays, because that is the host rule already in this sentence. */
@@ -183,6 +224,13 @@ const CHAPTER_MOTIVE = 'Each scene.action names who chooses, what they want in t
 const POV_LIMITED_REVIEW = 'A body review always includes the fixed check pov-limited, category pov, whether or not the creative brief mentions a limited point of view. Narration may state only what the viewpoint character can perceive. Another character\'s inner thoughts and unspoken judgments are violations. The viewpoint is the main POV named by the chapter outline or the settings; if none is named, infer it from the body. A missing or undeterminable viewpoint is not a failure and must not reject the chapter. A violation is an issue with id pov-limited, category pov, severity blocking, and paragraphId copied from task.paragraphs. When task.povHeuristic is present, those hints are advisory and need confirmation; a hint is not by itself a failure, and the host does not block or return the chapter because of it. Despite the general REVIEW_ACTION rule, pov-limited issues use category pov and are blocking, not style or advisory. Each such issue must set its own paragraphId.'
 const BODY_MOTIVE = 'Show the viewpoint character’s present want inside the choice: what they notice, what they do, and the cost already established by settings or prior applied continuity. Continue from the previous scene’s ending and close on a situation the next scene can pick up. Do not summarize the outline, announce a narrator thesis, repeat an explanation already shown, stack metaphors, drift the time of day, season, or elapsed time, or grant knowledge, tools or injuries the accepted sources do not support.'
 const CONTINUITY_MOTIVE = 'For a character the reviewed prose actually changes, record location, knowledge, condition and relationships only as that prose supports them. Each timeline.event states what the prose shows, with a quote from the reviewed body. Leave a fact unchanged when the chapter does not touch it. Mark an obligation fulfilled only when the prose performs it, not when a character merely intends it.'
+/** Version 15, and only when the plant ledger is on. Versions 1–14 do not receive these sentences. */
+const CHAPTER_PLANTS = 'When task.plantHints is present, each entry is an advisory reminder that a foreshadowing plant has stayed open for several chapters, or that a plant list was replaced by the previous ledger. It is not a required event and it does not block the outline.'
+const OPENING_IN_50 = 'Chapter 1 must show a person, an event, and a conflict inside the first 50 Story-counted words. A later mention does not pass. A miss on an otherwise accepted chapter is an advisory reminder and does not start a repair or fail the chapter. When a repair is already required for another reason, include the missing opening in that repair. Other chapters are not checked.'
+const SCENE_CAST_OUTLINE = 'On each scene, set cast to every name present in that scene, pov to the viewpoint character (one name from that scene\'s cast), and misread to exactly one of 利益, 礼法, 逻辑, 技艺, 生计, or 其它. A pov that is not in cast, or a misread outside that list, is rejected and repaired. A cast name that is not on the character card is kept. The same frame on every scene is an advisory note and does not fail the outline.'
+const SCENE_CAST_BODY = 'When task.castCards is present, write each listed person from that one-line card and no one else. task.misreadMap is the frame of each scene. task.uncastNames, when present, are cast names without a card; do not invent a card for them. Do not bring in a character the chapter outline did not list in cast. task.castAdvisory, when present, is a host note and is not a veto.'
+const CHARACTER_REVIEW = 'On a body review, return three checks with category character. Each summary starts with its id and a colon: character-voice, character-function, or character-arc. character-voice asks whether a supporting character\'s lines would still mean the same thing if another supporting character said them. If they would, add a blocking issue whose id starts with character-voice. character-function asks whether a supporting character only reacts to the protagonist and has no situation of their own. If so, add a blocking issue whose id starts with character-function. character-arc asks whether every name in the chapter outline cast is a recognizable presence and not only a name. character-arc issues are severity advisory and must not be blocking. When task.metrics.character is present it is a host measurement. Those warnings are advisory: do not file them as blocking issues and do not change any issue severity. If task.metrics.character is absent, the character card was missing or could not be parsed: skip the counts and still return the three checks. A missing card is not a chapter failure.'
+const CONTINUITY_PLANTS = 'Carry forward every open plant from the previous continuity snapshot in optional plants. Keep its id, text, and plantedChapter, and set status to open or paid. A new plant must give plantedChapter as this chapter. Do not pay a plant that is already paid. Omit plants when nothing is open and this chapter plants nothing. A plant list the host cannot keep is replaced by the previous open ledger and does not fail the chapter.'
 const REVIEW_ACTION = 'Write each issue.message as one repair step: the location, the exact conflict or omission, and the smallest change that fixes it. A successful check.summary names the evidence that satisfied it. Do not request a full rewrite or a change to an accepted upstream source. A speculative risk, or a sentence that only might be read a certain way, is not a blocking issue. Open a blocking category only for a missing required event, a settings or persona contradiction (including a spatial impossibility or a non-physical thing written as an object), a cross-chapter continuity conflict, or a chapter-length violation the host already measured in task.measuredWordCount or task.measuredLength. Metaphor stacking, a narrator thesis, and a repeated sentence skeleton are category style and severity advisory: name the cited sentence and the smallest rewrite. Anything else, including thin motivation, plain wording and taste, is category style and severity advisory.'
 /** Version 8. The host rejects a blocking completeness or obligations issue whose briefQuote is not a verbatim brief excerpt. */
 const REVIEW_BRIEF_ONLY = 'The creative brief is the only source of requirements. A blocking completeness or obligations issue must set briefQuote to one verbatim excerpt of the creative brief that states that requirement. Do not add a scene, event, or obligation the brief does not state. A genre premise is not a demand for a scene the brief never names. Consistency, continuity, and a host-measured length finding are not a new requirement and do not use briefQuote to invent one.'
@@ -195,6 +243,29 @@ const REVIEW_BY_KIND: Partial<Record<StagePromptKind, string>> = {
   body: 'A consistency issue quotes a choice that uses knowledge, a motive or a physical fact the accepted settings and prior continuity deny. A continuity issue quotes the prior applied fact and the sentence that breaks it. An obligations issue names the required event and shows the prose does not perform it. AI-tone issues stay category style and severity advisory, as the AI-tone instruction states.',
   continuity: 'Block when a new fact or a fulfilled obligation is not supported by the reviewed body, or when the chapter drops or alters a fact it does not change. A plain summary is not a block.',
   'continuity-snapshot': 'Block a character status, unrecovered note, or used bridge that the applied body and continuity do not support. Do not ask for a narrative-state graph or a foreshadowing ledger. A compact note the prose supports is complete.',
+}
+
+/** e5 or e6 codes present on a settings task. Other stages and other dimensions return an empty list. */
+export function characterDimensionsForStage(task: object): readonly ('e5' | 'e6')[] {
+  const found = new Set<'e5' | 'e6'>()
+  const add = (value: unknown): void => { if (value === 'e5' || value === 'e6') found.add(value) }
+  if ('dimensionCode' in task) add(task.dimensionCode)
+  if ('codes' in task && Array.isArray(task.codes)) for (const code of task.codes) add(code)
+  return (['e5', 'e6'] as const).filter(code => found.has(code))
+}
+
+/** @param dimensions - e5, e6, or both. @param maxCharacters - The host cap for one dimension. @returns The version-15 table instruction. */
+function characterSheetInstruction(dimensions: readonly ('e5' | 'e6')[], maxCharacters: number): string {
+  const which = dimensions.map(code => code === 'e5' ? 'e5 助攻角色' : 'e6 配角群').join(' and ')
+  return `For ${which}, each dimension body must contain two Markdown tables that list the same characters once each, at most ${maxCharacters} people in that dimension. Put allies in e5 and the wider cast in e6; do not add a new settings dimension. The core table has exactly these 8 columns in order: 角色, 身份, 欲望, 恐惧, 缺陷, 误读框架, 反差, 出场章. 误读框架 is one of 利益, 礼法, 逻辑, 技艺, 生计, or 其它: followed by at most 10 characters. 反差 is one sentence of contrast. 出场章 is comma-separated positive chapter numbers such as 1,2,3. The voice table has exactly these 7 columns in order: 角色, 句式, 专属词, 称呼主角, 自称, 身体签, 禁语. 句式 is a length range plus one signature pattern. 专属词 is three items separated by 、. 称呼主角 and 自称 stay consistent with e9. 身体签 is one fixed gesture. 禁语 is one sentence this person will never say. A host rejection names the character and the field. The repair replaces that dimension's contentMarkdown and does not regenerate the settings document.`
+}
+
+/** @param request - The stage being prompted. @returns The version-15 e5/e6 table sentence, or none for older versions and every other stage. */
+function characterSheetLines(request: StagePromptRequest): readonly string[] {
+  if ((request.promptVersion ?? 1) < CHARACTER_SHEET_PROMPT_VERSION) return []
+  const dimensions = request.characterDimensions
+  if (dimensions === undefined || dimensions.length === 0) return []
+  return [characterSheetInstruction(dimensions, request.maxCharacters ?? DEFAULT_MAX_CHARACTERS)]
 }
 
 /** @param request - The stage being prompted. @returns Version-8 review constraints, or none before version 8 and for every other stage. */
@@ -215,6 +286,12 @@ function metricsLines(request: StagePromptRequest): readonly string[] {
   return [REVIEW_METRICS]
 }
 
+/** @param request - The stage being prompted. @returns The version-15 character-review sentence for a body review, or none. */
+function characterReviewLines(request: StagePromptRequest): readonly string[] {
+  if ((request.promptVersion ?? 1) < 15 || request.kind !== 'review' || request.reviewedKind !== 'body' || request.characterReview === false) return []
+  return [CHARACTER_REVIEW]
+}
+
 /** @param request - The stage being prompted. @returns Version-6 sentences for that stage, or none before version 6. */
 function qualityParagraphs(request: StagePromptRequest): readonly string[] {
   if ((request.promptVersion ?? 1) < 6) return []
@@ -223,12 +300,24 @@ function qualityParagraphs(request: StagePromptRequest): readonly string[] {
       return [request.settingsDimensionKind !== undefined && ENUM_SETTINGS_KINDS.has(request.settingsDimensionKind) ? SETTINGS_CLASSIFICATION_BOUND : SETTINGS_PEOPLE, SETTINGS_READER, REVISION_SCOPE]
     case 'book-outline':
       return [BOOK_MOTIVE, REVISION_SCOPE]
-    case 'chapter-outline':
-      return [CHAPTER_MOTIVE, REVISION_SCOPE]
-    case 'body':
-      return [BODY_MOTIVE]
+    case 'chapter-outline': {
+      const version = request.promptVersion ?? 1
+      const lines = [CHAPTER_MOTIVE]
+      if (version >= 15 && request.plantLedger !== false) lines.push(CHAPTER_PLANTS)
+      if (version >= 15 && request.hookRotation !== false) lines.push(hookTypePromptLine())
+      if (version >= SCENE_CAST_PROMPT_VERSION && request.sceneCast !== false) lines.push(SCENE_CAST_OUTLINE)
+      lines.push(REVISION_SCOPE)
+      return lines
+    }
+    case 'body': {
+      const version = request.promptVersion ?? 1
+      const lines = [BODY_MOTIVE]
+      if (version >= 15 && request.openingIn50 !== false) lines.push(OPENING_IN_50)
+      if (version >= SCENE_CAST_PROMPT_VERSION && request.sceneCast !== false && request.castInjection !== false) lines.push(SCENE_CAST_BODY)
+      return lines
+    }
     case 'continuity':
-      return [CONTINUITY_MOTIVE]
+      return (request.promptVersion ?? 1) >= 15 && request.plantLedger !== false ? [CONTINUITY_MOTIVE, CONTINUITY_PLANTS] : [CONTINUITY_MOTIVE]
     case 'continuity-snapshot':
       return []
     case 'review': {
@@ -363,6 +452,8 @@ export function buildStagePrompt(request: StagePromptRequest): string {
     ...qualityParagraphs(request),
     ...reviewConstraintLines(request),
     ...metricsLines(request),
+    ...characterSheetLines(request),
+    ...characterReviewLines(request),
   ]
   return [...instructions, 'TASK_DATA', JSON.stringify({
     novelId: request.novelId, kind: request.kind, inputs: request.inputs, task: request.task, requirements: request.requirements,

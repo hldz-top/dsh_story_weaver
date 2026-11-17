@@ -3,11 +3,11 @@
  *
  * The first draft stays a complete body. Once that body has been admitted, a repair on prompt version 10 or later
  * returns only the string fields or paragraphs that change. The host applies the patch and stores the complete body.
- * A reply that is not a patch is a schema rejection. The runner retries that capture once, with the rejection in the
- * prompt, and does not repeat the identical request. If the retry is still not a usable patch and {@link bodyPatchFallback}
- * is true, the runner asks once for the complete body. A patch that parses but does not fit uses that same full-body
- * path, without the schema retry. If the complete body is also invalid, or fallback is false, the candidate is rejected
- * and the admitted body is left unchanged. Timeouts and other capture failures are not turned into this retry.
+ * A reply that is not a patch is a schema rejection. A patch that parses but does not fit the admitted body is the same
+ * kind of rejection. The runner retries that capture once, with the error in the prompt, and does not repeat the
+ * identical request. If the retry is still not a usable patch and {@link bodyPatchFallback} is true, the runner asks
+ * once for the complete body. The default is false: the candidate is rejected and the admitted body is left unchanged.
+ * Timeouts and other capture failures are not turned into this retry.
  * Prompt versions before 10 still ask for a full replacement. This schema is separate from the versioned stage schema,
  * so versions 1–9 keep their previous prompt bytes and output schemas.
  */
@@ -50,10 +50,11 @@ const PATCH_INSTRUCTIONS = [
 export const BODY_PATCH_REQUIREMENT = 'Return a body patch of only the fields or paragraphs that change. Do not return the complete body.'
 const PATCH_REQUIREMENTS = [BODY_PATCH_REQUIREMENT]
 /**
- * When a patch does not apply, the runner asks once for the complete body on the existing full-body repair path.
- * False rejects that candidate and leaves the admitted body unchanged.
+ * When two consecutive body patches are rejected, ask once for the complete body.
+ * The default is false: the candidate is rejected and the admitted body stays.
+ * Prompt bytes for versions 10–14 do not change. A resumed run on those versions no longer asks for /full unless this is set.
  */
-export const bodyPatchFallback = true
+export const bodyPatchFallback = false
 
 /**
  * Whether this repair should ask for a patch instead of a full body.
@@ -68,7 +69,7 @@ export function bodyRepairUsesPatch(promptVersion: PromptVersion, kind: string, 
 
 /**
  * What to do after a body patch is rejected.
- * @param fallback - Defaults to {@link bodyPatchFallback}. True asks for the complete body. False rejects the candidate.
+ * @param fallback - Defaults to {@link bodyPatchFallback}. True asks for the complete body after two rejections. False rejects the candidate.
  * @returns `full-body` or `reject`. Neither result admits the rejected patch.
  */
 /**

@@ -25,7 +25,7 @@ const outcomes: Record<ResearchOutcome, string> = {
 }
 const reviewCategories: Record<ReviewCategory, string> = {
   completeness: 'Completeness', consistency: 'Consistency', obligations: 'Required events',
-  continuity: 'Continuity', length: 'Chapter length', style: 'Style', pov: 'Point of view',
+  continuity: 'Continuity', length: 'Chapter length', style: 'Style', pov: 'Point of view', character: 'Character',
 }
 const classifications = { internal: 'Internal context', creative: 'Creative decision', external: 'External research' }
 
@@ -141,6 +141,7 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
     }
     for (const event of continuity.timeline) sections.push('## Timeline event', style.text(event.event), ...evidenceSections(style, event.evidence))
     for (const obligation of continuity.obligations) sections.push('## Required event', 'ID', style.text(obligation.id), `Status: ${obligation.status}`, 'Explanation', style.text(obligation.explanation), ...evidenceSections(style, obligation.evidence))
+    for (const plant of continuity.plants ?? []) sections.push('## Foreshadowing plant', 'ID', style.text(plant.id), `Status: ${plant.status}`, 'Planted chapter', String(plant.plantedChapter), ...(plant.dueChapter === undefined ? [] : ['Due chapter', String(plant.dueChapter)]), ...(plant.paidChapter === undefined ? [] : ['Paid chapter', String(plant.paidChapter)]), 'Text', style.text(plant.text))
     for (const input of continuity.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
   } else if (artifact.kind === 'continuity-snapshot') {
     const snapshot = parseContent(StageOutputSchemas['continuity-snapshot'], artifact.text)
@@ -148,6 +149,7 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
     for (const character of snapshot.characterStatus) sections.push('## Character', 'Name', style.text(character.name), 'Status', style.text(character.status))
     for (const note of snapshot.unrecoveredForeshadowing) sections.push('## Unrecovered foreshadowing', style.text(note.note))
     for (const note of snapshot.usedPlotBridges) sections.push('## Used plot bridge', style.text(note.note))
+    for (const plant of snapshot.plants ?? []) sections.push('## Foreshadowing plant', 'ID', style.text(plant.id), `Status: ${plant.status}`, 'Planted chapter', String(plant.plantedChapter), ...(plant.dueChapter === undefined ? [] : ['Due chapter', String(plant.dueChapter)]), ...(plant.paidChapter === undefined ? [] : ['Paid chapter', String(plant.paidChapter)]), 'Text', style.text(plant.text))
     for (const input of snapshot.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
   } else if (artifact.kind === 'research-plan') {
     const plan = parseContent(researchPlanContentSchema, artifact.text)

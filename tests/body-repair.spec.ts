@@ -95,8 +95,8 @@ describe('body patch apply', () => {
   })
 
   it('asks for a patch only after a version-10 body has been admitted', () => {
-    expect(bodyPatchFallback).toBe(true)
-    expect(bodyRepairAfterRejectedPatch()).toBe('full-body')
+    expect(bodyPatchFallback).toBe(false)
+    expect(bodyRepairAfterRejectedPatch()).toBe('reject')
     expect(bodyRepairAfterRejectedPatch(true)).toBe('full-body')
     expect(bodyRepairAfterRejectedPatch(false)).toBe('reject')
     expect(bodyRepairUsesPatch(10, 'body', true)).toBe(true)

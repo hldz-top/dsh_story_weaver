@@ -53,6 +53,53 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
    */
   metricsBlocking: boolean
   /**
+   * Version 15 foreshadowing ledger on continuity. Default true. Not stored on the run and not a field of story_writing.json.
+   * False keeps the version-14 continuity prompt and schema. A rejected plant list does not fail the chapter.
+   */
+  plantLedger: boolean
+  /**
+   * Version 15 hook rotation. Default true. Not stored on the run and not a field of story_writing.json.
+   * A repeated hookType fails the outline round inside the existing repair budget.
+   */
+  hookRotation: boolean
+  /**
+   * Version 15 chapter-1 opening check. Default true. Not stored on the run.
+   * A miss on an otherwise clean chapter is an advisory reminder. It does not start a repair or fail the chapter.
+   */
+  openingIn50: boolean
+  /**
+   * Parse e5/e6 character cards on prompt version 15. Default true. Not stored on the run and not a field of story_writing.json.
+   * A malformed card is rejected. The settings budget patches that dimension's text and does not regenerate the document.
+   * Exhausting the budget fails settings. The broken card is not stored as free text.
+   */
+  characterSheet: boolean
+  /** Maximum characters in one e5 or e6 dimension. Default 12. Not stored on the run. */
+  maxCharacters: number
+  /**
+   * Version 15 scene cast fields. Default true. Not stored on the run and not a field of story_writing.json.
+   * False omits cast, pov and misread from the chapter-outline schema and prompt.
+   * A viewpoint outside the cast, or a misread outside 利益, 礼法, 逻辑, 技艺, 生计, and 其它, fails the outline round.
+   * Unknown cast names are counted and do not fail the outline unless strictCast is on. The same frame on every scene is advisory.
+   */
+  sceneCast: boolean
+  /** Reject a cast name that is not on the character card. Default false. Not stored on the run. */
+  strictCast: boolean
+  /** Inject present-character cards into the body task. Default true. Not stored on the run. */
+  castInjection: boolean
+  /** Han-character budget of those cards. Default 1200. Not stored on the run. */
+  maxCastCardChars: number
+  /**
+   * Version 15 character review and metrics. Default true. Not stored on the run and not a field of story_writing.json.
+   * False keeps the version-14 review prompt and schema. Metrics never block a chapter.
+   */
+  characterReview: boolean
+  /**
+   * After two consecutive rejections of an admitted body patch, ask once for the complete chapter.
+   * Default false. The patch is retried once with the error either way. False keeps the admitted body and does not ask for /full.
+   * Not stored on the run. Prompt versions 10–14 keep their prompt bytes; a resume on those versions follows this switch.
+   */
+  bodyPatchFallback: boolean
+  /**
    * Lowest AI-tone grade a poison repair will touch on prompt version 13. `heavy` repairs only heavy poisons; a notice
    * is recorded and a hint is ignored. Frozen into each new version-13 run. Default `heavy`. It does not fail a chapter.
    */
@@ -96,6 +143,17 @@ export const Config: z<Config> = z.object({
   allowSettingsImport: z.boolean().default(false),
   aiToneBlocking: z.boolean().default(true),
   metricsBlocking: z.boolean().default(false),
+  plantLedger: z.boolean().default(true),
+  hookRotation: z.boolean().default(true),
+  openingIn50: z.boolean().default(true),
+  characterSheet: z.boolean().default(true),
+  maxCharacters: z.number().default(12),
+  sceneCast: z.boolean().default(true),
+  strictCast: z.boolean().default(false),
+  castInjection: z.boolean().default(true),
+  maxCastCardChars: z.number().default(1200),
+  characterReview: z.boolean().default(true),
+  bodyPatchFallback: z.boolean().default(false),
   aiToneRepairFloor: z.union([z.const('hint'), z.const('notice'), z.const('heavy')]).default('heavy'),
   writingModel: z.any().default('inherit'),
   researchEnabled: z.boolean().default(false),
@@ -133,6 +191,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.stageTimeoutMs > 2_147_483_647) throw new Error('stageTimeoutMs exceeds the supported timer range')
   if (typeof config.aiToneBlocking !== 'boolean') throw new Error('aiToneBlocking must be a boolean')
   if (typeof config.metricsBlocking !== 'boolean') throw new Error('metricsBlocking must be a boolean')
+  if (typeof config.plantLedger !== 'boolean') throw new Error('plantLedger must be a boolean')
+  if (typeof config.hookRotation !== 'boolean') throw new Error('hookRotation must be a boolean')
+  if (typeof config.openingIn50 !== 'boolean') throw new Error('openingIn50 must be a boolean')
+  if (typeof config.characterSheet !== 'boolean') throw new Error('characterSheet must be a boolean')
+  if (!Number.isSafeInteger(config.maxCharacters) || config.maxCharacters < 1) throw new Error('maxCharacters must be a finite positive integer')
+  if (typeof config.sceneCast !== 'boolean') throw new Error('sceneCast must be a boolean')
+  if (typeof config.strictCast !== 'boolean') throw new Error('strictCast must be a boolean')
+  if (typeof config.castInjection !== 'boolean') throw new Error('castInjection must be a boolean')
+  if (!Number.isSafeInteger(config.maxCastCardChars) || config.maxCastCardChars < 1) throw new Error('maxCastCardChars must be a finite positive integer')
+  if (typeof config.characterReview !== 'boolean') throw new Error('characterReview must be a boolean')
+  if (typeof config.bodyPatchFallback !== 'boolean') throw new Error('bodyPatchFallback must be a boolean')
   if (!AI_TONE_REPAIR_FLOORS.includes(config.aiToneRepairFloor)) throw new Error('aiToneRepairFloor must be hint, notice, or heavy')
   if (typeof config.reuseSettingsSnapshot !== 'boolean') throw new Error('reuseSettingsSnapshot must be a boolean')
   if (config.stageProvider.trim().length === 0) throw new Error('stageProvider must name a configured native in-process spawn provider')
@@ -174,7 +243,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   runs = await openRunStore(ctx.storageDomain, { maxAttempts: config.maxRunAttempts, maxOutputBytes: config.maxArtifactBytes })
   deliveryProjection = await registerStageDeliveryProjection(ctx)
-  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot })
+  runner = new WritingRunner(ctx, service, runs, executionLimits, new StageDeliveries(ctx, service, runs, config.previewDirectory), { allowIncompleteSettings: config.allowIncompleteSettings, reuseSettingsSnapshot: config.reuseSettingsSnapshot, bodyPatchFallback: config.bodyPatchFallback, plantLedger: config.plantLedger, hookRotation: config.hookRotation, openingIn50: config.openingIn50, characterSheet: config.characterSheet, maxCharacters: config.maxCharacters, sceneCast: config.sceneCast, strictCast: config.strictCast, castInjection: config.castInjection, maxCastCardChars: config.maxCastCardChars, characterReview: config.characterReview })
   ctx.provide('story', service)
   ctx.provide('storyRunner', runner)
   registerWritingTools(ctx, service, config.previewDirectory)

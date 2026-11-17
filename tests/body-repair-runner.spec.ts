@@ -1,6 +1,10 @@
 /** A version-10 run patches an admitted body. Version 9 still asks for the complete chapter. */
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { expect, it } from 'vitest'
-import { applyBodyPatch, BODY_PATCH_REQUIREMENT } from '../src/body-repair.ts'
+import { applyBodyPatch, BODY_PATCH_REQUIREMENT, buildBodyRepairPrompt } from '../src/body-repair.ts'
 import type { ArtifactId } from '../src/contracts.ts'
 import { StageOutputSchemas } from '../src/stage-output.ts'
 import type { WritingFixtureStage } from './support/writing-fixture.ts'
@@ -58,7 +62,7 @@ it('stores a patched body when a repair is requested, and the model reply is onl
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
-  expect(outcome.value.promptVersion).toBe(14)
+  expect(outcome.value.promptVersion).toBe(15)
 
   const draft = [...fixture.stages.values()].find(stage => stage.kind === 'body' && stage.task?.validationError == null)
   const repair = [...fixture.stages.values()].find(stage => asksForBodyPatch(stage))
@@ -95,9 +99,10 @@ it('stores a patched body when a repair is requested, and the model reply is onl
   expect(stored).not.toHaveProperty('changes')
 }, 120_000)
 
-it('falls back to a complete body when the patch does not apply, and does not store the patch', async () => {
+it('falls back to a complete body when the patch does not apply and bodyPatchFallback is true', async () => {
   let bodyReviews = 0
   const fixture = await useWritingFixture({
+    bodyPatchFallback: true,
     executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
     intervene(stage, output) {
       if (stage.kind === 'review' && reviewedKind(stage) === 'body') {
@@ -114,6 +119,10 @@ it('falls back to a complete body when the patch does not apply, and does not st
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
+  const retried = outcome.value.attempts.find(item => item.key === 'body/1/candidate/1/schema' && item.status === 'succeeded')
+  expect(retried).toBeDefined()
+  const retryPrompt = fixture.runs.storedPrompt(fixture.actor, outcome.value.id, 'body/1/candidate/1/schema') ?? ''
+  expect(retryPrompt).toContain('no-such-field')
   const fallback = outcome.value.attempts.find(item => item.key === 'body/1/candidate/1/full' && item.status === 'succeeded')
   expect(fallback).toBeDefined()
   const fallbackBody = JSON.parse(fixture.runs.readOutput(fixture.actor, outcome.value.id, fallback!.id).text) as { scenes?: unknown; changes?: unknown }
@@ -134,6 +143,7 @@ it('falls back to a complete body when the patch does not apply, and does not st
 
 it('rejects the candidate when the patch and the full-body fallback are both invalid', async () => {
   const fixture = await useWritingFixture({
+    bodyPatchFallback: true,
     executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
     intervene(stage, output) {
       if (stage.kind === 'review' && reviewedKind(stage) === 'body') return blockReview(output, stage)
@@ -191,6 +201,7 @@ function completeBody(): object {
 it('retries a schema-invalid complete body once with feedback, then admits the full-body fallback', async () => {
   let bodyReviews = 0
   const fixture = await useWritingFixture({
+    bodyPatchFallback: true,
     executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
     intervene(stage, output) {
       if (stage.kind === 'review' && reviewedKind(stage) === 'body') {
@@ -253,6 +264,73 @@ it('rejects the round when a schema-invalid patch and its retry both fail and fa
   expect(kept.scenes.length).toBeGreaterThan(0)
 }, 120_000)
 
+it('retries an apply failure once and puts the error in the next patch', async () => {
+  let patches = 0
+  let bodyReviews = 0
+  const fixture = await useWritingFixture({
+    executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
+    intervene(stage, output) {
+      if (stage.kind === 'review' && reviewedKind(stage) === 'body') {
+        bodyReviews += 1
+        if (bodyReviews === 1) return blockReview(output, stage)
+      }
+      if (!asksForBodyPatch(stage)) return output
+      patches += 1
+      if (patches === 1) return { version: 1, changes: [{ op: 'set', path: 'no-such-field', value: '改' }] }
+      const prior = StageOutputSchemas.body.parse(storedBody(stage))
+      return { version: 1, changes: [{ op: 'set', path: 'scenes[0].text', value: prior.scenes[0]!.text.replace(FROM, TO) }] }
+    },
+  })
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a1'], chapterCount: 1, throughChapter: 1 }))
+  if (outcome.status === 'rejected') throw outcome.reason
+  expect(outcome.value.status).toBe('completed')
+  const retry = [...fixture.stages.values()].filter(asksForBodyPatch)
+  expect(retry).toHaveLength(2)
+  expect(retry[1]?.task?.validationError).toContain('The body patch was rejected: ')
+  expect(retry[1]?.task?.validationError).toContain('no-such-field')
+  expect(retry[1]?.task?.validationError).not.toContain('did not match the patch schema')
+  expect(outcome.value.attempts.some(item => item.key.includes('/full'))).toBe(false)
+  const applied = fixture.service.getManuscript(fixture.actor, fixture.novel.id).history.find(item => item.target.kind === 'body' && item.status === 'applied')
+  const text = StageOutputSchemas.body.parse(JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: applied!.artifact.id }).text)).scenes[0]?.text
+  expect(text).toContain(TO)
+}, 120_000)
+
+it('keeps the admitted body when the patch apply fails twice', async () => {
+  const fixture = await useWritingFixture({
+    executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
+    intervene(stage, output) {
+      if (stage.kind === 'review' && reviewedKind(stage) === 'body') return blockReview(output, stage)
+      if (asksForBodyPatch(stage)) return { version: 1, changes: [{ op: 'set', path: 'no-such-field', value: '改' }] }
+      return output
+    },
+  })
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a1'], chapterCount: 1, throughChapter: 1 }))
+  if (outcome.status === 'rejected') throw outcome.reason
+  expect(outcome.value.status).toBe('failed')
+  expect(outcome.value.error).toContain('no-such-field')
+  const bodies = fixture.service.getManuscript(fixture.actor, fixture.novel.id).history.filter(item => item.target.kind === 'body')
+  expect(bodies).toHaveLength(1)
+  expect(bodies[0]?.status).toBe('blocked')
+  const kept = StageOutputSchemas.body.parse(JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: bodies[0]!.artifact.id }).text))
+  expect(kept.scenes[0]?.text).toContain(FROM)
+  expect(kept).not.toHaveProperty('changes')
+}, 120_000)
+
+it('does not produce a full-body attempt when bodyPatchFallback is left at its default', async () => {
+  const fixture = await useWritingFixture({
+    executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
+    intervene(stage, output) {
+      if (stage.kind === 'review' && reviewedKind(stage) === 'body') return blockReview(output, stage)
+      if (asksForBodyPatch(stage)) return { version: 1, changes: [{ op: 'set', path: 'scenes[99].text', value: '改' }] }
+      return output
+    },
+  })
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a1'], chapterCount: 1, throughChapter: 1 }))
+  if (outcome.status === 'rejected') throw outcome.reason
+  expect(outcome.value.attempts.some(item => item.key.includes('/full'))).toBe(false)
+  expect(new Set(outcome.value.attempts.map(item => item.key)).has('body/1/candidate/1/full')).toBe(false)
+}, 120_000)
+
 it('propagates a non-schema patch capture failure without a retry or a full-body fallback', async () => {
   const fixture = await useWritingFixture({
     executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
@@ -306,3 +384,78 @@ it('replays a version-9 body repair as a complete chapter', async () => {
   expect(raw).not.toHaveProperty('changes')
   expect(outcome.value.attempts.some(item => item.key.includes('/full'))).toBe(false)
 }, 120_000)
+
+it('keeps a version-14 schema-rejection retry prompt byte-identical to 334136f8', async () => {
+  const fixture = await useWritingFixture({
+    executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
+    intervene(stage, output) {
+      if (stage.kind === 'review' && reviewedKind(stage) === 'body') return blockReview(output, stage)
+      if (asksForBodyPatch(stage)) return completeBody()
+      return output
+    },
+  })
+  const begun = await fixture.runs.begin(fixture.actor, {
+    ...fixture.input, chapterCount: 1, throughChapter: 1, revision: null,
+    executionLimits: fixture.runner.limits, serviceLimits: { ...fixture.service.limits, ...fixture.service.researchLimits },
+  }, 14)
+  await fixture.runs.finish(fixture.actor, begun.id, 'stopped', 'Stored on prompt version 14.')
+  const outcome = await fixture.run(exec => fixture.runner.resume(exec, begun.id, false))
+  if (outcome.status === 'rejected') throw outcome.reason
+  expect(outcome.value.promptVersion).toBe(14)
+  const stored = fixture.runs.storedPrompt(fixture.actor, outcome.value.id, 'body/1/candidate/1/schema') ?? ''
+  const envelope = JSON.parse(stored.split('\n\nTASK_DATA\n\n')[1] ?? '{}') as { novelId: string; inputs: { artifactId: string; sha256: string; kind: string; chars: number }[]; task: string }
+  const task = JSON.parse(envelope.task) as { validationError?: string; inputRefs: unknown[] }
+  const prefix = 'The body patch was rejected because it did not match the patch schema: '
+  const suffix = ' Return a body patch of only the changed fields or paragraphs.'
+  expect(task.validationError, JSON.stringify(task.validationError)).toContain(prefix)
+  expect(task.validationError).toContain(suffix.trim())
+  expect(task.validationError).not.toContain('The body patch was rejected: ')
+  const body = fixture.service.getManuscript(fixture.actor, fixture.novel.id).history.find(item => item.target.kind === 'body')
+  const prior = JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: body!.artifact.id }).text) as unknown
+  const { inputRefs, bodyFields: _fields, ...stageTask } = task as { validationError?: string; inputRefs: unknown[]; bodyFields?: unknown }
+  const request = { novelId: envelope.novelId, prior, inputs: envelope.inputs, task: stageTask, inputRefs }
+  expect(buildBodyRepairPrompt(request)).toBe(stored)
+  const parent = parentBodyRepairPrompt(request)
+  expect(stored).toBe(parent)
+}, 180_000)
+
+function haveCommit(sha: string): boolean {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function parentBodyRepairPrompt(request: unknown): string {
+  const parent = '334136f8abe08dc2037d385606de47d6025a809a'
+  if (!haveCommit(parent)) execFileSync('git', ['fetch', '--depth=1', 'origin', parent], { stdio: 'pipe' })
+  const dir = mkdtempSync(join(tmpdir(), 'body-patch-replay-'))
+  const out = join(dir, 'prompt.txt')
+  const spec = `import { readFileSync, writeFileSync } from 'node:fs'
+import { it } from 'vitest'
+import { buildBodyRepairPrompt } from '../src/body-repair.ts'
+it('dumps the parent body repair prompt', () => {
+  const request = JSON.parse(readFileSync(process.env.REPLAY_REQUEST ?? '', 'utf8'))
+  writeFileSync(process.env.REPLAY_OUT ?? '', buildBodyRepairPrompt(request))
+})
+`
+  let added = false
+  try {
+    execFileSync('git', ['worktree', 'add', '--detach', dir, parent], { stdio: 'pipe' })
+    added = true
+    symlinkSync(join(process.cwd(), 'node_modules'), join(dir, 'node_modules'))
+    writeFileSync(join(dir, 'tests/dump-body-repair-prompt.spec.ts'), spec)
+    writeFileSync(join(dir, 'replay-request.json'), JSON.stringify(request))
+    execFileSync(process.execPath, [join(process.cwd(), 'node_modules/vitest/vitest.mjs'), 'run', 'tests/dump-body-repair-prompt.spec.ts', '--configLoader', 'runner', '--cache=false'], {
+      cwd: dir, env: { ...process.env, REPLAY_OUT: out, REPLAY_REQUEST: join(dir, 'replay-request.json') }, stdio: 'pipe',
+    })
+    return readFileSync(out, 'utf8')
+  } finally {
+    if (added) {
+      try { execFileSync('git', ['worktree', 'remove', '--force', dir], { stdio: 'pipe' }) } catch { /* the assertion is the result */ }
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+}

@@ -9,7 +9,7 @@ const brief = ['守灯人林澜在虚构雾港追查失踪船只。', '必写事
 const note = sameDefectNote()
 
 it('signs missing keywords and pov paragraphs, and ignores style, AI tone, and poison', () => {
-  expect(CURRENT_PROMPT_VERSION).toBe(14)
+  expect(CURRENT_PROMPT_VERSION).toBe(15)
   expect(failureSignature({ missingKeywords: ['落石', '雷击'] })).toBe('missing:落石|雷击')
   expect(failureSignature({ eventHits: [{ keywords: ['落石', '雷击'], hit: false }, { keywords: ['打中'], hit: true }] })).toBe('missing:落石|雷击')
   expect(failureSignature({ issues: [
@@ -67,7 +67,7 @@ it('injects the same missing signature into the next repair and does not inject 
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
   if (outcome.status === 'rejected') throw outcome.reason
   const run = outcome.value
-  expect(run.promptVersion).toBe(14)
+  expect(run.promptVersion).toBe(15)
   const first = fixture.runs.storedPrompt(fixture.actor, run.id, 'body/1/candidate/0') ?? ''
   const second = fixture.runs.storedPrompt(fixture.actor, run.id, 'body/1/candidate/1') ?? ''
   const third = fixture.runs.storedPrompt(fixture.actor, run.id, 'body/1/candidate/2') ?? ''

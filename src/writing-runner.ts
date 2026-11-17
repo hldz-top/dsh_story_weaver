@@ -10,21 +10,27 @@ import type { WritingService } from './service.ts'
 import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFailureKind, type RunLimitMismatch, type RunStore, type BeginRunInput, type RunExecutionLimits, type RunServiceLimits, type RunId, type WritingRun, type WritingAttempt } from './run-store.ts'
 import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
-import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
+import { CharacterSheetRejection, DEFAULT_MAX_CHARACTERS, parseCharacterSheet } from './character-sheet.ts'
+import { applyCharacterSheetPatch, buildCharacterSheetRepairPrompt, CHARACTER_SHEET_PATCH_OUTPUT_SCHEMA, characterSheetPatchError } from './character-sheet-repair.ts'
+import { assertKnownCast, assertSceneCastFields, buildCastInjection, castTaskFields, DEFAULT_MAX_CAST_CARD_CHARS, mergeCharacterSheets, uniformMisreadNote } from './scene-cast.ts'
+import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, characterDimensionsForStage, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
 import { aiToneHits, gradeAiTone, selectPoisonRepairHits, type AiToneRepairFloor } from './ai-tone.ts'
 import { buildResearchPrompt, validateResearchStageResult, RESEARCH_STAGE_OUTPUT_SCHEMA, researchStageTools, researchToolAuthorization, type ResearchStageRequest } from './research-stage.ts'
 import { buildResearchPlanningPrompt, researchNecessity, RESEARCH_PLANNING_OUTPUT_SCHEMA, type ResearchNecessity } from './research-planning.ts'
 import { attemptSettingsOfficialRetrieval, isSettingsOutputTarget, officialExcerptsFromPrompt, settingsLocalNecessity, storedResearchTask } from './settings-retrieval.ts'
-import { batchDimensionKind, batchFactStatement, dimensionDocument, parseSettingsBatch, parseSettingsConsistency, planSettingsBatches, quoteOfDimension, settingsBatchKind, settingsBatchNativeSchema, settingsConsistencyNativeSchema, type SettingsBatchOutput, type SettingsConsistencyIssue } from './settings-batch.ts'
+import { batchDimensionKind, dimensionDocument, parseSettingsBatch, parseSettingsConsistency, planSettingsBatches, quoteOfDimension, settingsBatchKind, settingsBatchNativeSchema, settingsConsistencyNativeSchema, type SettingsBatchOutput, type SettingsConsistencyIssue } from './settings-batch.ts'
 import { StageValidationRejection } from './stage-rejection.ts'
 import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
 import { blockingIssueCount, EvidenceRejection, MAX_SNAPSHOT_NOTE_CHARS, parseContinuitySnapshot, StageOutputSchemas, type BodyOutput, type ContinuityOutput, type ReviewAdmission, type ReviewCategory, type StageInputRef } from './stage-output.ts'
 import { projectContinuitySnapshot } from './continuity-snapshot.ts'
+import { attachContinuityHook, repeatedHookInstruction } from './hook-type.ts'
+import { openingIn50Miss, openingIn50RepairInstruction } from './opening-in-50.ts'
+import { advisoryPlantHints, attachContinuityPlants, softenPlantField } from './plant-ledger.ts'
 import { settingsCollectionSchema } from './manuscript-records.ts'
 import { assembleBody, countStoryWords } from './body-text.ts'
-import { measureChapterMetrics, type PreviousChapterSnapshot } from './review-metrics.ts'
+import { appendCharacterMetricWarnings, measureChapterMetrics, measureCharacterMetrics, protagonistFreeSceneCount, type CharacterMetrics, type PreviousChapterSnapshot } from './review-metrics.ts'
 import { failureSignature, nextFailureRepair, skipFailureRound, type FailureStreak } from './failure-signoff.ts'
 import { extractRequiredEvents, missingRequiredEvents, requiredEventRepairInstruction, type MissingRequiredEvent } from './required-events.ts'
 import { povHeuristicReport, viewpointName, type PovHeuristicReport } from './pov-limited.ts'
@@ -47,10 +53,57 @@ export interface WritingRunnerOptions {
   /** Reuse a passed settings collection when the brief text and roots match. Default true. */
   readonly reuseSettingsSnapshot?: boolean
   /**
-   * When an admitted body patch does not apply, ask once for the complete body. Default true.
+   * After two consecutive body-patch rejections, ask once for the complete body. Default false.
    * False rejects that candidate and leaves the admitted body unchanged. Not stored with runs.
+   * Versions 10–14 keep their prompt bytes. A resume on those versions does not ask for /full unless this is true.
    */
   readonly bodyPatchFallback?: boolean
+  /**
+   * Version 15 foreshadowing ledger. Default true. Not stored on the run.
+   * False keeps the version-14 continuity prompt and schema, and does not read plants.
+   * A rejected plant list never fails the chapter: the previous open ledger is kept and the note is advisory.
+   */
+  readonly plantLedger?: boolean
+  /**
+   * Version 15 hook rotation. Default true. Not stored on the run.
+   * A repeated hookType fails the outline round and uses the existing outline repair budget.
+   * False keeps the version-14 chapter-outline schema and does not compare hook types.
+   */
+  readonly hookRotation?: boolean
+  /**
+   * Version 15 chapter-1 opening check. Default true. Not stored on the run.
+   * A miss on an otherwise clean chapter is an advisory reminder. It does not start a repair round,
+   * does not fail the chapter, and does not enter a failure signature.
+   * When a repair is already running for another reason, the miss is merged into that repair text.
+   */
+  readonly openingIn50?: boolean
+  /**
+   * Parse e5/e6 character cards on prompt version 15. Default true. Not stored on the run.
+   * A malformed card is rejected and the existing settings budget patches that dimension's text.
+   * The budget ends as a settings failure. The broken card is not stored as free text.
+   */
+  readonly characterSheet?: boolean
+  /** Cap for one e5 or e6 dimension. Default 12. Not stored on the run. */
+  readonly maxCharacters?: number
+  /**
+   * Version 15 scene cast, viewpoint and misread. Default true. Not stored on the run.
+   * False keeps the chapter-outline schema and prompt that version 15 would use without those fields.
+   * A viewpoint outside the cast, or an illegal misread, fails the outline round and uses the outline patch budget.
+   * Unknown cast names stay in uncastNames. The same frame on every scene is an advisory note.
+   */
+  readonly sceneCast?: boolean
+  /** Reject cast names that are not on the character card. Default false. Not stored on the run. */
+  readonly strictCast?: boolean
+  /** Inject present-character cards into the body task. Default true. Not stored on the run. */
+  readonly castInjection?: boolean
+  /** Han-character budget of those cards. Default 1200. Not stored on the run. */
+  readonly maxCastCardChars?: number
+  /**
+   * Version 15 character review. Default true. Not stored on the run.
+   * False keeps the version-14 review prompt and schema. Character metrics never change issue severity
+   * and never join a failure signature. A missing character check uses the existing review repair budget.
+   */
+  readonly characterReview?: boolean
 }
 interface Invocation { readonly actor: Actor; readonly exec: ToolExecution; readonly run: WritingRun; readonly controller: AbortController }
 interface CapturedStage extends StageResult { readonly attempt: WritingAttempt }
@@ -207,16 +260,23 @@ export class WritingRunner {
   private readonly replayControllers = new Set<AbortController>()
   private readonly replayShutdown = new Error('Writing preview replay was cancelled by plugin shutdown.')
   private closed = false
+  /** Advisory plant notes for the next chapter outline, keyed by novel and chapter. Not a failure and not stored on the run. */
+  private readonly plantAdvisories = new Map<string, string[]>()
+  /** Advisory cast notes for a chapter body. They do not fail the outline. */
+  private readonly castAdvisories = new Map<string, string[]>()
+  /** Chapter-1 opening reminder kept after the body budget. It does not fail the chapter. */
+  private readonly openingAdvisories = new Map<string, string>()
   /** @param ctx - Existing DSH capabilities. @param service - Version owner. @param runs - Durable run owner. @param limits - Explicit deployment limits copied into new runs. @param deliveries - Awaited native document publisher. */
   constructor(private readonly ctx: Context, private readonly service: WritingService, readonly runs: RunStore, readonly limits: RunExecutionLimits, private readonly deliveries: StageDeliveries, private readonly options: WritingRunnerOptions = {}) {}
 
   /** @param exec - Calling native tool. @param input - Explicit novel, brief and chapter scope. @returns Terminal progress after all native work has stopped. */
-  async start(exec: ToolExecution, input: StartWritingInput): Promise<WritingRun> {
+  async start(exec: ToolExecution, input: StartWritingInput & { readonly promptVersion?: PromptVersion }): Promise<WritingRun> {
     const actor = await writingActor(this.ctx, exec)
     this.admit(actor, input)
     this.requirePresentation(exec)
+    const { promptVersion, ...request } = input
     return this.admission(async () => {
-      const run = await this.runs.begin(actor, { ...input, revision: null, executionLimits: this.limits, serviceLimits: this.serviceLimits() })
+      const run = await this.runs.begin(actor, { ...request, revision: null, executionLimits: this.limits, serviceLimits: this.serviceLimits() }, promptVersion)
       return this.launchAdmitted(exec, actor, run)
     })
   }
@@ -612,9 +672,11 @@ export class WritingRunner {
     const continuity = StageOutputSchemas.continuity.parse(JSON.parse(continuityArtifact.text))
     const body = StageOutputSchemas.body.parse(JSON.parse(read(applied.body.id).text))
     const earlier = inputs.filter(ref => ref.kind === 'continuity-snapshot').map(ref => StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(read(ref.id).text)))
-    const output = parseContinuitySnapshot(projectContinuitySnapshot({
+    const projected = projectContinuitySnapshot({
       chapterNumber: applied.chapterNumber, inputRefs: refs, continuity, bodyText: assembleBody(body), earlier,
-    }), { inputRefs: refs, chapterNumber: applied.chapterNumber })
+    })
+    const withPlants = attachContinuityPlants(promptVersionOf(inv.run), this.options.plantLedger !== false, projected, continuity.plants)
+    const output = parseContinuitySnapshot(attachContinuityHook(promptVersionOf(inv.run), this.options.hookRotation !== false, withPlants, continuity.hookType), { inputRefs: refs, chapterNumber: applied.chapterNumber })
     const key = `continuity-snapshot/${applied.chapterNumber}/host`
     const candidate = await this.service.saveContinuitySnapshot(inv.actor, {
       novelId: inv.run.novelId, requestId: requestId(inv.run, key), ...target, childSessionId: null, output, snapshotThrough,
@@ -837,15 +899,17 @@ export class WritingRunner {
       const saved = this.service.findSettingsByRequest(inv.actor, inv.run.novelId, requestId(inv.run, keyOf(code)))
       if (saved !== undefined) { await this.ensureApplied(inv, saved, old?.artifact.id); continue }
       const revisionOf = old?.artifact.id
-      const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, revisionOf).map(inputRef)
-      let candidate = await this.service.saveSettingsCandidate(inv.actor, {
+      const sources = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, revisionOf)
+      const refs = sources.map(inputRef)
+      let candidate = await this.admitGeneratedSettings(inv, keyOf(code), sources, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, keyOf(code)), dimensionCode: code, researchPlanId: planId, childSessionId, output: dimensionDocument(code, body, refs),
         ...(revisionOf === undefined ? {} : { revisionOf }),
       })
       if (candidate.review === null) {
+        const stored = StageOutputSchemas.settings.parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id }).text))
         candidate = await this.service.saveSettingsReview(inv.actor, {
           novelId: inv.run.novelId, candidateId: candidate.artifact.id, expectedReviewId: null, requestId: requestId(inv.run, `${keyOf(code)}/review`),
-          childSessionId: inv.actor.sessionId, output: passingReview(candidate.artifact, candidate.inputRefs, batchFactStatement(body)),
+          childSessionId: inv.actor.sessionId, output: passingReview(candidate.artifact, candidate.inputRefs, quoteOfDimension(stored.facts, stored.contentMarkdown)),
         })
       }
       await this.ensureApplied(inv, candidate, revisionOf)
@@ -875,7 +939,7 @@ export class WritingRunner {
       const existing = this.service.findSettingsByRequest(inv.actor, inv.run.novelId, requestId(inv.run, key))
       if (existing !== undefined) { await this.ensureApplied(inv, existing, item.artifact.id); continue }
       const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, item.artifact.id).map(inputRef)
-      const candidate = await this.service.saveSettingsCandidate(inv.actor, {
+      const candidate = await this.saveSettingsDocument(inv, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, key), dimensionCode: code, researchPlanId: planId, childSessionId: inv.actor.sessionId,
         output: { version: 1, inputRefs: refs, dimensionCode: code, facts: source.facts, contentMarkdown: source.contentMarkdown }, revisionOf: item.artifact.id,
       })
@@ -911,7 +975,7 @@ export class WritingRunner {
       const revisionOf = old?.artifact.id
       const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, revisionOf).map(inputRef)
       const output = { version: 1 as const, inputRefs: refs, dimensionCode: code, facts: source.facts, contentMarkdown: source.contentMarkdown }
-      let candidate = await this.service.saveSettingsCandidate(inv.actor, {
+      let candidate = await this.saveSettingsDocument(inv, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, `settings/rebind/${brief.id}/save/${code}`), dimensionCode: code, researchPlanId: planId,
         childSessionId: inv.actor.sessionId, output, ...(revisionOf === undefined ? {} : { revisionOf }),
       })
@@ -1107,7 +1171,7 @@ export class WritingRunner {
     }, input.feedback, input.dimension.kind)
     let candidate: SettingsCandidateView
     try {
-      candidate = await this.service.saveSettingsCandidate(inv.actor, { novelId: inv.run.novelId, requestId: requestId(inv.run, input.stageKey), dimensionCode: input.code,
+      candidate = await this.admitGeneratedSettings(inv, input.stageKey, input.refs, { novelId: inv.run.novelId, requestId: requestId(inv.run, input.stageKey), dimensionCode: input.code,
         researchPlanId: input.researchPlanId, childSessionId: stage.childSessionId, output: stage.structured, ...(input.revision === undefined ? {} : { revisionOf: input.revision.baseArtifactId }) })
     } catch (cause) {
       if (!isOutputError(cause)) throw cause
@@ -1160,11 +1224,14 @@ export class WritingRunner {
     // Version 14 body repairs. Earlier versions leave both null, so their prompts stay the version they started with.
     let defect: FailureStreak | null = null
     let pendingDefectNote: string | null = null
+    const plantHints = target.kind === 'chapter-outline' ? this.plantHintLines(inv, context.inputRefs, target.chapterNumber) : []
+    const castFields = target.kind === 'body' ? this.bodyCastTask(inv, target.chapterNumber) : {}
+    const openingAdvisory = target.kind === 'continuity' ? this.openingAdvisories.get(`${inv.run.novelId}:${target.chapterNumber}`) : undefined
     for (let repair = 0; repair <= repairCap; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       const sameDefectNote = promptVersionOf(inv.run) >= 14 && target.kind === 'body' ? pendingDefectNote ?? undefined : undefined
       aiToneSpans = []
-      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError }
+      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError, ...(plantHints.length > 0 ? { plantHints } : {}), ...castFields, ...(openingAdvisory === undefined ? {} : { openingAdvisory }) }
       const outlineKind: OutlineRepairKind | null = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? target.kind : null
       const outlinePatching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
       const bodyPatching = target.kind === 'body' && bodyRepairUsesPatch(promptVersionOf(inv.run), target.kind, priorBody !== null)
@@ -1194,6 +1261,7 @@ export class WritingRunner {
         result = await this.stage(inv, stageKey, target.kind, context.inputRefs, stageTask, feedback, undefined, undefined, undefined, repairMode, undefined, undefined, sameDefectNote)
         structured = result.structured
       }
+      if (target.kind === 'continuity') structured = this.stampHookType(inv, this.prepareContinuityPlants(inv, structured, context.inputRefs, target.chapterNumber), context.inputRefs)
       let candidate: ManuscriptCandidateView
       try {
         candidate = await this.service.saveManuscriptCandidate(inv.actor, { novelId: inv.run.novelId, target, researchPlanId: research.planId,
@@ -1245,7 +1313,10 @@ export class WritingRunner {
       const styleRepair = poison !== null && poison.spans.length > 0 && !poison.repeated && repair < repairCap
       if (styleRepair && poison !== null) previousPoisonKeys = new Set(poison.hitKeys)
       else if (poison === null || poison.spans.length === 0) previousPoisonKeys = null
-      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null
+      const hookInstruction = target.kind === 'chapter-outline' ? this.repeatedHook(inv, structured, target.chapterNumber) : null
+      const openingInstruction = target.kind === 'body' ? this.openingInstruction(inv, structured) : null
+      const castStrict = target.kind === 'chapter-outline' ? this.strictCastInstruction(inv, structured) : null
+      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && castStrict === null
       if (promptVersionOf(inv.run) >= 8 && reviewBlocked && reviewed.review !== null) {
         const fails = blockingIssueCount(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: reviewed.review.id }).text))
         const decision = checklistRepairDecision(heldReview?.fails ?? null, fails, 'does-not-decrease')
@@ -1257,7 +1328,10 @@ export class WritingRunner {
         }
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
-      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null
+      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && castStrict === null
+      if (clean && !styleRepair && openingInstruction !== null && target.kind === 'body') {
+        this.openingAdvisories.set(`${inv.run.novelId}:${target.chapterNumber}`, `Advisory openingIn50: ${openingInstruction} The accepted chapter is kept.`)
+      }
       if (clean && !styleRepair) return { candidate: reviewed, convergence: null }
       if (promptVersionOf(inv.run) >= 14 && target.kind === 'body') {
         // Poison, style, and blocking AI-tone rounds are not a signed-off defect. They do not record a signature,
@@ -1283,16 +1357,20 @@ export class WritingRunner {
           }
         }
       } else pendingDefectNote = null
-      if (aiToneSpans.length > 0) { validationError = withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction); repairMode = 'review' }
-      else if (incomplete) { validationError = withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction); repairMode = 'review' }
-      else if (reviewed.length?.blocking) { validationError = withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction); repairMode = 'length' }
-      else if (eventInstruction !== null && reviewed.status !== 'blocked') { validationError = eventInstruction; repairMode = 'review' }
+      const characterMetrics = target.kind === 'body' ? this.characterMetricsOf(inv, structured) : undefined
+      const hostChecks = [openingInstruction, hookInstruction, castStrict]
+      const note = (text: string) => appendCharacterMetricWarnings(withHostChecks(text, hostChecks), characterMetrics)
+      if (aiToneSpans.length > 0) { validationError = note(withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction)); repairMode = 'review' }
+      else if (incomplete) { validationError = note(withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction)); repairMode = 'review' }
+      else if (reviewed.length?.blocking) { validationError = note(withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction)); repairMode = 'length' }
+      else if ((eventInstruction !== null || hookInstruction !== null || castStrict !== null) && reviewed.status !== 'blocked') { validationError = note(eventInstruction ?? ''); repairMode = 'review' }
       else if (clean && styleRepair && poison !== null) {
         if (promptVersionOf(inv.run) >= 13) cleanPoisonBody = reviewed
-        validationError = aiTonePoisonRepairInstruction(poison.spans)
+        const poisonText = openingInstruction === null ? aiTonePoisonRepairInstruction(poison.spans) : `${openingInstruction} ${aiTonePoisonRepairInstruction(poison.spans)}`
+        validationError = appendCharacterMetricWarnings(poisonText, characterMetrics)
         repairMode = 'review'
       }
-      else { validationError = withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction); repairMode = 'review' }
+      else { validationError = note(withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction)); repairMode = 'review' }
       feedback = this.feedback(reviewed)
     }
     // Never auto-pass: a body still carrying blocking AI tone when repairs run out ends review-blocked and is not applied.
@@ -1304,10 +1382,10 @@ export class WritingRunner {
   }
 
   /** Prompt version 8 model reviews. Earlier runs and host-synthesized reviews omit it. Version 12 body reviews also require pov-limited. */
-  private reviewAdmission(inv: Invocation, povLimited = false): { readonly admission?: ReviewAdmission } {
+  private reviewAdmission(inv: Invocation, povLimited = false, characterReview = false): { readonly admission?: ReviewAdmission } {
     if (promptVersionOf(inv.run) < 8) return {}
     const brief = this.service.getNovel(inv.actor, inv.run.novelId).brief
-    return { admission: { chinese: true, briefText: this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: brief.id }).text, ...(povLimited ? { povLimited: true as const } : {}) } }
+    return { admission: { chinese: true, briefText: this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: brief.id }).text, ...(povLimited ? { povLimited: true as const } : {}), ...(characterReview ? { characterReview: true as const } : {}) } }
   }
 
   private reviewIssues(inv: Invocation, reviewed: ManuscriptCandidateView): { readonly category?: string; readonly id?: string; readonly paragraphId?: string; readonly poison?: string }[] {
@@ -1319,10 +1397,15 @@ export class WritingRunner {
 
   private async reviewManuscript(inv: Invocation, key: string, candidate: ManuscriptCandidateView, requiredChecks: readonly ReviewCategory[]): Promise<ManuscriptCandidateView> {
     const povLimited = promptVersionOf(inv.run) >= 12 && candidate.target.kind === 'body'
-    const checks = povLimited && !requiredChecks.includes('pov') ? [...requiredChecks, 'pov' as const] : requiredChecks
+    const characterReview = promptVersionOf(inv.run) >= 15 && this.options.characterReview !== false && candidate.target.kind === 'body'
+    const checks = [
+      ...requiredChecks,
+      ...(povLimited && !requiredChecks.includes('pov') ? ['pov' as const] : []),
+      ...(characterReview && !requiredChecks.includes('character') ? ['character' as const] : []),
+    ]
     return this.reviewLoop(inv, key, candidate, checks, (result, reviewKey) => this.service.saveManuscriptReview(inv.actor, {
       novelId: inv.run.novelId, candidateId: candidate.artifact.id, expectedReviewId: null,
-      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv, povLimited) }))
+      requestId: requestId(inv.run, reviewKey), childSessionId: result.childSessionId, output: result.structured, ...this.reviewAdmission(inv, povLimited, characterReview) }))
   }
 
   /**
@@ -1405,20 +1488,53 @@ export class WritingRunner {
    * Advisory body measurements for a version-11 review. Older runs and every other review omit the fields.
    * `metricsBlocking` is the recorded flag. Metric rows, including a missed eventHits keyword, do not change admission.
    */
-  private reviewMetrics(inv: Invocation, reviewedKind: StagePromptKind, storedText: string, sources: readonly { readonly id: string; readonly kind: string; readonly text: string }[]): { readonly metrics: ReturnType<typeof measureChapterMetrics>; readonly metricsBlocking: boolean } | Record<string, never> {
+  private reviewMetrics(inv: Invocation, reviewedKind: StagePromptKind, storedText: string, sources: readonly { readonly id: string; readonly kind: string; readonly text: string }[]): { readonly metrics: ReturnType<typeof measureChapterMetrics> & { readonly character?: CharacterMetrics }; readonly metricsBlocking: boolean } | Record<string, never> {
     if (promptVersionOf(inv.run) < 11 || reviewedKind !== 'body') return {}
     let output: BodyOutput
     try { output = StageOutputSchemas.body.parse(JSON.parse(storedText)) }
     catch { throw new WritingError('corrupt-artifact', 'Admitted chapter body cannot be measured') }
     const brief = sources.find(source => source.kind === 'creative-brief' && source.id === inv.run.briefArtifactId)
     if (brief === undefined) throw new WritingError('corrupt-artifact', 'Body review has no creative brief for chapter metrics')
-    const metrics = measureChapterMetrics({
+    const measured = measureChapterMetrics({
       text: assembleBody(output),
       previousSnapshot: previousSnapshot(sources, output.chapterNumber),
       briefText: brief.text,
       settingsTexts: sources.filter(source => source.kind === 'settings' || source.kind === 'settings-dimension').map(source => proseView(source.kind, source.text)),
     })
-    return { metrics, metricsBlocking: metricsBlockingOf(inv.run) }
+    const character = promptVersionOf(inv.run) >= 15 && this.options.characterReview !== false ? this.characterMetricsOf(inv, output) : undefined
+    return { metrics: character === undefined ? measured : { ...measured, character }, metricsBlocking: metricsBlockingOf(inv.run) }
+  }
+
+  /** Character metrics for an admitted body. A missing card omits them and does not fail the chapter. */
+  private characterMetricsOf(inv: Invocation, value: unknown): CharacterMetrics | undefined {
+    if (promptVersionOf(inv.run) < 15 || this.options.characterReview === false) return undefined
+    const body = StageOutputSchemas.body.safeParse(value)
+    if (!body.success) return undefined
+    const sheet = this.characterSheet(inv)
+    if (sheet === null) return undefined
+    const outline = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === body.data.chapterNumber)
+    const scenes = outline === undefined ? [] : (StageOutputSchemas['chapter-outline'].safeParse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outline.artifact.id }).text)).data?.scenes ?? [])
+    const book = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'book-outline')
+    const protagonist = book === undefined ? null : (StageOutputSchemas['book-outline'].safeParse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: book.artifact.id }).text)).data?.characterArcs[0]?.character ?? null)
+    const recent = this.recentFreeScenes(inv, body.data.chapterNumber, protagonist)
+    return measureCharacterMetrics({ bodyText: assembleBody(body.data), scenes, sheet, protagonistName: protagonist, recentProtagonistFreeScenes: recent })
+  }
+
+  private recentFreeScenes(inv: Invocation, chapterNumber: number, protagonist: string | null): number[] {
+    if (protagonist === null) return []
+    const applied = this.service.getManuscript(inv.actor, inv.run.novelId).appliedChapters
+    const counts: number[] = []
+    for (let number = chapterNumber - 1; number >= 1 && counts.length < 2; number--) {
+      if (!applied.some(item => item.chapterNumber === number)) break
+      const outline = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === number)
+      if (outline === undefined) break
+      const scenes = StageOutputSchemas['chapter-outline'].safeParse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outline.artifact.id }).text)).data?.scenes
+      if (scenes === undefined) break
+      const count = protagonistFreeSceneCount(scenes, protagonist)
+      if (count === null) break
+      counts.unshift(count)
+    }
+    return counts
   }
 
   private async research(inv: Invocation, key: string, refs: readonly ArtifactRef[], purpose: string, outputTarget: object) {
@@ -1503,35 +1619,36 @@ export class WritingRunner {
    * only the changes. The caller applies them and stores the complete body.
    */
   /**
-   * Capture one body patch, apply it, or follow a schema rejection with one feedback retry and then the full-body path.
-   * A schema rejection is `stage-malformed` or `stage-missing-result`. The identical patch request is not repeated.
+   * Capture one body patch and apply it. A schema rejection and an apply failure are the same kind of rejection:
+   * the runner retries the patch once with that error, then either rejects the candidate or, when bodyPatchFallback
+   * is true, asks once for the complete body. The identical patch request is not repeated.
    * @returns The complete body to admit, or a rejection that leaves the admitted body unchanged.
    */
   private async admittedBodyPatch(inv: Invocation, stageKey: string, refs: readonly ArtifactRef[], prior: unknown, task: { validationError?: string | null }, feedback: readonly ArtifactRef[], repairMode: RepairMode | undefined, sameDefectNote?: string): Promise<{ kind: 'ready'; result: CapturedStage; structured: unknown } | { kind: 'reject'; message: string }> {
     const savedFull = this.savedStage(inv, `${stageKey}/full`)
     if (savedFull !== null) return { kind: 'ready', result: savedFull, structured: savedFull.structured }
-    const first = await this.readBodyPatch(inv, stageKey, refs, prior, task, feedback, sameDefectNote)
-    if (first.schemaError === null && first.captured !== null) {
-      try {
-        return { kind: 'ready', result: first.captured, structured: applyBodyPatch(prior, first.captured.structured) }
-      }
-      catch (cause) {
-        if (!isOutputError(cause)) throw cause
-        return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, cause.message, sameDefectNote)
-      }
+    const first = await this.readAppliedBodyPatch(inv, stageKey, refs, prior, task, feedback, sameDefectNote)
+    if (first.kind === 'ready') return first
+    const validationError = first.schema
+      ? bodyPatchSchemaFeedback(task.validationError, first.message)
+      : bodyPatchApplyFeedback(task.validationError, first.message)
+    const second = await this.readAppliedBodyPatch(inv, `${stageKey}/schema`, refs, prior, { ...task, validationError }, feedback, sameDefectNote)
+    if (second.kind === 'ready') return second
+    return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, second.message, sameDefectNote)
+  }
+
+  /** Read one patch and apply it. A schema miss and an apply miss are both rejections. Any other capture failure propagates. */
+  private async readAppliedBodyPatch(inv: Invocation, key: string, refs: readonly ArtifactRef[], prior: unknown, task: object, feedback: readonly ArtifactRef[], sameDefectNote?: string): Promise<{ kind: 'ready'; result: CapturedStage; structured: unknown } | { kind: 'reject'; message: string; schema: boolean }> {
+    const read = await this.readBodyPatch(inv, key, refs, prior, task, feedback, sameDefectNote)
+    if (read.schemaError !== null || read.captured === null) {
+      return { kind: 'reject', schema: true, message: read.schemaError ?? 'The body patch was rejected because it did not match the patch schema.' }
     }
-    const rejection = first.schemaError ?? 'The body patch was rejected because it did not match the patch schema.'
-    const second = await this.readBodyPatch(inv, `${stageKey}/schema`, refs, prior, { ...task, validationError: bodyPatchSchemaFeedback(task.validationError, rejection) }, feedback, sameDefectNote)
-    if (second.schemaError === null && second.captured !== null) {
-      try {
-        return { kind: 'ready', result: second.captured, structured: applyBodyPatch(prior, second.captured.structured) }
-      }
-      catch (cause) {
-        if (!isOutputError(cause)) throw cause
-        return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, cause.message, sameDefectNote)
-      }
+    try {
+      return { kind: 'ready', result: read.captured, structured: applyBodyPatch(prior, read.captured.structured) }
+    } catch (cause) {
+      if (!isOutputError(cause)) throw cause
+      return { kind: 'reject', schema: false, message: cause.message }
     }
-    return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, second.schemaError ?? rejection, sameDefectNote)
   }
 
   /** Read one patch capture. A schema rejection is reported. Any other capture failure propagates. */
@@ -1589,6 +1706,7 @@ export class WritingRunner {
     const batch = settingsBatchKind(task)
     const feedChapter = kind === 'body' && promptVersion >= 7 && typeof (task as { chapterNumber?: unknown }).chapterNumber === 'number' ? (task as { chapterNumber: number }).chapterNumber : undefined
     const fed = (ref: ArtifactRef) => feedChapter !== undefined && (ref.kind === 'book-outline' || ref.kind === 'chapter-outline')
+    const characterDimensions = promptVersion >= 15 && this.options.characterSheet !== false && kind === 'settings' ? characterDimensionsForStage(task) : []
     const prompt = buildStagePrompt({ kind, novelId: inv.run.novelId,
       inputs: allRefs.map(ref => ({ artifactId: ref.id, sha256: ref.sha256, kind: ref.kind,
         chars: fed(ref) ? this.feedChars(inv, ref, feedChapter!) : prose ? this.proseChars(inv, ref) : ref.chars,
@@ -1610,11 +1728,214 @@ export class WritingRunner {
       ...(kind === 'review' && reviewedKind !== undefined ? { reviewedKind } : {}),
       ...(settingsDimensionCode === undefined ? {} : { settingsDimensionCode }), promptVersion,
       ...(kind === 'review' && reviewedKind === 'body' && promptVersion < 7 && aiToneBlockingOf(inv.run) ? { aiToneBlocking: true } : {}),
-      ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 13 ? { aiToneRepairFloor: aiToneRepairFloorOf(inv.run) } : {}) })
-    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion))
+      ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 13 ? { aiToneRepairFloor: aiToneRepairFloorOf(inv.run) } : {}),
+      ...(promptVersion >= 15 && this.options.plantLedger === false ? { plantLedger: false as const } : {}),
+      ...(promptVersion >= 15 && this.options.hookRotation === false ? { hookRotation: false as const } : {}),
+      ...(promptVersion >= 15 && this.options.openingIn50 === false ? { openingIn50: false as const } : {}),
+      ...(characterDimensions.length === 0 ? {} : { characterDimensions, maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS }),
+      ...(promptVersion >= 15 && this.options.sceneCast === false ? { sceneCast: false as const } : {}),
+      ...(promptVersion >= 15 && this.options.castInjection === false ? { castInjection: false as const } : {}),
+      ...(kind === 'review' && reviewedKind === 'body' && promptVersion >= 15 && this.options.characterReview === false ? { characterReview: false as const } : {}) })
+    const schema = publishedSchema ?? (batch === 'consistency' ? settingsConsistencyNativeSchema() : batch === 'draft' || batch === 'repair' ? settingsBatchNativeSchema() : nativeStageOutputSchema(kind, promptVersion, { plantLedger: this.options.plantLedger !== false, hookRotation: this.options.hookRotation !== false, sceneCast: this.options.sceneCast !== false, characterReview: this.options.characterReview !== false }))
     // Drafts and repairs of settings, outlines, body, continuity, and continuity snapshots only write text. Consistency review stays on a subagent, with every other review.
     const direct = batch !== 'consistency' && (kind === 'settings' || kind === 'book-outline' || kind === 'chapter-outline' || kind === 'body' || kind === 'continuity' || kind === 'continuity-snapshot')
     return this.capture(inv, key, prompt, allRefs, schema, direct ? [] : ['story_read_artifact'], undefined, prose ? 'prose' : feedChapter !== undefined ? 'feed' : 'stored', feedChapter, stageWritingRole(kind), direct)
+  }
+
+  /**
+   * Version 15 keeps a rejected plant list from failing continuity. The previous open ledger is stored instead.
+   * The advisory sentence is handed to the next chapter outline. Versions before 15 drop a stray plants field.
+   */
+  private prepareContinuityPlants(inv: Invocation, structured: unknown, refs: readonly ArtifactRef[], chapterNumber: number): unknown {
+    if (promptVersionOf(inv.run) < 15 || this.options.plantLedger === false) return stripPlants(structured)
+    const earlier = refs.filter(ref => ref.kind === 'continuity-snapshot').map(ref => {
+      const parsed = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: ref.id }).text))
+      return parsed.plants === undefined ? {} : { plants: parsed.plants }
+    })
+    const softened = softenPlantField(structured, earlier, chapterNumber)
+    if (softened.advisory !== null) {
+      const key = `${inv.run.novelId}:${chapterNumber + 1}`
+      this.plantAdvisories.set(key, [...(this.plantAdvisories.get(key) ?? []), softened.advisory])
+    }
+    return softened.value
+  }
+
+  /** Character-card gate for a version-15 run. Older runs and a closed switch do not parse e5/e6. */
+  private characterSheetGate(inv: Invocation): { characterSheet: { promptVersion: PromptVersion; maxCharacters: number; characterSheet: true; enforce: true } } | Record<string, never> {
+    if (promptVersionOf(inv.run) < 15 || this.options.characterSheet === false) return {}
+    return { characterSheet: { promptVersion: promptVersionOf(inv.run), maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS, characterSheet: true, enforce: true } }
+  }
+
+  /**
+   * Store a settings copy that was not just generated. A card defect is not turned into free text.
+   * Rebind and restabilize copy an already applied item, so they do not start a new card repair.
+   */
+  private async saveSettingsDocument(inv: Invocation, request: Parameters<WritingService['saveSettingsCandidate']>[1]): Promise<SettingsCandidateView> {
+    return this.service.saveSettingsCandidate(inv.actor, { ...request, ...this.characterSheetGate(inv) })
+  }
+
+  /**
+   * Admit one generated settings item. A malformed e5/e6 card is patched inside maxRepairAttempts.
+   * Each repair replaces contentMarkdown on the item already written. It does not regenerate the settings batch.
+   * When the budget is exhausted the stage fails with the existing review-blocked error. The broken card is not stored.
+   */
+  private async admitGeneratedSettings(inv: Invocation, stageKey: string, refs: readonly ArtifactRef[], request: Parameters<WritingService['saveSettingsCandidate']>[1]): Promise<SettingsCandidateView> {
+    const gate = this.characterSheetGate(inv)
+    let current = request.output
+    let childSessionId = request.childSessionId
+    let rejection: string | null = null
+    const cap = inv.run.executionLimits.maxRepairAttempts
+    for (let repair = 0; repair <= cap; repair++) {
+      if (rejection !== null) {
+        const captured = await this.characterSheetPatchStage(inv, `${stageKey}/card/${repair}`, refs, current, rejection)
+        const schemaError = characterSheetPatchError(captured.structured)
+        if (schemaError !== null) {
+          rejection = schemaError
+          continue
+        }
+        try {
+          current = applyCharacterSheetPatch(current, captured.structured)
+          childSessionId = captured.childSessionId
+        } catch (cause) {
+          if (!isOutputError(cause)) throw cause
+          rejection = cause.message
+          continue
+        }
+      }
+      try {
+        return await this.service.saveSettingsCandidate(inv.actor, { ...request, output: current, childSessionId, ...gate })
+      } catch (cause) {
+        if (!(cause instanceof CharacterSheetRejection)) throw cause
+        rejection = cause.message
+      }
+    }
+    throw new WritingError('review-blocked', `Settings repair limit was exhausted for ${request.dimensionCode}: ${rejection}`)
+  }
+
+  /** Ask for a patch of the rejected e5/e6 text. A schema miss is returned to the caller instead of repeating this key. */
+  private async characterSheetPatchStage(inv: Invocation, key: string, refs: readonly ArtifactRef[], prior: unknown, validationError: string): Promise<CapturedStage> {
+    const admitted = StageOutputSchemas.settings.parse(prior)
+    const prompt = this.runs.storedPrompt(inv.actor, inv.run.id, key) ?? buildCharacterSheetRepairPrompt({
+      novelId: inv.run.novelId, prior: admitted, inputRefs: refs.map(inputRef), task: { dimensionCode: admitted.dimensionCode, validationError },
+      inputs: refs.map(ref => ({ artifactId: ref.id, sha256: ref.sha256, kind: ref.kind, chars: ref.chars })),
+    })
+    return this.capture(inv, key, prompt, refs, CHARACTER_SHEET_PATCH_OUTPUT_SCHEMA, [], undefined, 'stored', undefined, stageWritingRole('settings'), true, 0)
+  }
+
+  /** Copy the chapter outline's hook onto continuity. A missing outline hook leaves the field off. */
+  private stampHookType(inv: Invocation, structured: unknown, refs: readonly ArtifactRef[]): unknown {
+    if (promptVersionOf(inv.run) < 15 || this.options.hookRotation === false) return stripHook(structured)
+    const outlineRef = refs.find(ref => ref.kind === 'chapter-outline')
+    if (outlineRef === undefined || structured === null || typeof structured !== 'object' || Array.isArray(structured)) return structured
+    const outline = StageOutputSchemas['chapter-outline'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outlineRef.id }).text))
+    if (outline.hookType === undefined) return stripHook(structured)
+    return { ...(structured as Record<string, unknown>), hookType: outline.hookType }
+  }
+
+  /** A repeated hook fails this outline round. The existing repair budget is the only retry. */
+  private repeatedHook(inv: Invocation, structured: unknown, chapterNumber: number): string | null {
+    if (promptVersionOf(inv.run) < 15 || this.options.hookRotation === false || chapterNumber < 2) return null
+    const outline = StageOutputSchemas['chapter-outline'].safeParse(structured)
+    if (!outline.success) return null
+    const manuscript = this.service.getManuscript(inv.actor, inv.run.novelId)
+    const applied = manuscript.appliedChapters.find(item => item.chapterNumber === chapterNumber - 1)
+    if (applied?.snapshot != null) {
+      const snapshot = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: applied.snapshot.id }).text))
+      return repeatedHookInstruction(outline.data.hookType, snapshot.hookType)
+    }
+    // Outlines are planned before any chapter is written, so the previous continuity does not exist yet.
+    // The previous outline's hookType is the value this host copies onto that chapter's continuity.
+    const prior = manuscript.heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === chapterNumber - 1)
+    if (prior === undefined) return null
+    const priorOutline = StageOutputSchemas['chapter-outline'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: prior.artifact.id }).text))
+    return repeatedHookInstruction(outline.data.hookType, priorOutline.hookType)
+  }
+
+  /**
+   * A viewpoint outside the cast, or a misread outside the closed list, fails this outline round.
+   * Unknown names fail only when strictCast is on. The same frame on every scene is recorded and does not fail the round.
+   * @returns The repair sentence, or null when the outline round should continue.
+   */
+  private strictCastInstruction(inv: Invocation, structured: unknown): string | null {
+    if (promptVersionOf(inv.run) < 15 || this.options.sceneCast === false) return null
+    const outline = StageOutputSchemas['chapter-outline'].safeParse(structured)
+    if (!outline.success) return null
+    try { assertSceneCastFields(outline.data.scenes) }
+    catch (cause) {
+      if (!(cause instanceof StageValidationRejection)) throw cause
+      return cause.message
+    }
+    const sameFrame = uniformMisreadNote(outline.data.scenes)
+    if (sameFrame !== null) {
+      const key = `${inv.run.novelId}:${outline.data.chapterNumber}`
+      this.castAdvisories.set(key, [...(this.castAdvisories.get(key) ?? []), sameFrame])
+    }
+    if (this.options.strictCast !== true) return null
+    const known = this.characterNames(inv)
+    if (known === null) return null
+    try { assertKnownCast(outline.data.scenes, known) }
+    catch (cause) {
+      if (!(cause instanceof StageValidationRejection)) throw cause
+      return cause.message
+    }
+    return null
+  }
+
+  /** Names on a parsed e5/e6 card. A missing or unparsed card does not reject the outline. */
+  private characterNames(inv: Invocation): Set<string> | null {
+    const sheet = this.characterSheet(inv)
+    return sheet === null ? null : new Set(sheet.core.map(row => row.name))
+  }
+
+  private characterSheet(inv: Invocation) {
+    if (promptVersionOf(inv.run) < 15 || this.options.characterSheet === false) return null
+    const settings = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'settings')
+    if (settings === undefined) return null
+    try {
+      const text = this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: settings.artifact.id }).text
+      const collection = settingsCollectionSchema.safeParse(JSON.parse(text))
+      if (!collection.success) return null
+      const markdowns = collection.data.dimensions.flatMap(dimension => dimension.dimensionCode === 'e5' || dimension.dimensionCode === 'e6' ? [dimension.contentMarkdown] : [])
+      const sheets = []
+      for (const markdown of markdowns) {
+        try { sheets.push(parseCharacterSheet(markdown, { maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS })) }
+        catch (cause) { if (cause instanceof CharacterSheetRejection) return null; throw cause }
+      }
+      return mergeCharacterSheets(sheets)
+    } catch { return null }
+  }
+
+  /** Body-task cards. Older runs, a closed switch, and a missing card add no keys. */
+  private bodyCastTask(inv: Invocation, chapterNumber: number): ReturnType<typeof castTaskFields> & { readonly castAdvisory?: readonly string[] } {
+    if (promptVersionOf(inv.run) < 15 || this.options.sceneCast === false || this.options.castInjection === false) return {}
+    const outline = this.service.getManuscript(inv.actor, inv.run.novelId).heads.find(item => item.target.kind === 'chapter-outline' && item.target.chapterNumber === chapterNumber)
+    if (outline === undefined) return {}
+    const parsed = StageOutputSchemas['chapter-outline'].safeParse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: outline.artifact.id }).text))
+    if (!parsed.success) return {}
+    const injection = buildCastInjection(parsed.data.scenes, {
+      sheet: this.characterSheet(inv), castInjection: true, maxCastCardChars: this.options.maxCastCardChars ?? DEFAULT_MAX_CAST_CARD_CHARS,
+    })
+    const advisory = this.castAdvisories.get(`${inv.run.novelId}:${chapterNumber}`) ?? []
+    return { ...castTaskFields(injection), ...(advisory.length === 0 ? {} : { castAdvisory: advisory }) }
+  }
+
+  /** Chapter 1 opening miss. Other chapters, and a closed switch, are not a repair. A miss does not fail the chapter. */
+  private openingInstruction(inv: Invocation, structured: unknown): string | null {
+    if (promptVersionOf(inv.run) < 15 || this.options.openingIn50 === false) return null
+    const body = StageOutputSchemas.body.safeParse(structured)
+    if (!body.success) return null
+    const miss = openingIn50Miss({ chapterNumber: body.data.chapterNumber, bodyText: assembleBody(body.data) })
+    return miss === null ? null : openingIn50RepairInstruction(miss)
+  }
+
+  /** Advisory plant lines for a chapter outline. They do not fail the outline round. */
+  private plantHintLines(inv: Invocation, refs: readonly ArtifactRef[], chapterNumber: number): readonly string[] {
+    if (promptVersionOf(inv.run) < 15 || this.options.plantLedger === false) return []
+    const remembered = this.plantAdvisories.get(`${inv.run.novelId}:${chapterNumber}`) ?? []
+    const latest = refs.filter(ref => ref.kind === 'continuity-snapshot').at(-1)
+    if (latest === undefined) return remembered
+    const parsed = StageOutputSchemas['continuity-snapshot'].parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: latest.id }).text))
+    return [...advisoryPlantHints(parsed.plants, chapterNumber), ...remembered]
   }
 
   private feedChars(inv: Invocation, ref: ArtifactRef, chapterNumber: number): number {
@@ -1845,6 +2166,26 @@ function storedResearchRequest(prompt: string, parentSessionId: ResearchStageReq
   }
 }
 /** @returns The prompt version a run started with; runs stored before versioning are version 1. */
+function withHostChecks(base: string, checks: readonly (string | null)[]): string {
+  const extra = checks.filter((item): item is string => item !== null)
+  if (extra.length === 0) return base
+  return base.length === 0 ? extra.join(' ') : `${extra.join(' ')} ${base}`
+}
+
+function stripHook(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !('hookType' in value)) return value
+  const copy = { ...(value as Record<string, unknown>) }
+  delete copy.hookType
+  return copy
+}
+
+function stripPlants(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !('plants' in value)) return value
+  const copy = { ...(value as Record<string, unknown>) }
+  delete copy.plants
+  return copy
+}
+
 function promptVersionOf(run: WritingRun): PromptVersion { return run.promptVersion ?? 1 }
 /**
  * @returns Whether body reviews of this run block on AI tone. Runs before prompt version 5 never recorded the switch and are
@@ -1905,9 +2246,15 @@ function isOutputError(cause: unknown): cause is StageValidationRejection { retu
 function isBodyPatchSchemaRejection(cause: unknown): cause is StageExecutionError {
   return cause instanceof StageExecutionError && (cause.code === 'stage-malformed' || cause.code === 'stage-missing-result')
 }
+/** Schema-rejection retry text. Versions 10–14 keep this sentence byte for byte. */
 function bodyPatchSchemaFeedback(previous: string | null | undefined, rejection: string): string {
   const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''
   return `${lead}The body patch was rejected because it did not match the patch schema: ${rejection} Return a body patch of only the changed fields or paragraphs.`
+}
+/** Apply-failure retry text. A schema rejection does not use this sentence. */
+function bodyPatchApplyFeedback(previous: string | null | undefined, rejection: string): string {
+  const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''
+  return `${lead}The body patch was rejected: ${rejection} Return a body patch of only the changed fields or paragraphs.`
 }
 function bodyPatchFullFeedback(previous: string | null | undefined, rejection: string): string {
   const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''

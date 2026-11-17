@@ -114,8 +114,8 @@ describe('version 3 AI-tone review', () => {
 })
 
 describe('version 2 guardrails', () => {
-  it('is followed by version 14 for new runs', () => {
-    expect(CURRENT_PROMPT_VERSION).toBe(14)
+  it('is followed by version 15 for new runs', () => {
+    expect(CURRENT_PROMPT_VERSION).toBe(15)
     const replayKinds = [...kinds, 'continuity-snapshot'] as const
     for (const kind of replayKinds) {
       expect(buildStagePrompt({ ...base, kind, promptVersion: 11 }), kind).toBe(buildStagePrompt({ ...base, kind, promptVersion: 10 }))
@@ -123,6 +123,7 @@ describe('version 2 guardrails', () => {
       expect(buildStagePrompt({ ...base, kind, promptVersion: 11 }), kind).not.toContain('pov-limited')
       expect(buildStagePrompt({ ...base, kind, promptVersion: 12 }), kind).not.toContain('false-target')
       expect(buildStagePrompt({ ...base, kind, promptVersion: 14 }), kind).toBe(buildStagePrompt({ ...base, kind, promptVersion: 13 }))
+      if (kind !== 'continuity' && kind !== 'chapter-outline' && kind !== 'body') expect(buildStagePrompt({ ...base, kind, promptVersion: 15 }), kind).toBe(buildStagePrompt({ ...base, kind, promptVersion: 14 }))
     }
     const bodyReview = { ...base, kind: 'review' as const, reviewedKind: 'body' as const }
     expect(buildStagePrompt({ ...bodyReview, promptVersion: 11 })).toContain('task.metrics')
@@ -271,7 +272,7 @@ describe('runs keep their prompt version', () => {
     const fixture = await useWritingFixture({ maxReadChars: 8192, onChildRequest: record.onChildRequest })
     const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
     if (outcome.status === 'rejected') throw outcome.reason
-    expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 14, executionLimits: { aiToneBlocking: true, metricsBlocking: false, aiToneRepairFloor: 'heavy' } })
+    expect(outcome.value).toMatchObject({ status: 'completed', promptVersion: 15, executionLimits: { aiToneBlocking: true, metricsBlocking: false, aiToneRepairFloor: 'heavy' } })
     expect(record.seen.find(item => item.stage.kind === 'settings')?.prompt).toContain('Do not expand this classification into motives')
     expect(record.seen.find(item => item.stage.kind === 'book-outline')?.prompt).toContain('starting want, the pressure that changes it')
     expect(record.seen.find(item => item.stage.kind === 'chapter-outline')?.prompt).toContain('who chooses, what they want in that moment')

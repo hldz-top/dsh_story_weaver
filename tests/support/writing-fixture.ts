@@ -21,6 +21,7 @@ import { registerWritingTools } from '../../src/tools.ts'
 import { registerResearchTools } from '../../src/research-tools.ts'
 import { researchNecessitySchema } from '../../src/research-planning.ts'
 import { BODY_PATCH_REQUIREMENT } from '../../src/body-repair.ts'
+import { CHARACTER_SHEET_PATCH_REQUIREMENT } from '../../src/character-sheet-repair.ts'
 import { OUTLINE_PATCH_REQUIREMENT } from '../../src/outline-repair.ts'
 import { StageOutputSchemas } from '../../src/stage-output.ts'
 import { settingsCollectionSchema } from '../../src/manuscript-records.ts'
@@ -42,7 +43,7 @@ const taskSchema = z.object({
   batch: z.enum(['draft', 'consistency', 'repair']).optional(), codes: z.array(z.string()).optional(),
   chapterCount: z.number().int().positive().optional(), sceneIds: z.array(z.string()).optional(),
   obligations: z.array(z.object({ id: z.string(), description: z.string() })).optional(),
-  requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style', 'pov'])).optional(),
+  requiredChecks: z.array(z.enum(['completeness', 'consistency', 'obligations', 'continuity', 'length', 'style', 'pov', 'character'])).optional(),
   reviewed: inputRef.optional(), bodyId: artifactIdSchema.optional(),
   measuredWordCount: z.number().nullable().optional(),
   measuredLength: z.object({ status: z.enum(['within-range', 'too-short', 'too-long']), blocking: z.boolean() }).nullable().optional(),
@@ -94,8 +95,14 @@ export interface WritingFixtureOptions {
   readonly registerWebTools?: boolean
   /** Plugin flag for settings snapshot reuse. Default true. */
   readonly reuseSettingsSnapshot?: boolean
-  /** Passed to the runner. Omitted keeps the default, which asks for a complete body when a body patch does not apply. */
+  /** Passed to the runner. Omitted keeps the runner default. */
   readonly bodyPatchFallback?: boolean
+  /** Passed to the runner. Omitted keeps character cards on for prompt version 15. */
+  readonly characterSheet?: boolean
+  /** Passed to the runner. Omitted keeps scene cast on for prompt version 15. */
+  readonly sceneCast?: boolean
+  /** Passed to the runner. Omitted keeps the chapter-1 opening check on. */
+  readonly openingIn50?: boolean
   /** Run-store raw output cap. Default 262144. */
   readonly maxOutputBytes?: number
   /** Creative brief stored on the fixture novel. Default is the fog-harbor premise, which states no numbered required events. */
@@ -229,6 +236,11 @@ function generate(state: ChildState): object {
   const revision = task.revisionInstructions === undefined ? '' : `修订要求：${task.revisionInstructions}`
   switch (state.data.kind) {
     case 'settings': {
+      if (state.data.requirements.includes(CHARACTER_SHEET_PATCH_REQUIREMENT)) {
+        const core = '| 角色 | 身份 | 欲望 | 恐惧 | 缺陷 | 误读框架 | 反差 | 出场章 |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| 林澜 | 守灯人 | 查明航标 | 船队失散 | 独自追查 | 技艺 | 话少但会留下灯 | 1 |'
+        const voice = '| 角色 | 句式 | 专属词 | 称呼主角 | 自称 | 身体签 | 禁语 |\n| --- | --- | --- | --- | --- | --- | --- |\n| 林澜 | 短句，4-12 字 | 航标、雾、灯 | 我 | 我 | 按灯 | 当众示弱 |'
+        return { version: 1, changes: [{ op: 'set', path: 'contentMarkdown', value: `${core}\n\n${voice}` }] }
+      }
       if (task.batch === 'consistency') return { issues: [] }
       if (task.batch === 'draft' || task.batch === 'repair') {
         const codes = required(task.codes, 'codes')
@@ -260,8 +272,8 @@ function generate(state: ChildState): object {
       const chapterNumber = required(task.chapterNumber, 'chapterNumber')
       const sceneIds = required(task.sceneIds, 'sceneIds')
       if (sceneIds.length === 0) throw new Error('Body fixture requires an actual scene plan')
-      const sentence = '林澜沿着潮湿的石阶走向灯塔，仔细辨认海面上的每一道光，确认航道安全后才向岸边的同伴发出信号。'
-      const scenes = sceneIds.map((sceneId, index) => ({ sceneId, text: `林澜在第${chapterNumber}章继续调查雾港。${index === 0 ? required(task.obligations, 'obligations').map(item => item.description).join('') : ''}${sentence.repeat(Math.floor(80 / sceneIds.length) + (index < 80 % sceneIds.length ? 1 : 0))}林澜把确认过的航标记入日志，与同伴一起守住归航的灯光。` }))
+      const sentence = '林澜推开潮湿的灯塔门，却仔细辨认海面上的每一道光，确认航道安全后才向岸边的同伴发出信号。'
+      const scenes = sceneIds.map((sceneId, index) => ({ sceneId, text: `林澜推开雾港的门，却在第${chapterNumber}章继续调查。\n\n${index === 0 ? required(task.obligations, 'obligations').map(item => item.description).join('') : ''}${sentence.repeat(Math.floor(80 / sceneIds.length) + (index < 80 % sceneIds.length ? 1 : 0))}林澜把确认过的航标记入日志，与同伴一起守住归航的灯光。` }))
       if (state.data.requirements.includes(BODY_PATCH_REQUIREMENT)) {
         return { version: 1, changes: scenes.map((scene, index) => ({ op: 'set', path: `scenes[${index}].text`, value: scene.text })) }
       }
@@ -273,7 +285,12 @@ function generate(state: ChildState): object {
       const evidence = task.paragraphs !== undefined && task.paragraphs.length > 0
         ? [{ paragraphId: task.paragraphs[0]!.id, problem: '这段引文覆盖本项检查所读的候选段落。' }]
         : [{ artifactId: reviewed.artifactId, quote: quoteCandidate(source(state, reviewed.artifactId)) }]
-      const checks = required(task.requiredChecks, 'requiredChecks').map(category => ({ category, summary: category === 'length' ? `宿主计数 ${task.measuredWordCount}；${task.measuredLength?.status}。` : `已读候选并完成${category}检查。`, evidence }))
+      const checks: { category: string; summary: string; evidence: typeof evidence }[] = []
+      for (const category of required(task.requiredChecks, 'requiredChecks')) {
+        if (category === 'character') {
+          for (const id of ['character-voice', 'character-function', 'character-arc'] as const) checks.push({ category, summary: `${id}：这段引文说明该项通过。`, evidence })
+        } else checks.push({ category, summary: category === 'length' ? `宿主计数 ${task.measuredWordCount}；${task.measuredLength?.status}。` : `已读候选并完成${category}检查。`, evidence })
+      }
       const issues = task.measuredLength?.blocking === true ? [{ id: 'fixture-length', severity: 'blocking', category: 'length', location: '整章', message: '宿主测得本章超出规定的章节总字数范围。', evidence }] : []
       return { ...base, reviewed, checks, issues }
     }
@@ -414,6 +431,9 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
     allowIncompleteSettings: options.allowIncompleteSettings ?? true,
     ...(options.reuseSettingsSnapshot === undefined ? {} : { reuseSettingsSnapshot: options.reuseSettingsSnapshot }),
     ...(options.bodyPatchFallback === undefined ? {} : { bodyPatchFallback: options.bodyPatchFallback }),
+    ...(options.characterSheet === undefined ? {} : { characterSheet: options.characterSheet }),
+    ...(options.sceneCast === undefined ? {} : { sceneCast: options.sceneCast }),
+    ...(options.openingIn50 === undefined ? {} : { openingIn50: options.openingIn50 }),
   })
   fixture.ctx.effect(() => () => runner.close())
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
