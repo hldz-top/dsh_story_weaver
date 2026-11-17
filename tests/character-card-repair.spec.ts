@@ -57,7 +57,7 @@ it('fails settings when the card is still malformed after the budget, and does n
   const fixture = await useWritingFixture({
     executionLimits: { researchEnabled: false, maxRepairAttempts: 1, maxParallelStages: 1 },
     intervene(stage, output) {
-      if (!stage.data.requirements.some(item => item.includes('contentMarkdown'))) return output
+      if (stage.data.kind !== 'settings' || !stage.data.requirements.some(item => item.includes('contentMarkdown'))) return output
       return { version: 1, changes: [{ op: 'set', path: 'contentMarkdown', value: '仍是自由文本，没有角色表。' }] }
     },
   })
