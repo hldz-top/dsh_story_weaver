@@ -53,8 +53,9 @@ export interface WritingRunnerOptions {
   /** Reuse a passed settings collection when the brief text and roots match. Default true. */
   readonly reuseSettingsSnapshot?: boolean
   /**
-   * When an admitted body patch does not apply, ask once for the complete body. Default true.
+   * After two consecutive body-patch rejections, ask once for the complete body. Default false.
    * False rejects that candidate and leaves the admitted body unchanged. Not stored with runs.
+   * Versions 10–14 keep their prompt bytes. A resume on those versions does not ask for /full unless this is true.
    */
   readonly bodyPatchFallback?: boolean
   /**
@@ -1609,35 +1610,33 @@ export class WritingRunner {
    * only the changes. The caller applies them and stores the complete body.
    */
   /**
-   * Capture one body patch, apply it, or follow a schema rejection with one feedback retry and then the full-body path.
-   * A schema rejection is `stage-malformed` or `stage-missing-result`. The identical patch request is not repeated.
+   * Capture one body patch and apply it. A schema rejection and an apply failure are the same kind of rejection:
+   * the runner retries the patch once with that error, then either rejects the candidate or, when bodyPatchFallback
+   * is true, asks once for the complete body. The identical patch request is not repeated.
    * @returns The complete body to admit, or a rejection that leaves the admitted body unchanged.
    */
   private async admittedBodyPatch(inv: Invocation, stageKey: string, refs: readonly ArtifactRef[], prior: unknown, task: { validationError?: string | null }, feedback: readonly ArtifactRef[], repairMode: RepairMode | undefined, sameDefectNote?: string): Promise<{ kind: 'ready'; result: CapturedStage; structured: unknown } | { kind: 'reject'; message: string }> {
     const savedFull = this.savedStage(inv, `${stageKey}/full`)
     if (savedFull !== null) return { kind: 'ready', result: savedFull, structured: savedFull.structured }
-    const first = await this.readBodyPatch(inv, stageKey, refs, prior, task, feedback, sameDefectNote)
-    if (first.schemaError === null && first.captured !== null) {
-      try {
-        return { kind: 'ready', result: first.captured, structured: applyBodyPatch(prior, first.captured.structured) }
-      }
-      catch (cause) {
-        if (!isOutputError(cause)) throw cause
-        return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, cause.message, sameDefectNote)
-      }
+    const first = await this.readAppliedBodyPatch(inv, stageKey, refs, prior, task, feedback, sameDefectNote)
+    if (first.kind === 'ready') return first
+    const second = await this.readAppliedBodyPatch(inv, `${stageKey}/schema`, refs, prior, { ...task, validationError: bodyPatchRetryFeedback(task.validationError, first.message) }, feedback, sameDefectNote)
+    if (second.kind === 'ready') return second
+    return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, second.message, sameDefectNote)
+  }
+
+  /** Read one patch and apply it. A schema miss and an apply miss are both rejections. Any other capture failure propagates. */
+  private async readAppliedBodyPatch(inv: Invocation, key: string, refs: readonly ArtifactRef[], prior: unknown, task: object, feedback: readonly ArtifactRef[], sameDefectNote?: string): Promise<{ kind: 'ready'; result: CapturedStage; structured: unknown } | { kind: 'reject'; message: string }> {
+    const read = await this.readBodyPatch(inv, key, refs, prior, task, feedback, sameDefectNote)
+    if (read.schemaError !== null || read.captured === null) {
+      return { kind: 'reject', message: read.schemaError ?? 'The body patch was rejected because it did not match the patch schema.' }
     }
-    const rejection = first.schemaError ?? 'The body patch was rejected because it did not match the patch schema.'
-    const second = await this.readBodyPatch(inv, `${stageKey}/schema`, refs, prior, { ...task, validationError: bodyPatchSchemaFeedback(task.validationError, rejection) }, feedback, sameDefectNote)
-    if (second.schemaError === null && second.captured !== null) {
-      try {
-        return { kind: 'ready', result: second.captured, structured: applyBodyPatch(prior, second.captured.structured) }
-      }
-      catch (cause) {
-        if (!isOutputError(cause)) throw cause
-        return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, cause.message, sameDefectNote)
-      }
+    try {
+      return { kind: 'ready', result: read.captured, structured: applyBodyPatch(prior, read.captured.structured) }
+    } catch (cause) {
+      if (!isOutputError(cause)) throw cause
+      return { kind: 'reject', message: cause.message }
     }
-    return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, second.schemaError ?? rejection, sameDefectNote)
   }
 
   /** Read one patch capture. A schema rejection is reported. Any other capture failure propagates. */
@@ -2235,9 +2234,9 @@ function isOutputError(cause: unknown): cause is StageValidationRejection { retu
 function isBodyPatchSchemaRejection(cause: unknown): cause is StageExecutionError {
   return cause instanceof StageExecutionError && (cause.code === 'stage-malformed' || cause.code === 'stage-missing-result')
 }
-function bodyPatchSchemaFeedback(previous: string | null | undefined, rejection: string): string {
+function bodyPatchRetryFeedback(previous: string | null | undefined, rejection: string): string {
   const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''
-  return `${lead}The body patch was rejected because it did not match the patch schema: ${rejection} Return a body patch of only the changed fields or paragraphs.`
+  return `${lead}The body patch was rejected: ${rejection} Return a body patch of only the changed fields or paragraphs.`
 }
 function bodyPatchFullFeedback(previous: string | null | undefined, rejection: string): string {
   const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''

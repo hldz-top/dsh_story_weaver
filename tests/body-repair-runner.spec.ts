@@ -95,9 +95,10 @@ it('stores a patched body when a repair is requested, and the model reply is onl
   expect(stored).not.toHaveProperty('changes')
 }, 120_000)
 
-it('falls back to a complete body when the patch does not apply, and does not store the patch', async () => {
+it('falls back to a complete body when the patch does not apply and bodyPatchFallback is true', async () => {
   let bodyReviews = 0
   const fixture = await useWritingFixture({
+    bodyPatchFallback: true,
     executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
     intervene(stage, output) {
       if (stage.kind === 'review' && reviewedKind(stage) === 'body') {
@@ -114,6 +115,10 @@ it('falls back to a complete body when the patch does not apply, and does not st
   if (outcome.status === 'rejected') throw outcome.reason
   expect(outcome.value.error).toBeNull()
   expect(outcome.value.status).toBe('completed')
+  const retried = outcome.value.attempts.find(item => item.key === 'body/1/candidate/1/schema' && item.status === 'succeeded')
+  expect(retried).toBeDefined()
+  const retryPrompt = fixture.runs.storedPrompt(fixture.actor, outcome.value.id, 'body/1/candidate/1/schema') ?? ''
+  expect(retryPrompt).toContain('no-such-field')
   const fallback = outcome.value.attempts.find(item => item.key === 'body/1/candidate/1/full' && item.status === 'succeeded')
   expect(fallback).toBeDefined()
   const fallbackBody = JSON.parse(fixture.runs.readOutput(fixture.actor, outcome.value.id, fallback!.id).text) as { scenes?: unknown; changes?: unknown }
@@ -134,6 +139,7 @@ it('falls back to a complete body when the patch does not apply, and does not st
 
 it('rejects the candidate when the patch and the full-body fallback are both invalid', async () => {
   const fixture = await useWritingFixture({
+    bodyPatchFallback: true,
     executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
     intervene(stage, output) {
       if (stage.kind === 'review' && reviewedKind(stage) === 'body') return blockReview(output, stage)
@@ -191,6 +197,7 @@ function completeBody(): object {
 it('retries a schema-invalid complete body once with feedback, then admits the full-body fallback', async () => {
   let bodyReviews = 0
   const fixture = await useWritingFixture({
+    bodyPatchFallback: true,
     executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
     intervene(stage, output) {
       if (stage.kind === 'review' && reviewedKind(stage) === 'body') {
@@ -213,8 +220,8 @@ it('retries a schema-invalid complete body once with feedback, then admits the f
   expect(JSON.parse(fixture.runs.readOutput(fixture.actor, outcome.value.id, retried[0]!.id).text)).toEqual(completeBody())
   const patches = [...fixture.stages.values()].filter(asksForBodyPatch)
   expect(patches).toHaveLength(2)
-  expect(patches[0]?.task?.validationError ?? '').not.toContain('did not match the patch schema')
-  expect(patches[1]?.task?.validationError).toContain('did not match the patch schema')
+  expect(patches[0]?.task?.validationError ?? '').not.toContain('could not be decoded')
+  expect(patches[1]?.task?.validationError).toContain('could not be decoded')
   expect(patches[1]?.prompt).toContain('could not be decoded')
   const full = outcome.value.attempts.find(item => item.key === 'body/1/candidate/1/full' && item.status === 'succeeded')
   expect(full).toBeDefined()
@@ -251,6 +258,71 @@ it('rejects the round when a schema-invalid patch and its retry both fail and fa
   const kept = StageOutputSchemas.body.parse(JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: bodies[0]!.artifact.id }).text))
   expect(kept.chapterNumber).toBe(1)
   expect(kept.scenes.length).toBeGreaterThan(0)
+}, 120_000)
+
+it('retries an apply failure once and puts the error in the next patch', async () => {
+  let patches = 0
+  let bodyReviews = 0
+  const fixture = await useWritingFixture({
+    executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
+    intervene(stage, output) {
+      if (stage.kind === 'review' && reviewedKind(stage) === 'body') {
+        bodyReviews += 1
+        if (bodyReviews === 1) return blockReview(output, stage)
+      }
+      if (!asksForBodyPatch(stage)) return output
+      patches += 1
+      if (patches === 1) return { version: 1, changes: [{ op: 'set', path: 'no-such-field', value: '改' }] }
+      const prior = StageOutputSchemas.body.parse(storedBody(stage))
+      return { version: 1, changes: [{ op: 'set', path: 'scenes[0].text', value: prior.scenes[0]!.text.replace(FROM, TO) }] }
+    },
+  })
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a1'], chapterCount: 1, throughChapter: 1 }))
+  if (outcome.status === 'rejected') throw outcome.reason
+  expect(outcome.value.status).toBe('completed')
+  const retry = [...fixture.stages.values()].filter(asksForBodyPatch)
+  expect(retry).toHaveLength(2)
+  expect(retry[1]?.task?.validationError).toContain('no-such-field')
+  expect(outcome.value.attempts.some(item => item.key.includes('/full'))).toBe(false)
+  const applied = fixture.service.getManuscript(fixture.actor, fixture.novel.id).history.find(item => item.target.kind === 'body' && item.status === 'applied')
+  const text = StageOutputSchemas.body.parse(JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: applied!.artifact.id }).text)).scenes[0]?.text
+  expect(text).toContain(TO)
+}, 120_000)
+
+it('keeps the admitted body when the patch apply fails twice', async () => {
+  const fixture = await useWritingFixture({
+    executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
+    intervene(stage, output) {
+      if (stage.kind === 'review' && reviewedKind(stage) === 'body') return blockReview(output, stage)
+      if (asksForBodyPatch(stage)) return { version: 1, changes: [{ op: 'set', path: 'no-such-field', value: '改' }] }
+      return output
+    },
+  })
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a1'], chapterCount: 1, throughChapter: 1 }))
+  if (outcome.status === 'rejected') throw outcome.reason
+  expect(outcome.value.status).toBe('failed')
+  expect(outcome.value.error).toContain('no-such-field')
+  const bodies = fixture.service.getManuscript(fixture.actor, fixture.novel.id).history.filter(item => item.target.kind === 'body')
+  expect(bodies).toHaveLength(1)
+  expect(bodies[0]?.status).toBe('blocked')
+  const kept = StageOutputSchemas.body.parse(JSON.parse(fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: bodies[0]!.artifact.id }).text))
+  expect(kept.scenes[0]?.text).toContain(FROM)
+  expect(kept).not.toHaveProperty('changes')
+}, 120_000)
+
+it('does not produce a full-body attempt when bodyPatchFallback is left at its default', async () => {
+  const fixture = await useWritingFixture({
+    executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
+    intervene(stage, output) {
+      if (stage.kind === 'review' && reviewedKind(stage) === 'body') return blockReview(output, stage)
+      if (asksForBodyPatch(stage)) return { version: 1, changes: [{ op: 'set', path: 'scenes[99].text', value: '改' }] }
+      return output
+    },
+  })
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, settingsRoots: ['a1'], chapterCount: 1, throughChapter: 1 }))
+  if (outcome.status === 'rejected') throw outcome.reason
+  expect(outcome.value.attempts.some(item => item.key.includes('/full'))).toBe(false)
+  expect(new Set(outcome.value.attempts.map(item => item.key)).has('body/1/candidate/1/full')).toBe(false)
 }, 120_000)
 
 it('propagates a non-schema patch capture failure without a retry or a full-body fallback', async () => {

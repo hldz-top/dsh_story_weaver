@@ -49,6 +49,7 @@ it('keeps the default preview directory relative to the Session workspace', () =
   expect(new Story.Config().castInjection).toBe(true)
   expect(new Story.Config().maxCastCardChars).toBe(1200)
   expect(new Story.Config().characterReview).toBe(true)
+  expect(new Story.Config().bodyPatchFallback).toBe(false)
 })
 
 it.each(['.dsh-story', 'novels/versions', '小说/预览'])('loads the plugin with relative previewDirectory %j', async (previewDirectory) => {
