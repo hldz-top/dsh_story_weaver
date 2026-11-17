@@ -46,14 +46,16 @@ export function countHan(text: string): number {
 }
 
 /**
- * Reject a scene whose viewpoint is outside its cast, or whose misread is outside the scene enum.
- * The runner records that error as an advisory note and keeps the outline. Unknown cast names are not decided here.
+ * Reject a scene whose viewpoint is outside its cast, or whose misread is outside the closed frame list.
+ * `其它` and `其它:` plus 1 to 10 characters are allowed. Unknown cast names are not decided here.
+ * The same frame on every scene is not a rejection; {@link uniformMisreadNote} records that as an advisory.
  * @param scenes - Admitted chapter-outline scenes.
  */
 export function assertSceneCastFields(scenes: readonly SceneCastScene[]): void {
   for (const scene of scenes) {
-    if (scene.misread !== undefined && !(SCENE_MISREAD_FRAMES as readonly string[]).includes(scene.misread)) {
-      throw new StageValidationRejection(`Scene ${echo(scene.id)} field misread is ${echo(scene.misread)}; expected one of ${SCENE_MISREAD_FRAMES.join(', ')}.`)
+    if (scene.misread !== undefined) {
+      const message = sceneMisreadMessage(scene.id, scene.misread)
+      if (message !== null) throw new StageValidationRejection(message)
     }
     if (scene.pov !== undefined && !(scene.cast ?? []).includes(scene.pov)) {
       const cast = scene.cast ?? []
@@ -61,6 +63,26 @@ export function assertSceneCastFields(scenes: readonly SceneCastScene[]): void {
       throw new StageValidationRejection(`Scene ${echo(scene.id)} field pov is ${echo(scene.pov)}; expected pov to be one name in cast (${listed}).`)
     }
   }
+}
+
+/**
+ * Advisory when every scene that names a frame names the same one. One scene, or a mix of frames, returns null.
+ * @param scenes - Chapter-outline scenes.
+ */
+export function uniformMisreadNote(scenes: readonly SceneCastScene[]): string | null {
+  const frames = scenes.flatMap(scene => scene.misread === undefined ? [] : [scene.misread])
+  const first = frames[0]
+  if (first === undefined || frames.length < 2 || frames.some(frame => frame !== first)) return null
+  return `Advisory cast: every scene uses misread ${first}. The outline is kept.`
+}
+
+function sceneMisreadMessage(sceneId: string, value: string): string | null {
+  if ((SCENE_MISREAD_FRAMES as readonly string[]).includes(value)) return null
+  if (value.startsWith('其它:')) {
+    const note = value.slice('其它:'.length)
+    if (note.trim().length > 0 && [...note].length <= 10) return null
+  }
+  return `Scene ${echo(sceneId)} field misread is ${echo(value)}; expected one of ${SCENE_MISREAD_FRAMES.join(', ')}, or 其它: followed by 1 to 10 characters.`
 }
 
 /**
@@ -139,8 +161,10 @@ interface RankedCard {
   povAt: number | null
 }
 
-function isSceneMisread(value: string): value is SceneMisread {
-  return (SCENE_MISREAD_FRAMES as readonly string[]).includes(value)
+function sceneFrame(value: string): SceneMisread | undefined {
+  if ((SCENE_MISREAD_FRAMES as readonly string[]).includes(value)) return value as SceneMisread
+  if (value.startsWith('其它:') && sceneMisreadMessage('scene', value) === null) return '其它'
+  return undefined
 }
 
 /**
@@ -192,7 +216,11 @@ export function buildCastInjection(scenes: readonly SceneCastScene[], options: {
       ...byAppearance.filter(row => chosen.has(row.name) && row.povAt === null),
     ]
   }
-  const misreadMap = scenes.flatMap(scene => scene.misread !== undefined && isSceneMisread(scene.misread) ? [{ sceneId: scene.id, frame: scene.misread }] : [])
+  const misreadMap = scenes.flatMap(scene => {
+    if (scene.misread === undefined) return []
+    const frame = sceneFrame(scene.misread)
+    return frame === undefined ? [] : [{ sceneId: scene.id, frame }]
+  })
   return {
     castCards: kept.map(row => ({ name: row.name, tell: row.tell })),
     misreadMap,

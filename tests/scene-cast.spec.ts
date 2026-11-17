@@ -1,8 +1,8 @@
-/** Scene cast: pov and misread stay advisory, and the body task injects only the outline's cast. */
+/** Scene cast: pov and an illegal misread are rejected. Unknown names and one shared frame stay advisory. */
 import { expect, it } from 'vitest'
 import { parseCharacterSheet, type CharacterSheet } from '../src/character-sheet.ts'
 import { nativeStageOutputSchema } from '../src/native-stage-schema.ts'
-import { assertKnownCast, assertSceneCastFields, buildCastInjection, CAST_CARDS_OMITTED, uncastNamesOf } from '../src/scene-cast.ts'
+import { assertKnownCast, assertSceneCastFields, buildCastInjection, CAST_CARDS_OMITTED, uncastNamesOf, uniformMisreadNote } from '../src/scene-cast.ts'
 import { buildStagePrompt } from '../src/stage-prompts.ts'
 
 function row(name: string): string {
@@ -21,6 +21,11 @@ it('rejects a viewpoint outside the cast and an illegal misread, and keeps unkno
   expect(() => assertSceneCastFields([{ id: 's1', cast: ['云望舒'], pov: '沈丹青' }])).toThrow(/s1[\s\S]*pov/)
   expect(() => assertSceneCastFields([{ id: 's1', cast: ['云望舒'], pov: '云望舒', misread: '命运' }])).toThrow(/s1[\s\S]*misread/)
   expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '利益' }])).not.toThrow()
+  expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '其它' }])).not.toThrow()
+  expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '其它:看错人' }])).not.toThrow()
+  expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '其它:' }])).toThrow(/misread/)
+  expect(uniformMisreadNote([{ id: 's1', misread: '利益' }, { id: 's2', misread: '利益' }])).toMatch(/Advisory cast/)
+  expect(uniformMisreadNote([{ id: 's1', misread: '利益' }, { id: 's2', misread: '礼法' }])).toBeNull()
   expect(uncastNamesOf([{ id: 's1', cast: ['路人', '云望舒'] }], new Set(['云望舒']))).toEqual(['路人'])
   expect(() => assertKnownCast([{ id: 's1', cast: ['路人'] }], new Set(['云望舒']))).toThrow(/路人/)
 })

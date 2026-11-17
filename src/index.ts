@@ -69,7 +69,8 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   openingIn50: boolean
   /**
    * Parse e5/e6 character cards on prompt version 15. Default true. Not stored on the run and not a field of story_writing.json.
-   * A card that does not parse is stored as free text and does not fail settings.
+   * A malformed card is rejected. The settings budget patches that dimension's text and does not regenerate the document.
+   * Exhausting the budget fails settings. The broken card is not stored as free text.
    */
   characterSheet: boolean
   /** Maximum characters in one e5 or e6 dimension. Default 12. Not stored on the run. */
@@ -77,6 +78,8 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   /**
    * Version 15 scene cast fields. Default true. Not stored on the run and not a field of story_writing.json.
    * False omits cast, pov and misread from the chapter-outline schema and prompt.
+   * A viewpoint outside the cast, or a misread outside 利益, 礼法, 逻辑, 技艺, 生计, 其它, and 其它: plus a short note, fails the outline round.
+   * Unknown cast names are counted and do not fail the outline unless strictCast is on. The same frame on every scene is advisory.
    */
   sceneCast: boolean
   /** Reject a cast name that is not on the character card. Default false. Not stored on the run. */

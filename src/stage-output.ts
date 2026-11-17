@@ -514,7 +514,7 @@ export interface CharacterSheetAdmission extends ParseCharacterSheetOptions {
 /**
  * Admit an e5 or e6 contentMarkdown character card before the settings artifact is stored.
  * Other dimensions, `characterSheet: false`, and prompt versions before 15 return without reading the tables.
- * A defect throws {@link CharacterSheetRejection}. The runner catches it and stores the prose as free text.
+ * A defect throws {@link CharacterSheetRejection}. The runner patches the rejected text inside the settings repair budget.
  * @param dimension - Catalog code of the candidate. @param markdown - Its contentMarkdown.
  * @param options - Version gate, switch, and character cap.
  */

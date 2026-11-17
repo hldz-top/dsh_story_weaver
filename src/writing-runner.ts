@@ -11,14 +11,15 @@ import { RunLimitsError, RunStoreError, type AiToneBlockRecord, type AttemptFail
 import { executeDirectStage, type DirectStageInput } from './direct-stage.ts'
 import { executeStage, StageExecutionError, type StageRequest, type StageResult } from './stage-executor.ts'
 import { CharacterSheetRejection, DEFAULT_MAX_CHARACTERS, parseCharacterSheet } from './character-sheet.ts'
-import { assertKnownCast, assertSceneCastFields, buildCastInjection, castTaskFields, DEFAULT_MAX_CAST_CARD_CHARS, mergeCharacterSheets } from './scene-cast.ts'
+import { applyCharacterSheetPatch, buildCharacterSheetRepairPrompt, CHARACTER_SHEET_PATCH_OUTPUT_SCHEMA, characterSheetPatchError } from './character-sheet-repair.ts'
+import { assertKnownCast, assertSceneCastFields, buildCastInjection, castTaskFields, DEFAULT_MAX_CAST_CARD_CHARS, mergeCharacterSheets, uniformMisreadNote } from './scene-cast.ts'
 import { AI_TONE_ISSUE_PREFIX, buildStagePrompt, characterDimensionsForStage, type PromptVersion, type StagePromptKind } from './stage-prompts.ts'
 import { bodyFeed, proseView } from './prose-view.ts'
 import { aiToneHits, gradeAiTone, selectPoisonRepairHits, type AiToneRepairFloor } from './ai-tone.ts'
 import { buildResearchPrompt, validateResearchStageResult, RESEARCH_STAGE_OUTPUT_SCHEMA, researchStageTools, researchToolAuthorization, type ResearchStageRequest } from './research-stage.ts'
 import { buildResearchPlanningPrompt, researchNecessity, RESEARCH_PLANNING_OUTPUT_SCHEMA, type ResearchNecessity } from './research-planning.ts'
 import { attemptSettingsOfficialRetrieval, isSettingsOutputTarget, officialExcerptsFromPrompt, settingsLocalNecessity, storedResearchTask } from './settings-retrieval.ts'
-import { batchDimensionKind, batchFactStatement, dimensionDocument, parseSettingsBatch, parseSettingsConsistency, planSettingsBatches, quoteOfDimension, settingsBatchKind, settingsBatchNativeSchema, settingsConsistencyNativeSchema, type SettingsBatchOutput, type SettingsConsistencyIssue } from './settings-batch.ts'
+import { batchDimensionKind, dimensionDocument, parseSettingsBatch, parseSettingsConsistency, planSettingsBatches, quoteOfDimension, settingsBatchKind, settingsBatchNativeSchema, settingsConsistencyNativeSchema, type SettingsBatchOutput, type SettingsConsistencyIssue } from './settings-batch.ts'
 import { StageValidationRejection } from './stage-rejection.ts'
 import { missingRequiredSettings, planSettings } from './settings-plan.ts'
 import { settingsCatalog, type SettingsDimension, type SettingsDimensionKind } from './settings-catalog.ts'
@@ -75,7 +76,8 @@ export interface WritingRunnerOptions {
   readonly openingIn50?: boolean
   /**
    * Parse e5/e6 character cards on prompt version 15. Default true. Not stored on the run.
-   * A card that does not parse is stored as free text and does not fail the settings stage.
+   * A malformed card is rejected and the existing settings budget patches that dimension's text.
+   * The budget ends as a settings failure. The broken card is not stored as free text.
    */
   readonly characterSheet?: boolean
   /** Cap for one e5 or e6 dimension. Default 12. Not stored on the run. */
@@ -83,7 +85,8 @@ export interface WritingRunnerOptions {
   /**
    * Version 15 scene cast, viewpoint and misread. Default true. Not stored on the run.
    * False keeps the chapter-outline schema and prompt that version 15 would use without those fields.
-   * A viewpoint outside the cast, or an illegal misread, is an advisory note and does not fail the outline.
+   * A viewpoint outside the cast, or an illegal misread, fails the outline round and uses the outline patch budget.
+   * Unknown cast names stay in uncastNames. The same frame on every scene is an advisory note.
    */
   readonly sceneCast?: boolean
   /** Reject cast names that are not on the character card. Default false. Not stored on the run. */
@@ -891,15 +894,17 @@ export class WritingRunner {
       const saved = this.service.findSettingsByRequest(inv.actor, inv.run.novelId, requestId(inv.run, keyOf(code)))
       if (saved !== undefined) { await this.ensureApplied(inv, saved, old?.artifact.id); continue }
       const revisionOf = old?.artifact.id
-      const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, revisionOf).map(inputRef)
-      let candidate = await this.saveSettingsOrFreeText(inv, {
+      const sources = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, revisionOf)
+      const refs = sources.map(inputRef)
+      let candidate = await this.admitGeneratedSettings(inv, keyOf(code), sources, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, keyOf(code)), dimensionCode: code, researchPlanId: planId, childSessionId, output: dimensionDocument(code, body, refs),
         ...(revisionOf === undefined ? {} : { revisionOf }),
       })
       if (candidate.review === null) {
+        const stored = StageOutputSchemas.settings.parse(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: candidate.artifact.id }).text))
         candidate = await this.service.saveSettingsReview(inv.actor, {
           novelId: inv.run.novelId, candidateId: candidate.artifact.id, expectedReviewId: null, requestId: requestId(inv.run, `${keyOf(code)}/review`),
-          childSessionId: inv.actor.sessionId, output: passingReview(candidate.artifact, candidate.inputRefs, batchFactStatement(body)),
+          childSessionId: inv.actor.sessionId, output: passingReview(candidate.artifact, candidate.inputRefs, quoteOfDimension(stored.facts, stored.contentMarkdown)),
         })
       }
       await this.ensureApplied(inv, candidate, revisionOf)
@@ -929,7 +934,7 @@ export class WritingRunner {
       const existing = this.service.findSettingsByRequest(inv.actor, inv.run.novelId, requestId(inv.run, key))
       if (existing !== undefined) { await this.ensureApplied(inv, existing, item.artifact.id); continue }
       const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, item.artifact.id).map(inputRef)
-      const candidate = await this.saveSettingsOrFreeText(inv, {
+      const candidate = await this.saveSettingsDocument(inv, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, key), dimensionCode: code, researchPlanId: planId, childSessionId: inv.actor.sessionId,
         output: { version: 1, inputRefs: refs, dimensionCode: code, facts: source.facts, contentMarkdown: source.contentMarkdown }, revisionOf: item.artifact.id,
       })
@@ -965,7 +970,7 @@ export class WritingRunner {
       const revisionOf = old?.artifact.id
       const refs = this.service.settingsInputs(inv.actor, inv.run.novelId, code, planId, revisionOf).map(inputRef)
       const output = { version: 1 as const, inputRefs: refs, dimensionCode: code, facts: source.facts, contentMarkdown: source.contentMarkdown }
-      let candidate = await this.saveSettingsOrFreeText(inv, {
+      let candidate = await this.saveSettingsDocument(inv, {
         novelId: inv.run.novelId, requestId: requestId(inv.run, `settings/rebind/${brief.id}/save/${code}`), dimensionCode: code, researchPlanId: planId,
         childSessionId: inv.actor.sessionId, output, ...(revisionOf === undefined ? {} : { revisionOf }),
       })
@@ -1161,7 +1166,7 @@ export class WritingRunner {
     }, input.feedback, input.dimension.kind)
     let candidate: SettingsCandidateView
     try {
-      candidate = await this.saveSettingsOrFreeText(inv, { novelId: inv.run.novelId, requestId: requestId(inv.run, input.stageKey), dimensionCode: input.code,
+      candidate = await this.admitGeneratedSettings(inv, input.stageKey, input.refs, { novelId: inv.run.novelId, requestId: requestId(inv.run, input.stageKey), dimensionCode: input.code,
         researchPlanId: input.researchPlanId, childSessionId: stage.childSessionId, output: stage.structured, ...(input.revision === undefined ? {} : { revisionOf: input.revision.baseArtifactId }) })
     } catch (cause) {
       if (!isOutputError(cause)) throw cause
@@ -1744,20 +1749,66 @@ export class WritingRunner {
     return softened.value
   }
 
+  /** Character-card gate for a version-15 run. Older runs and a closed switch do not parse e5/e6. */
+  private characterSheetGate(inv: Invocation): { characterSheet: { promptVersion: PromptVersion; maxCharacters: number; characterSheet: true; enforce: true } } | Record<string, never> {
+    if (promptVersionOf(inv.run) < 15 || this.options.characterSheet === false) return {}
+    return { characterSheet: { promptVersion: promptVersionOf(inv.run), maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS, characterSheet: true, enforce: true } }
+  }
+
   /**
-   * Store a settings candidate. An e5/e6 card that does not parse is stored again as free text.
-   * The second save does not enforce the card, so the settings stage continues.
+   * Store a settings copy that was not just generated. A card defect is not turned into free text.
+   * Rebind and restabilize copy an already applied item, so they do not start a new card repair.
    */
-  private async saveSettingsOrFreeText(inv: Invocation, request: Parameters<WritingService['saveSettingsCandidate']>[1]): Promise<SettingsCandidateView> {
-    const gate = promptVersionOf(inv.run) >= 15 && this.options.characterSheet !== false
-      ? { characterSheet: { promptVersion: promptVersionOf(inv.run), maxCharacters: this.options.maxCharacters ?? DEFAULT_MAX_CHARACTERS, characterSheet: true as const, enforce: true as const } }
-      : {}
-    try {
-      return await this.service.saveSettingsCandidate(inv.actor, { ...request, ...gate })
-    } catch (cause) {
-      if (!(cause instanceof CharacterSheetRejection)) throw cause
-      return await this.service.saveSettingsCandidate(inv.actor, request)
+  private async saveSettingsDocument(inv: Invocation, request: Parameters<WritingService['saveSettingsCandidate']>[1]): Promise<SettingsCandidateView> {
+    return this.service.saveSettingsCandidate(inv.actor, { ...request, ...this.characterSheetGate(inv) })
+  }
+
+  /**
+   * Admit one generated settings item. A malformed e5/e6 card is patched inside maxRepairAttempts.
+   * Each repair replaces contentMarkdown on the item already written. It does not regenerate the settings batch.
+   * When the budget is exhausted the stage fails with the existing review-blocked error. The broken card is not stored.
+   */
+  private async admitGeneratedSettings(inv: Invocation, stageKey: string, refs: readonly ArtifactRef[], request: Parameters<WritingService['saveSettingsCandidate']>[1]): Promise<SettingsCandidateView> {
+    const gate = this.characterSheetGate(inv)
+    let current = request.output
+    let childSessionId = request.childSessionId
+    let rejection: string | null = null
+    const cap = inv.run.executionLimits.maxRepairAttempts
+    for (let repair = 0; repair <= cap; repair++) {
+      if (rejection !== null) {
+        const captured = await this.characterSheetPatchStage(inv, `${stageKey}/card/${repair}`, refs, current, rejection)
+        const schemaError = characterSheetPatchError(captured.structured)
+        if (schemaError !== null) {
+          rejection = schemaError
+          continue
+        }
+        try {
+          current = applyCharacterSheetPatch(current, captured.structured)
+          childSessionId = captured.childSessionId
+        } catch (cause) {
+          if (!isOutputError(cause)) throw cause
+          rejection = cause.message
+          continue
+        }
+      }
+      try {
+        return await this.service.saveSettingsCandidate(inv.actor, { ...request, output: current, childSessionId, ...gate })
+      } catch (cause) {
+        if (!(cause instanceof CharacterSheetRejection)) throw cause
+        rejection = cause.message
+      }
     }
+    throw new WritingError('review-blocked', `Settings repair limit was exhausted for ${request.dimensionCode}: ${rejection}`)
+  }
+
+  /** Ask for a patch of the rejected e5/e6 text. A schema miss is returned to the caller instead of repeating this key. */
+  private async characterSheetPatchStage(inv: Invocation, key: string, refs: readonly ArtifactRef[], prior: unknown, validationError: string): Promise<CapturedStage> {
+    const admitted = StageOutputSchemas.settings.parse(prior)
+    const prompt = this.runs.storedPrompt(inv.actor, inv.run.id, key) ?? buildCharacterSheetRepairPrompt({
+      novelId: inv.run.novelId, prior: admitted, inputRefs: refs.map(inputRef), task: { dimensionCode: admitted.dimensionCode, validationError },
+      inputs: refs.map(ref => ({ artifactId: ref.id, sha256: ref.sha256, kind: ref.kind, chars: ref.chars })),
+    })
+    return this.capture(inv, key, prompt, refs, CHARACTER_SHEET_PATCH_OUTPUT_SCHEMA, [], undefined, 'stored', undefined, stageWritingRole('settings'), true, 0)
   }
 
   /** Copy the chapter outline's hook onto continuity. A missing outline hook leaves the field off. */
@@ -1790,8 +1841,9 @@ export class WritingRunner {
   }
 
   /**
-   * Viewpoint and misread defects are advisory. Unknown cast names fail the outline only when strictCast is on.
-   * @returns The strictCast repair sentence, or null when the outline round should continue.
+   * A viewpoint outside the cast, or a misread outside the closed list, fails this outline round.
+   * Unknown names fail only when strictCast is on. The same frame on every scene is recorded and does not fail the round.
+   * @returns The repair sentence, or null when the outline round should continue.
    */
   private strictCastInstruction(inv: Invocation, structured: unknown): string | null {
     if (promptVersionOf(inv.run) < 15 || this.options.sceneCast === false) return null
@@ -1800,8 +1852,12 @@ export class WritingRunner {
     try { assertSceneCastFields(outline.data.scenes) }
     catch (cause) {
       if (!(cause instanceof StageValidationRejection)) throw cause
+      return cause.message
+    }
+    const sameFrame = uniformMisreadNote(outline.data.scenes)
+    if (sameFrame !== null) {
       const key = `${inv.run.novelId}:${outline.data.chapterNumber}`
-      this.castAdvisories.set(key, [...(this.castAdvisories.get(key) ?? []), `Advisory cast: ${cause.message} The outline is kept.`])
+      this.castAdvisories.set(key, [...(this.castAdvisories.get(key) ?? []), sameFrame])
     }
     if (this.options.strictCast !== true) return null
     const known = this.characterNames(inv)

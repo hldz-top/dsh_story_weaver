@@ -1,7 +1,7 @@
 /** Structured character cards parsed from e5/e6 Markdown. Pure: no I/O, no model calls. */
 import { StageValidationRejection } from './stage-rejection.ts'
 
-/** Prompt version that first requires the e5/e6 double table. Older versions do not parse or mention it. A parse failure falls back to free text and does not fail the settings stage. */
+/** Prompt version that first requires the e5/e6 double table. Older versions do not parse or mention it. A parse failure is a repairable rejection of that card. */
 export const CHARACTER_SHEET_PROMPT_VERSION = 15
 /** Default cap on characters in one e5 or e6 dimension. */
 export const DEFAULT_MAX_CHARACTERS = 12
@@ -51,7 +51,7 @@ export interface ParseCharacterSheetOptions {
 
 /**
  * A character-card defect the model can repair. The message names the character and the field and says what is expected.
- * The writing runner keeps the prose as free text and does not fail the settings stage.
+ * The writing runner patches the rejected text inside the settings repair budget. It does not store the broken card as free text.
  */
 export class CharacterSheetRejection extends StageValidationRejection {
   /** @param message - The specific cell or table the next attempt must fix. */

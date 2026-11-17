@@ -21,6 +21,7 @@ import { registerWritingTools } from '../../src/tools.ts'
 import { registerResearchTools } from '../../src/research-tools.ts'
 import { researchNecessitySchema } from '../../src/research-planning.ts'
 import { BODY_PATCH_REQUIREMENT } from '../../src/body-repair.ts'
+import { CHARACTER_SHEET_PATCH_REQUIREMENT } from '../../src/character-sheet-repair.ts'
 import { OUTLINE_PATCH_REQUIREMENT } from '../../src/outline-repair.ts'
 import { StageOutputSchemas } from '../../src/stage-output.ts'
 import { settingsCollectionSchema } from '../../src/manuscript-records.ts'
@@ -94,8 +95,12 @@ export interface WritingFixtureOptions {
   readonly registerWebTools?: boolean
   /** Plugin flag for settings snapshot reuse. Default true. */
   readonly reuseSettingsSnapshot?: boolean
-  /** Passed to the runner. Omitted keeps the default, which asks for a complete body when a body patch does not apply. */
+  /** Passed to the runner. Omitted keeps the runner default. */
   readonly bodyPatchFallback?: boolean
+  /** Passed to the runner. Omitted keeps character cards on for prompt version 15. */
+  readonly characterSheet?: boolean
+  /** Passed to the runner. Omitted keeps scene cast on for prompt version 15. */
+  readonly sceneCast?: boolean
   /** Run-store raw output cap. Default 262144. */
   readonly maxOutputBytes?: number
   /** Creative brief stored on the fixture novel. Default is the fog-harbor premise, which states no numbered required events. */
@@ -229,6 +234,11 @@ function generate(state: ChildState): object {
   const revision = task.revisionInstructions === undefined ? '' : `修订要求：${task.revisionInstructions}`
   switch (state.data.kind) {
     case 'settings': {
+      if (state.data.requirements.includes(CHARACTER_SHEET_PATCH_REQUIREMENT)) {
+        const core = '| 角色 | 身份 | 欲望 | 恐惧 | 缺陷 | 误读框架 | 反差 | 出场章 |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| 林澜 | 守灯人 | 查明航标 | 船队失散 | 独自追查 | 技艺 | 话少但会留下灯 | 1 |'
+        const voice = '| 角色 | 句式 | 专属词 | 称呼主角 | 自称 | 身体签 | 禁语 |\n| --- | --- | --- | --- | --- | --- | --- |\n| 林澜 | 短句，4-12 字 | 航标、雾、灯 | 我 | 我 | 按灯 | 当众示弱 |'
+        return { version: 1, changes: [{ op: 'set', path: 'contentMarkdown', value: `${core}\n\n${voice}` }] }
+      }
       if (task.batch === 'consistency') return { issues: [] }
       if (task.batch === 'draft' || task.batch === 'repair') {
         const codes = required(task.codes, 'codes')
@@ -419,6 +429,8 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
     allowIncompleteSettings: options.allowIncompleteSettings ?? true,
     ...(options.reuseSettingsSnapshot === undefined ? {} : { reuseSettingsSnapshot: options.reuseSettingsSnapshot }),
     ...(options.bodyPatchFallback === undefined ? {} : { bodyPatchFallback: options.bodyPatchFallback }),
+    ...(options.characterSheet === undefined ? {} : { characterSheet: options.characterSheet }),
+    ...(options.sceneCast === undefined ? {} : { sceneCast: options.sceneCast }),
   })
   fixture.ctx.effect(() => () => runner.close())
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })
