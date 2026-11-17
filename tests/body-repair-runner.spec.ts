@@ -419,8 +419,18 @@ it('keeps a version-14 schema-rejection retry prompt byte-identical to 334136f8'
   expect(stored).toBe(parent)
 }, 180_000)
 
+function haveCommit(sha: string): boolean {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 function parentBodyRepairPrompt(request: unknown): string {
   const parent = '334136f8abe08dc2037d385606de47d6025a809a'
+  if (!haveCommit(parent)) execFileSync('git', ['fetch', '--depth=1', 'origin', parent], { stdio: 'pipe' })
   const dir = mkdtempSync(join(tmpdir(), 'body-patch-replay-'))
   const out = join(dir, 'prompt.txt')
   const spec = `import { readFileSync, writeFileSync } from 'node:fs'
