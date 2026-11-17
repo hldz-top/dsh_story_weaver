@@ -64,7 +64,7 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   hookRotation: boolean
   /**
    * Version 15 chapter-1 opening check. Default true. Not stored on the run.
-   * A miss is written into the existing body repair instruction.
+   * A miss starts or joins one bounded body patch. If it remains, the chapter is kept and the miss is an advisory reminder.
    */
   openingIn50: boolean
   /**

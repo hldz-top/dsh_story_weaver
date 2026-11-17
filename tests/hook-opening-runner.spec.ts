@@ -1,4 +1,4 @@
-/** A repeated hookType repairs inside the outline budget. An opening miss repairs inside the body budget and adds no signature. */
+/** A repeated hookType repairs inside the outline budget. An opening miss repairs inside the body budget, and a miss that remains is an advisory. */
 import { expect, it } from 'vitest'
 import { useWritingFixture, type WritingFixtureStage } from './support/writing-fixture.ts'
 
@@ -73,4 +73,39 @@ it('writes a chapter-1 opening miss into the body repair and does not sign it', 
   expect(bodies.every(item => item.failureSignature === undefined)).toBe(true)
   const repair = fixture.runs.storedPrompt(fixture.actor, run.id, 'body/1/candidate/1') ?? ''
   expect(repair).toContain('openingIn50')
+}, 180_000)
+
+it('completes chapter 1 when the opening miss persists, with an advisory and no signature', async () => {
+  const scenery = '阳光明媚，海风很轻，水面平静，远山含黛。'.repeat(4)
+  const spoil = (text: string) => `${scenery}\n\n${text.split('\n\n').slice(1).join('\n\n') || text}`
+  const fixture = await useWritingFixture({
+    executionLimits: { researchEnabled: false, maxRepairAttempts: 1 },
+    intervene(stage: WritingFixtureStage, output: object) {
+      if (stage.kind !== 'body' || stage.task?.chapterNumber !== 1) return output
+      if ('changes' in output && Array.isArray(output.changes)) {
+        return {
+          ...output,
+          changes: output.changes.map(change => {
+            if (typeof change !== 'object' || change === null || !('value' in change) || typeof change.value !== 'string') return change
+            return { ...change, value: spoil(change.value) }
+          }),
+        }
+      }
+      const body = output as { scenes?: { text: string }[] }
+      if (body.scenes === undefined) return output
+      return { ...body, scenes: body.scenes.map((scene, index) => index === 0 ? { ...scene, text: spoil(scene.text) } : scene) }
+    },
+  })
+  const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))
+  if (outcome.status === 'rejected') throw outcome.reason
+  const run = outcome.value
+  expect(run.status).toBe('completed')
+  expect(run.error).toBeNull()
+  const bodies = run.attempts.filter(item => item.key.startsWith('body/1/candidate/') && !item.key.includes('/review') && !item.key.includes('/schema') && !item.key.includes('/full'))
+  expect(bodies.length).toBeGreaterThan(1)
+  expect(bodies.every(item => item.failureSignature === undefined)).toBe(true)
+  expect(run.attempts.some(item => item.failureSignature !== undefined)).toBe(false)
+  const continuity = fixture.runs.storedPrompt(fixture.actor, run.id, 'continuity/1/candidate/0') ?? ''
+  expect(continuity).toContain('Advisory openingIn50')
+  expect(continuity).toContain('accepted chapter is kept')
 }, 180_000)

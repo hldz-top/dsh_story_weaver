@@ -72,7 +72,9 @@ export interface WritingRunnerOptions {
   readonly hookRotation?: boolean
   /**
    * Version 15 chapter-1 opening check. Default true. Not stored on the run.
-   * A miss is written into the existing body repair instruction. It does not add a failure signature.
+   * A miss is written into a body patch that is already running, or starts one bounded patch.
+   * If it remains when that budget is used, the accepted chapter is kept and the miss is an advisory reminder.
+   * It does not fail the chapter and it does not add a failure signature.
    */
   readonly openingIn50?: boolean
   /**
@@ -262,6 +264,8 @@ export class WritingRunner {
   private readonly plantAdvisories = new Map<string, string[]>()
   /** Advisory cast notes for a chapter body. They do not fail the outline. */
   private readonly castAdvisories = new Map<string, string[]>()
+  /** Chapter-1 opening reminder kept after the body budget. It does not fail the chapter. */
+  private readonly openingAdvisories = new Map<string, string>()
   /** @param ctx - Existing DSH capabilities. @param service - Version owner. @param runs - Durable run owner. @param limits - Explicit deployment limits copied into new runs. @param deliveries - Awaited native document publisher. */
   constructor(private readonly ctx: Context, private readonly service: WritingService, readonly runs: RunStore, readonly limits: RunExecutionLimits, private readonly deliveries: StageDeliveries, private readonly options: WritingRunnerOptions = {}) {}
 
@@ -1222,11 +1226,12 @@ export class WritingRunner {
     let pendingDefectNote: string | null = null
     const plantHints = target.kind === 'chapter-outline' ? this.plantHintLines(inv, context.inputRefs, target.chapterNumber) : []
     const castFields = target.kind === 'body' ? this.bodyCastTask(inv, target.chapterNumber) : {}
+    const openingAdvisory = target.kind === 'continuity' ? this.openingAdvisories.get(`${inv.run.novelId}:${target.chapterNumber}`) : undefined
     for (let repair = 0; repair <= repairCap; repair++) {
       const stageKey = `${key}/candidate/${repair}`
       const sameDefectNote = promptVersionOf(inv.run) >= 14 && target.kind === 'body' ? pendingDefectNote ?? undefined : undefined
       aiToneSpans = []
-      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError, ...(plantHints.length > 0 ? { plantHints } : {}), ...castFields }
+      const stageTask = { ...target, sceneIds: context.sceneIds, obligations: context.obligations, requiredChecks: context.requiredChecks, revisionInstructions: revision?.instructions, validationError, ...(plantHints.length > 0 ? { plantHints } : {}), ...castFields, ...(openingAdvisory === undefined ? {} : { openingAdvisory }) }
       const outlineKind: OutlineRepairKind | null = target.kind === 'book-outline' || target.kind === 'chapter-outline' ? target.kind : null
       const outlinePatching = outlineKind !== null && outlineRepairUsesPatch(promptVersionOf(inv.run), outlineKind, priorOutline !== null)
       const bodyPatching = target.kind === 'body' && bodyRepairUsesPatch(promptVersionOf(inv.run), target.kind, priorBody !== null)
@@ -1311,7 +1316,7 @@ export class WritingRunner {
       const hookInstruction = target.kind === 'chapter-outline' ? this.repeatedHook(inv, structured, target.chapterNumber) : null
       const openingInstruction = target.kind === 'body' ? this.openingInstruction(inv, structured) : null
       const castStrict = target.kind === 'chapter-outline' ? this.strictCastInstruction(inv, structured) : null
-      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && openingInstruction === null && castStrict === null
+      const reviewBlocked = reviewed.status === 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && castStrict === null
       if (promptVersionOf(inv.run) >= 8 && reviewBlocked && reviewed.review !== null) {
         const fails = blockingIssueCount(JSON.parse(this.service.getArtifact(inv.actor, { novelId: inv.run.novelId, artifactId: reviewed.review.id }).text))
         const decision = checklistRepairDecision(heldReview?.fails ?? null, fails, 'does-not-decrease')
@@ -1323,7 +1328,16 @@ export class WritingRunner {
         }
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
-      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && openingInstruction === null && castStrict === null
+      const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && castStrict === null
+      if (clean && !styleRepair && openingInstruction !== null && repair < repairCap) {
+        validationError = openingInstruction
+        repairMode = 'review'
+        feedback = this.feedback(reviewed)
+        continue
+      }
+      if (clean && !styleRepair && openingInstruction !== null && target.kind === 'body') {
+        this.openingAdvisories.set(`${inv.run.novelId}:${target.chapterNumber}`, `Advisory openingIn50: ${openingInstruction} The accepted chapter is kept.`)
+      }
       if (clean && !styleRepair) return { candidate: reviewed, convergence: null }
       if (promptVersionOf(inv.run) >= 14 && target.kind === 'body') {
         // Poison, style, and blocking AI-tone rounds are not a signed-off defect. They do not record a signature,
@@ -1355,10 +1369,11 @@ export class WritingRunner {
       if (aiToneSpans.length > 0) { validationError = note(withRequiredEvents(`${reviewed.status === 'blocked' ? 'Resolve the blocking issues in the exact supplied review. ' : ''}${aiToneRepairInstruction(aiToneSpans)}`, eventInstruction)); repairMode = 'review' }
       else if (incomplete) { validationError = note(withRequiredEvents(`Every required event for this chapter must be fulfilled by the actual reviewed prose: not fulfilled ${unfulfilled.map(item => `${item.id} (${item.status})`).join(', ')}.`, eventInstruction)); repairMode = 'review' }
       else if (reviewed.length?.blocking) { validationError = note(withRequiredEvents(lengthRepairError(reviewed.wordCount, reviewed.length.status, StageOutputSchemas.body.parse(structured), inv.run.executionLimits, promptVersionOf(inv.run)), eventInstruction)); repairMode = 'length' }
-      else if ((eventInstruction !== null || hookInstruction !== null || openingInstruction !== null || castStrict !== null) && reviewed.status !== 'blocked') { validationError = note(eventInstruction ?? ''); repairMode = 'review' }
+      else if ((eventInstruction !== null || hookInstruction !== null || castStrict !== null) && reviewed.status !== 'blocked') { validationError = note(eventInstruction ?? ''); repairMode = 'review' }
       else if (clean && styleRepair && poison !== null) {
         if (promptVersionOf(inv.run) >= 13) cleanPoisonBody = reviewed
-        validationError = appendCharacterMetricWarnings(aiTonePoisonRepairInstruction(poison.spans), characterMetrics)
+        const poisonText = openingInstruction === null ? aiTonePoisonRepairInstruction(poison.spans) : `${openingInstruction} ${aiTonePoisonRepairInstruction(poison.spans)}`
+        validationError = appendCharacterMetricWarnings(poisonText, characterMetrics)
         repairMode = 'review'
       }
       else { validationError = note(withRequiredEvents('Resolve the blocking issues in the exact supplied review.', eventInstruction)); repairMode = 'review' }
@@ -1907,7 +1922,7 @@ export class WritingRunner {
     return { ...castTaskFields(injection), ...(advisory.length === 0 ? {} : { castAdvisory: advisory }) }
   }
 
-  /** Chapter 1 opening miss. Other chapters, and a closed switch, are not a repair. */
+  /** Chapter 1 opening miss. Other chapters, and a closed switch, are not a repair. A miss does not fail the chapter. */
   private openingInstruction(inv: Invocation, structured: unknown): string | null {
     if (promptVersionOf(inv.run) < 15 || this.options.openingIn50 === false) return null
     const body = StageOutputSchemas.body.safeParse(structured)
