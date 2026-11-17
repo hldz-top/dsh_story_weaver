@@ -101,6 +101,8 @@ export interface WritingFixtureOptions {
   readonly characterSheet?: boolean
   /** Passed to the runner. Omitted keeps scene cast on for prompt version 15. */
   readonly sceneCast?: boolean
+  /** Passed to the runner. Omitted keeps the chapter-1 opening check on. */
+  readonly openingIn50?: boolean
   /** Run-store raw output cap. Default 262144. */
   readonly maxOutputBytes?: number
   /** Creative brief stored on the fixture novel. Default is the fog-harbor premise, which states no numbered required events. */
@@ -431,6 +433,7 @@ export async function useWritingFixture(options: WritingFixtureOptions = {}) {
     ...(options.bodyPatchFallback === undefined ? {} : { bodyPatchFallback: options.bodyPatchFallback }),
     ...(options.characterSheet === undefined ? {} : { characterSheet: options.characterSheet }),
     ...(options.sceneCast === undefined ? {} : { sceneCast: options.sceneCast }),
+    ...(options.openingIn50 === undefined ? {} : { openingIn50: options.openingIn50 }),
   })
   fixture.ctx.effect(() => () => runner.close())
   const workspace = await fixture.ctx.fs.resolve('.', { cwd: fixture.root })

@@ -3,9 +3,9 @@
  *
  * The first 50 Story-counted words must show a person, an event, and a conflict. The window is
  * {@link prefixByStoryWords}, the same language-side counter as the chapter length. A later mention
- * does not pass. A miss is written into a body patch. If it remains after that budget, the
- * accepted chapter is kept and the miss is an advisory reminder. It does not fail the chapter
- * and it does not add a failure signature.
+ * does not pass. A miss on an otherwise clean chapter is an advisory reminder. It does not
+ * start a repair round, fail the chapter, or add a failure signature. When a repair is already
+ * running for another reason, the miss is merged into that repair text.
  */
 import { prefixByStoryWords } from './body-text.ts'
 

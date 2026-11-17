@@ -123,7 +123,7 @@ it('rejects an illegal misread and keeps an unknown cast name', async () => {
       if ('changes' in output) return { version: 1, changes: [{ op: 'set', path: 'scenes[0].misread', value: '利益' }] }
       chapter += 1
       if (stage.task?.chapterNumber !== 1) return output
-      return withCast(output, { cast: ['路人'], pov: '路人', misread: chapter === 1 ? '命运' : '利益' })
+      return withCast(output, { cast: ['路人'], pov: '路人', misread: chapter === 1 ? '其它:看错人' : '利益' })
     },
   })
   const outcome = await fixture.run(exec => fixture.runner.start(exec, { ...fixture.input, chapterCount: 1, throughChapter: 1 }))

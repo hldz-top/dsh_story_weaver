@@ -189,7 +189,7 @@ const sceneCard = z.array(z.strictObject({ id: text, purpose: text, action: text
 const sceneCastShape = {
   cast: z.array(text).nonempty().optional().describe('Names present in this scene.'),
   pov: text.optional().describe('Viewpoint character. One name from cast.'),
-  misread: z.string().optional().describe('Dominant frame. Must be one of 利益, 礼法, 逻辑, 技艺, 生计, or 其它, or 其它: followed by 1 to 10 characters. Any other value is rejected and repaired.'),
+  misread: z.string().optional().describe('Dominant frame. Must be exactly one of 利益, 礼法, 逻辑, 技艺, 生计, or 其它. Any other value, including 其它: followed by a note, is rejected and repaired.'),
 }
 const sceneCardCast = z.array(z.strictObject({ id: text, purpose: text, action: text, obligationIds: z.array(text), ...sceneCastShape })).nonempty()
 /** Optional free-text state list (prompt version 2). No enums, so a loose note never costs a repair attempt. */

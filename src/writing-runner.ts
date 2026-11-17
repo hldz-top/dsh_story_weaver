@@ -72,9 +72,9 @@ export interface WritingRunnerOptions {
   readonly hookRotation?: boolean
   /**
    * Version 15 chapter-1 opening check. Default true. Not stored on the run.
-   * A miss is written into a body patch that is already running, or starts one bounded patch.
-   * If it remains when that budget is used, the accepted chapter is kept and the miss is an advisory reminder.
-   * It does not fail the chapter and it does not add a failure signature.
+   * A miss on an otherwise clean chapter is an advisory reminder. It does not start a repair round,
+   * does not fail the chapter, and does not enter a failure signature.
+   * When a repair is already running for another reason, the miss is merged into that repair text.
    */
   readonly openingIn50?: boolean
   /**
@@ -1329,12 +1329,6 @@ export class WritingRunner {
         if (decision === 'continue') heldReview = { candidate: reviewed, fails }
       }
       const clean = reviewed.status !== 'blocked' && reviewed.review !== null && reviewed.length?.blocking !== true && !incomplete && aiToneSpans.length === 0 && eventInstruction === null && hookInstruction === null && castStrict === null
-      if (clean && !styleRepair && openingInstruction !== null && repair < repairCap) {
-        validationError = openingInstruction
-        repairMode = 'review'
-        feedback = this.feedback(reviewed)
-        continue
-      }
       if (clean && !styleRepair && openingInstruction !== null && target.kind === 'body') {
         this.openingAdvisories.set(`${inv.run.novelId}:${target.chapterNumber}`, `Advisory openingIn50: ${openingInstruction} The accepted chapter is kept.`)
       }
@@ -1635,22 +1629,25 @@ export class WritingRunner {
     if (savedFull !== null) return { kind: 'ready', result: savedFull, structured: savedFull.structured }
     const first = await this.readAppliedBodyPatch(inv, stageKey, refs, prior, task, feedback, sameDefectNote)
     if (first.kind === 'ready') return first
-    const second = await this.readAppliedBodyPatch(inv, `${stageKey}/schema`, refs, prior, { ...task, validationError: bodyPatchRetryFeedback(task.validationError, first.message) }, feedback, sameDefectNote)
+    const validationError = first.schema
+      ? bodyPatchSchemaFeedback(task.validationError, first.message)
+      : bodyPatchApplyFeedback(task.validationError, first.message)
+    const second = await this.readAppliedBodyPatch(inv, `${stageKey}/schema`, refs, prior, { ...task, validationError }, feedback, sameDefectNote)
     if (second.kind === 'ready') return second
     return this.bodyPatchFallbackRound(inv, stageKey, refs, task, feedback, repairMode, second.message, sameDefectNote)
   }
 
   /** Read one patch and apply it. A schema miss and an apply miss are both rejections. Any other capture failure propagates. */
-  private async readAppliedBodyPatch(inv: Invocation, key: string, refs: readonly ArtifactRef[], prior: unknown, task: object, feedback: readonly ArtifactRef[], sameDefectNote?: string): Promise<{ kind: 'ready'; result: CapturedStage; structured: unknown } | { kind: 'reject'; message: string }> {
+  private async readAppliedBodyPatch(inv: Invocation, key: string, refs: readonly ArtifactRef[], prior: unknown, task: object, feedback: readonly ArtifactRef[], sameDefectNote?: string): Promise<{ kind: 'ready'; result: CapturedStage; structured: unknown } | { kind: 'reject'; message: string; schema: boolean }> {
     const read = await this.readBodyPatch(inv, key, refs, prior, task, feedback, sameDefectNote)
     if (read.schemaError !== null || read.captured === null) {
-      return { kind: 'reject', message: read.schemaError ?? 'The body patch was rejected because it did not match the patch schema.' }
+      return { kind: 'reject', schema: true, message: read.schemaError ?? 'The body patch was rejected because it did not match the patch schema.' }
     }
     try {
       return { kind: 'ready', result: read.captured, structured: applyBodyPatch(prior, read.captured.structured) }
     } catch (cause) {
       if (!isOutputError(cause)) throw cause
-      return { kind: 'reject', message: cause.message }
+      return { kind: 'reject', schema: false, message: cause.message }
     }
   }
 
@@ -2249,7 +2246,13 @@ function isOutputError(cause: unknown): cause is StageValidationRejection { retu
 function isBodyPatchSchemaRejection(cause: unknown): cause is StageExecutionError {
   return cause instanceof StageExecutionError && (cause.code === 'stage-malformed' || cause.code === 'stage-missing-result')
 }
-function bodyPatchRetryFeedback(previous: string | null | undefined, rejection: string): string {
+/** Schema-rejection retry text. Versions 10–14 keep this sentence byte for byte. */
+function bodyPatchSchemaFeedback(previous: string | null | undefined, rejection: string): string {
+  const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''
+  return `${lead}The body patch was rejected because it did not match the patch schema: ${rejection} Return a body patch of only the changed fields or paragraphs.`
+}
+/** Apply-failure retry text. A schema rejection does not use this sentence. */
+function bodyPatchApplyFeedback(previous: string | null | undefined, rejection: string): string {
   const lead = typeof previous === 'string' && previous.length > 0 ? `${previous} ` : ''
   return `${lead}The body patch was rejected: ${rejection} Return a body patch of only the changed fields or paragraphs.`
 }

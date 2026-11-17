@@ -64,7 +64,7 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   hookRotation: boolean
   /**
    * Version 15 chapter-1 opening check. Default true. Not stored on the run.
-   * A miss starts or joins one bounded body patch. If it remains, the chapter is kept and the miss is an advisory reminder.
+   * A miss on an otherwise clean chapter is an advisory reminder. It does not start a repair or fail the chapter.
    */
   openingIn50: boolean
   /**
@@ -78,7 +78,7 @@ export interface Config extends ResearchLimits, Omit<RunExecutionLimits, 'writin
   /**
    * Version 15 scene cast fields. Default true. Not stored on the run and not a field of story_writing.json.
    * False omits cast, pov and misread from the chapter-outline schema and prompt.
-   * A viewpoint outside the cast, or a misread outside 利益, 礼法, 逻辑, 技艺, 生计, 其它, and 其它: plus a short note, fails the outline round.
+   * A viewpoint outside the cast, or a misread outside 利益, 礼法, 逻辑, 技艺, 生计, and 其它, fails the outline round.
    * Unknown cast names are counted and do not fail the outline unless strictCast is on. The same frame on every scene is advisory.
    */
   sceneCast: boolean

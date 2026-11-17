@@ -12,7 +12,7 @@ export const MAX_CAST_TELL_HAN = 120
 export const CAST_KEEP_BY_APPEARANCE = 4
 /** Appended to the body task when cards were dropped to stay inside the budget. */
 export const CAST_CARDS_OMITTED = '（其余角色卡已省略）'
-/** Closed misread frame of one scene. `其它` has no free-text note here; the character card may still carry `其它:<note>`. */
+/** Closed misread frame of one scene. A note after `其它:` is not a scene frame. */
 export const SCENE_MISREAD_FRAMES = ['利益', '礼法', '逻辑', '技艺', '生计', '其它'] as const
 
 /** One scene's optional cast fields. Older outlines omit all three. */
@@ -46,8 +46,8 @@ export function countHan(text: string): number {
 }
 
 /**
- * Reject a scene whose viewpoint is outside its cast, or whose misread is outside the closed frame list.
- * `其它` and `其它:` plus 1 to 10 characters are allowed. Unknown cast names are not decided here.
+ * Reject a scene whose viewpoint is outside its cast, or whose misread is outside the six closed frames.
+ * Unknown cast names are not decided here.
  * The same frame on every scene is not a rejection; {@link uniformMisreadNote} records that as an advisory.
  * @param scenes - Admitted chapter-outline scenes.
  */
@@ -78,11 +78,7 @@ export function uniformMisreadNote(scenes: readonly SceneCastScene[]): string | 
 
 function sceneMisreadMessage(sceneId: string, value: string): string | null {
   if ((SCENE_MISREAD_FRAMES as readonly string[]).includes(value)) return null
-  if (value.startsWith('其它:')) {
-    const note = value.slice('其它:'.length)
-    if (note.trim().length > 0 && [...note].length <= 10) return null
-  }
-  return `Scene ${echo(sceneId)} field misread is ${echo(value)}; expected one of ${SCENE_MISREAD_FRAMES.join(', ')}, or 其它: followed by 1 to 10 characters.`
+  return `Scene ${echo(sceneId)} field misread is ${echo(value)}; expected one of ${SCENE_MISREAD_FRAMES.join(', ')}.`
 }
 
 /**
@@ -162,9 +158,7 @@ interface RankedCard {
 }
 
 function sceneFrame(value: string): SceneMisread | undefined {
-  if ((SCENE_MISREAD_FRAMES as readonly string[]).includes(value)) return value as SceneMisread
-  if (value.startsWith('其它:') && sceneMisreadMessage('scene', value) === null) return '其它'
-  return undefined
+  return (SCENE_MISREAD_FRAMES as readonly string[]).includes(value) ? value as SceneMisread : undefined
 }
 
 /**

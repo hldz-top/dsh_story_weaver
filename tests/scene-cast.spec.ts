@@ -22,7 +22,7 @@ it('rejects a viewpoint outside the cast and an illegal misread, and keeps unkno
   expect(() => assertSceneCastFields([{ id: 's1', cast: ['云望舒'], pov: '云望舒', misread: '命运' }])).toThrow(/s1[\s\S]*misread/)
   expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '利益' }])).not.toThrow()
   expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '其它' }])).not.toThrow()
-  expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '其它:看错人' }])).not.toThrow()
+  expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '其它:看错人' }])).toThrow(/misread/)
   expect(() => assertSceneCastFields([{ id: 's1', cast: ['路人'], pov: '路人', misread: '其它:' }])).toThrow(/misread/)
   expect(uniformMisreadNote([{ id: 's1', misread: '利益' }, { id: 's2', misread: '利益' }])).toMatch(/Advisory cast/)
   expect(uniformMisreadNote([{ id: 's1', misread: '利益' }, { id: 's2', misread: '礼法' }])).toBeNull()
