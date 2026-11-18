@@ -8,6 +8,7 @@ import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { researchSelectedConclusions, type ResearchSelection, type ResearchSelectedFinding, type SelectedResearchObservation } from './research-selection.ts'
 import type { Actor, Artifact, ArtifactId, ArtifactKind, ArtifactRef, ArtifactRequest, ArtifactSlice, CreateNovelRequest, NovelId, NovelView, ReadArtifactRequest, RequestId, ResearchCall, ResearchLimits, ResearchObservation, ResearchRequest, ResearchView, SaveBriefRequest, StartResearchRequest, WritingLimits } from './contracts.ts'
 import { WritingError } from './contracts.ts'
+import { allocateSpecIdentity, isContentDigest, isSpecId, snapshotMatchesSpec, type SpecIdentityEntry } from './spec-identity.ts'
 import { checkModelArtifactBytes } from './stage-rejection.ts'
 import { writingDomain, type NovelRecord, type ResearchRecord, type SettingsRecord } from './records.ts'
 import { parseSelectedFindings, researchEvidenceContentSchema, researchPlanContentSchema, researchQuestions } from './research.ts'
@@ -110,6 +111,7 @@ export class WritingService {
     const record: NovelRecord = {
       id, workspace: actor.workspace, title: request.title, briefHistory: [reference(artifact)],
       createRequest: { requestId: request.requestId, hash }, briefRequests: [], recordVersion: 5, researchHistory: [], settingsHistory: [], settingsHeads: [], manuscriptHistory: [], manuscriptHeads: [], appliedChapters: [],
+      specIdentities: allocateSpecIdentity([], artifact.sha256).entries.map(entry => ({ digest: entry.digest, id: entry.id })),
     }
     await this.domain.table('novels').put(id, record)
     return view(record)
@@ -153,14 +155,18 @@ export class WritingService {
     actor.signal?.throwIfAborted()
     const record = await this.domain.table('novels').update(request.novelId, current => {
       actor.signal?.throwIfAborted()
-      if (this.briefRequest(current, request, hash) !== undefined) return current
+      const remembered = (record: NovelRecord): NovelRecord => {
+        const specIdentities = allocateSpecIdentity(record.specIdentities ?? [], artifact.sha256).entries.map(entry => ({ digest: entry.digest, id: entry.id }))
+        return specIdentities.length === (record.specIdentities ?? []).length ? record : { ...record, specIdentities }
+      }
+      if (this.briefRequest(current, request, hash) !== undefined) return remembered(current)
       if (view(current).revision !== request.expectedRevision) {
         throw new WritingError('revision-conflict', 'Creative brief was changed by another request')
       }
-      return {
+      return remembered({
         ...current, briefHistory: [...current.briefHistory, reference(artifact)],
         briefRequests: [...current.briefRequests, { requestId: request.requestId, hash, revision: artifact.revision }],
-      }
+      })
     })
     const savedRevision = this.briefRequest(record, request, hash)
     if (savedRevision === undefined) throw new WritingError('corrupt-artifact', 'Saved request receipt is missing')
@@ -830,20 +836,32 @@ export class WritingService {
   }
 
   /**
-   * Remember a passed settings collection for a later run with the same brief text and roots.
-   * @param actor - Owning workspace. @param novelId - Novel that holds the collection. @param snapshot - Content hash, requested roots, and the applied collection.
+   * Remember a passed settings collection for a later run with the same brief and roots.
+   * New snapshots store `briefId`, the project specification id. The full brief digest stays in `briefSha256`.
+   * An existing snapshot that already names this collection is left unchanged, including one saved before specification ids.
+   * @param actor - Owning workspace. @param novelId - Novel that holds the collection. @param snapshot - Brief content digest, requested roots, and the applied collection.
    */
   async saveSettingsSnapshot(actor: Actor, novelId: NovelId, snapshot: { readonly briefSha256: string; readonly roots: readonly string[]; readonly artifactId: ArtifactId }): Promise<void> {
     actor.signal?.throwIfAborted()
+    if (!isContentDigest(snapshot.briefSha256)) throw new WritingError('invalid-input', 'Settings snapshot requires the 64-character brief content digest')
     const artifact = this.getArtifact(actor, { novelId, artifactId: snapshot.artifactId })
     if (artifact.kind !== 'settings') throw new WritingError('invalid-input', 'Settings snapshot must name a settings collection')
-    const stored = { briefSha256: snapshot.briefSha256, roots: canonicalSettingsRoots(snapshot.roots), artifactId: snapshot.artifactId }
+    const roots = canonicalSettingsRoots(snapshot.roots)
     await this.domain.table('novels').update(novelId, current => {
       actor.signal?.throwIfAborted()
+      if (current.workspace !== actor.workspace) throw new WritingError('workspace-mismatch', 'Novel belongs to another workspace')
+      const allocated = allocateSpecIdentity(current.specIdentities ?? [], snapshot.briefSha256)
+      const specIdentities = allocated.entries.map(entry => ({ digest: entry.digest, id: entry.id }))
+      const stored = { briefSha256: snapshot.briefSha256, briefId: allocated.id, roots, artifactId: snapshot.artifactId }
       const existing = current.settingsSnapshots ?? []
-      const rest = existing.filter(item => !(item.briefSha256 === stored.briefSha256 && sameSettingsRoots(item.roots, stored.roots)))
-      if (rest.length === existing.length - 1 && existing.some(item => item.briefSha256 === stored.briefSha256 && sameSettingsRoots(item.roots, stored.roots) && item.artifactId === stored.artifactId)) return current
-      return { ...current, settingsSnapshots: [...rest, stored] }
+      const same = (item: (typeof existing)[number]) => sameSettingsRoots(item.roots, roots) && snapshotMatchesSpec(item, snapshot.briefSha256, specIdentities)
+      const match = existing.find(same)
+      const identitiesUnchanged = specIdentities.length === (current.specIdentities ?? []).length
+      if (match !== undefined && match.artifactId === snapshot.artifactId && identitiesUnchanged) return current
+      const settingsSnapshots = match !== undefined && match.artifactId === snapshot.artifactId
+        ? existing
+        : [...existing.filter(item => !same(item)), stored]
+      return { ...current, specIdentities, settingsSnapshots }
     })
   }
 
@@ -858,15 +876,83 @@ export class WritingService {
     return record === undefined ? undefined : this.settingsView(novel, record)
   }
 
-  findSettingsSnapshot(actor: Actor, novelId: NovelId, briefSha256: string, roots: readonly string[]): { readonly briefSha256: string; readonly roots: readonly string[]; readonly artifactId: ArtifactId } | undefined {
+  /**
+   * @param actor - Owning workspace. @param novelId - Novel to read. @param identity - Project specification id, or the legacy 64-character brief digest.
+   * @param roots - Requested roots; order does not matter. @returns The matching snapshot whose collection is still published, if any.
+   */
+  findSettingsSnapshot(actor: Actor, novelId: NovelId, identity: string, roots: readonly string[]): { readonly briefSha256: string; readonly briefId?: string; readonly roots: readonly string[]; readonly artifactId: ArtifactId } | undefined {
+    if (!isSpecId(identity) && !isContentDigest(identity)) throw new WritingError('invalid-input', 'Specification identity must be 8 or 64 lowercase hexadecimal characters')
+    const record = this.record(actor, novelId)
     const wanted = canonicalSettingsRoots(roots)
-    const found = (this.record(actor, novelId).settingsSnapshots ?? []).find(item => item.briefSha256 === briefSha256 && sameSettingsRoots(item.roots, wanted))
+    const entries = record.specIdentities ?? []
+    const found = (record.settingsSnapshots ?? []).find(item => sameSettingsRoots(item.roots, wanted) && snapshotMatchesSpec(item, identity, entries))
     if (found === undefined) return undefined
     try {
       const artifact = this.getArtifact(actor, { novelId, artifactId: found.artifactId })
       if (artifact.kind !== 'settings') return undefined
     } catch { return undefined }
-    return found
+    return {
+      briefSha256: found.briefSha256, roots: found.roots, artifactId: found.artifactId,
+      ...(found.briefId === undefined ? {} : { briefId: found.briefId }),
+    }
+  }
+
+  /**
+   * Allocate project specification ids for these content digests. The same digest in this novel always returns the same id.
+   * A preferred id already owned by a different digest receives the next free id. Digests are not prefixes of one another.
+   * @param actor - Owning workspace. @param novelId - Project that owns the identities. @param digests - Full SHA-256 content digests.
+   * @returns The binding for each distinct digest, in first-seen order.
+   */
+  async allocateSpecIdentities(actor: Actor, novelId: NovelId, digests: readonly string[]): Promise<readonly SpecIdentityEntry[]> {
+    actor.signal?.throwIfAborted()
+    const ordered: string[] = []
+    const seen = new Set<string>()
+    for (const digest of digests) {
+      if (!isContentDigest(digest)) throw new WritingError('invalid-input', 'Specification digest must be 64 lowercase hexadecimal characters')
+      if (seen.has(digest)) continue
+      seen.add(digest)
+      ordered.push(digest)
+    }
+    this.record(actor, novelId)
+    if (ordered.length === 0) return []
+    const record = await this.domain.table('novels').update(novelId, current => {
+      actor.signal?.throwIfAborted()
+      if (current.workspace !== actor.workspace) throw new WritingError('workspace-mismatch', 'Novel belongs to another workspace')
+      let entries = current.specIdentities ?? []
+      for (const digest of ordered) entries = allocateSpecIdentity(entries, digest).entries.map(entry => ({ digest: entry.digest, id: entry.id }))
+      if (entries.length === (current.specIdentities ?? []).length) return current
+      return { ...current, specIdentities: entries }
+    })
+    return ordered.map(digest => {
+      const entry = record.specIdentities?.find(item => item.digest === digest)
+      if (entry === undefined) throw new WritingError('corrupt-artifact', 'Specification identity was not stored')
+      return { digest: entry.digest, id: entry.id }
+    })
+  }
+
+  /**
+   * @param actor - Owning workspace. @param novelId - Project that owns the identities.
+   * @returns Digest-to-id map. Empty when this novel has no specification ids yet.
+   */
+  specIdentityMap(actor: Actor, novelId: NovelId): ReadonlyMap<string, string> {
+    return new Map((this.record(actor, novelId).specIdentities ?? []).map(entry => [entry.digest, entry.id]))
+  }
+
+  /**
+   * Resolve a specification identity. An 8-character id matches only a stored binding.
+   * A 64-character value is the content digest: allocated when this project has bound it, otherwise a legacy digest.
+   * @param actor - Owning workspace. @param novelId - Project that owns the identities. @param identity - Id or digest.
+   * @returns The resolution. `unknown` is an 8-character id this project has not allocated.
+   */
+  resolveSpecIdentity(actor: Actor, novelId: NovelId, identity: string): { readonly kind: 'allocated'; readonly digest: string; readonly id: string } | { readonly kind: 'legacy-digest'; readonly digest: string } | { readonly kind: 'unknown' } {
+    if (!isSpecId(identity) && !isContentDigest(identity)) throw new WritingError('invalid-input', 'Specification identity must be 8 or 64 lowercase hexadecimal characters')
+    const entries = this.record(actor, novelId).specIdentities ?? []
+    if (isSpecId(identity)) {
+      const entry = entries.find(item => item.id === identity)
+      return entry === undefined ? { kind: 'unknown' } : { kind: 'allocated', digest: entry.digest, id: entry.id }
+    }
+    const entry = entries.find(item => item.digest === identity)
+    return entry === undefined ? { kind: 'legacy-digest', digest: identity } : { kind: 'allocated', digest: entry.digest, id: entry.id }
   }
 
   /** @returns Completion after the domain has drained its queued writes. */

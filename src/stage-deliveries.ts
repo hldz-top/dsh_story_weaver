@@ -12,7 +12,7 @@ import { z } from 'zod'
 import { parseArtifactId, type Actor, type Artifact, type ArtifactId, type NovelId } from './contracts.ts'
 import { parseAttemptId, parseRunId, type RunId, type RunStore } from './run-store.ts'
 import type { WritingService } from './service.ts'
-import { projectArtifact, projectDocument } from './projection.ts'
+import { projectDocument, projectPublishedArtifact } from './projection.ts'
 import { parseStoredReview, StageOutputSchemas } from './stage-output.ts'
 import { writingActor } from './tools.ts'
 import { parseStoryStageDeliveries, type StoryStageDeliverySource, type StoryStageDeliveries } from './stage-delivery.ts'
@@ -135,7 +135,7 @@ export class StageDeliveries {
       if (this.runs.get(actor, runId).novelId !== novelId) throw new Error('Artifact novel does not belong to the writing run')
       const novel = this.service.getNovel(actor, novelId)
       const artifact = this.service.getArtifact(actor, { novelId, artifactId })
-      const preview = await projectArtifact(this.ctx, exec, actor, novel, artifact, this.directory)
+      const preview = await projectPublishedArtifact(this.ctx, exec, actor, novel, artifact, this.directory, this.service)
       await this.present(exec, identity, preview.path, artifactDescription(this.service, actor, artifact))
     })
   }

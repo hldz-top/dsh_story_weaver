@@ -519,7 +519,8 @@ it.each(['json', 'sqlite'] as const)('%s decodes retained version-four settings 
   const current = await facility.open(writingDomain)
   const saved = current.table('novels').get(novel.id)
   if (saved === undefined) throw new Error('Missing fixture novel')
-  const legacy = { ...saved, recordVersion: 4,
+  const { specIdentities: _ids, ...retained } = saved
+  const legacy = { ...retained, recordVersion: 4,
     settingsHistory: saved.settingsHistory.map(({ revisionOf: _lineage, ...record }) => record),
     manuscriptHistory: saved.manuscriptHistory.map(({ revisionOf: _lineage, ...record }) => record) }
   await current.close()
