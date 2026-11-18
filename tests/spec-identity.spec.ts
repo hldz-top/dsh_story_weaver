@@ -76,6 +76,8 @@ it('labels an allocated reference as an id and leaves checksum lines unchanged',
   expect(referencedContentDigests(stored)).toEqual([inputDigest])
   const texts = projectionTexts(stored, false, specIds)
   expect(texts.current).toBe(current)
+  expect(texts.current).not.toContain('Input 1 SHA-256')
+  // The older string is only how an unmodified 0.2.1 file is recognized so it can be replaced.
   expect(texts.previous).toContain(legacy)
   const source = 'b'.repeat(64)
   const evidenceText = JSON.stringify({

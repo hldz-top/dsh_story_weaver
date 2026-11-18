@@ -15,6 +15,8 @@ import { expect, it, onTestFinished } from 'vitest'
 import { z } from 'zod'
 import * as Story from '../src/index.ts'
 import { mountPluginRuntime } from './support/plugin-runtime.ts'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import { artifactMarkdown, legacyArtifactMarkdown } from '../src/artifact-markdown.ts'
 import { parseNovelId, parseRequestId, type NovelView } from '../src/contracts.ts'
 import { parseStoryArtifactPreview } from '../src/preview-result.ts'
 import { ScriptedModel, stop } from './support/model.ts'
@@ -78,20 +80,55 @@ it('rebuilds a deleted historical projection from its exact stored version after
     .toBe('第二版：修钟师找到了消失的航线。')
 })
 
-it('rejects an edited projection without overwriting the file or changing its authoritative version', async () => {
+it('keeps an edited projection verbatim and opens a separate current projection', async () => {
   const { ctx, actor, createNovel, preview } = await setup()
   const novel = await createNovel('守塔人找到了失踪日志。')
   const original = successfulPreview(await preview(novel))
   await writeFile(original.path, '修钟师找到了消失航线。', 'utf8')
-  const outcome = await preview(novel)
-  expect(outcome.isError).toBe(true)
-  if (!outcome.isError) throw new Error('An edited projection must not produce preview metadata')
-  expect(outcome.error.message).toContain('Preview differs from the stored artifact')
-  expect(outcome.meta).toBeUndefined()
+  const opened = successfulPreview(await preview(novel))
+  expect(opened.path).not.toBe(original.path)
   expect(await readFile(original.path, 'utf8')).toBe('修钟师找到了消失航线。')
+  expect(await readFile(opened.path, 'utf8')).toBe('守塔人找到了失踪日志。')
+  expect(successfulPreview(await preview(novel)).path).toBe(opened.path)
   expect(ctx.story.getNovel(actor, novel.id)).toEqual(novel)
   expect(ctx.story.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).text)
     .toBe('守塔人找到了失踪日志。')
+})
+
+it('replaces an unmodified 0.2.1 preview with specification ids without changing the artifact', async () => {
+  const { ctx, cwd, actor, preview } = await setup()
+  const novel = await (async () => {
+    const created = await ctx.story.createNovel(actor, { requestId: parseRequestId('spec-preview'), title: '潮汐城', brief: 'A mystery set in a fictional harbor.' })
+    return created
+  })()
+  const plan = await ctx.story.startResearch(actor, { novelId: novel.id, requestId: parseRequestId('spec-research'), briefArtifactId: novel.brief.id,
+    questions: [{ id: 'genre', kind: 'creative', question: 'Choose a genre', reason: 'An authorial decision' }] }, 0)
+  const evidence = await ctx.story.completeSelectedResearch(actor, { novelId: novel.id, planId: plan.planId, requestId: parseRequestId('spec-evidence'),
+    findings: [{ questionId: 'genre', callIds: [], selections: [], conclusion: 'Use a fictional mystery', adequate: true }] }, [])
+  if (evidence.result === null) throw new Error('Expected completed research')
+  const inputRefs = [novel.brief, evidence.result].map(ref => ({ artifactId: ref.id, sha256: ref.sha256 }))
+  const output = { version: 1 as const, dimensionCode: 'a1', inputRefs, facts: [{ id: 'genre-main', statement: 'The story is a mystery.' }], contentMarkdown: '# Genre\nMystery.' }
+  const candidate = await ctx.story.saveSettingsCandidate(actor, { novelId: novel.id, requestId: parseRequestId('spec-candidate'),
+    dimensionCode: 'a1', researchPlanId: plan.planId, output, childSessionId: brandString<SessionId>('child-genre') })
+  const stored = ctx.story.getArtifact(actor, { novelId: novel.id, artifactId: candidate.artifact.id })
+  const directory = join(cwd, '.dsh-story', novel.id)
+  await mkdir(directory, { recursive: true })
+  const file = join(directory, `${stored.id}.md`)
+  await writeFile(file, artifactMarkdown(stored), 'utf8')
+  expect(await readFile(file, 'utf8')).toContain('Input 1 SHA-256:')
+  const opened = successfulPreview(await preview(novel, stored.id))
+  const published = await readFile(opened.path, 'utf8')
+  expect(published).toContain('Input 1 ID:')
+  expect(published).not.toContain('Input 1 SHA-256:')
+  expect(published).toContain(`Artifact SHA-256: ${stored.sha256}`)
+  expect(ctx.story.getArtifact(actor, { novelId: novel.id, artifactId: stored.id })).toEqual(stored)
+  const fenced = join(directory, `${stored.id}.current.md`)
+  await writeFile(file, legacyArtifactMarkdown(stored), 'utf8')
+  await rm(fenced, { force: true })
+  const again = successfulPreview(await preview(novel, stored.id))
+  expect(again.path).toBe(opened.path)
+  expect(await readFile(again.path, 'utf8')).toBe(published)
+  expect(ctx.story.getArtifact(actor, { novelId: novel.id, artifactId: stored.id })).toEqual(stored)
 })
 
 it('rejects an artifact belonging to another novel before creating any projection', async () => {

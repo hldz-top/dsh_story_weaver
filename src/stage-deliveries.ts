@@ -70,8 +70,11 @@ export function registerStageDeliveryProjection(ctx: Context): Promise<Projectio
       const owner = state.calls.find(call => call.callId === identity.callId)
       const previous = owner?.deliveries.find(entry => entry.runId === identity.runId && sameSource(entry.source, identity.source))
       if (previous !== undefined) {
-        if (previous.path !== file.path || previous.description !== file.description) throw new Error('Repeated writing-stage delivery changed its document')
-        return state
+        if (previous.description !== file.description) throw new Error('Repeated writing-stage delivery changed its document')
+        if (previous.path === file.path) return state
+        return { version: 1, calls: state.calls.map(call => call === owner
+          ? { callId: call.callId, deliveries: call.deliveries.map(entry => entry.runId === identity.runId && sameSource(entry.source, identity.source) ? { ...entry, path: file.path } : entry) }
+          : call) }
       }
       const entry = { runId: identity.runId, source: identity.source, ...file }
       return { version: 1, calls: owner === undefined
@@ -158,10 +161,13 @@ export class StageDeliveries {
     if (this.ctx.sessionProjections.snapshot(session).values[projectionKey] === undefined) throw new Error('Writing-stage delivery projection is unavailable')
     const previous = session.ownEvents().map(deliveryEvent).find(entry => entry !== undefined && entry.identity.callId === identity.callId
       && entry.identity.runId === identity.runId && sameSource(entry.identity.source, identity.source))
-    if (previous !== undefined) {
-      if (previous.path !== path || previous.description !== description) throw new Error('Recorded writing-stage delivery differs from the exact preview')
-    } else {
-      if (this.ctx.tools.get('present', agent) === undefined) throw new Error('Writing requires the native present tool in this Agent scope')
+    if (previous !== undefined && previous.path === path && previous.description === description) {
+      await this.ctx.sessions.flush(session)
+      exec.signal.throwIfAborted()
+      return
+    }
+    if (previous !== undefined && previous.description !== description) throw new Error('Recorded writing-stage delivery differs from the exact preview')
+    if (this.ctx.tools.get('present', agent) === undefined) throw new Error('Writing requires the native present tool in this Agent scope')
       const agents = this.ctx.get('agents')
       if (agents === undefined) throw new Error('Stage delivery requires the host agents service')
       const turn = agents.turnBoundaryOf(session)
@@ -181,7 +187,6 @@ export class StageDeliveries {
       if (event.type !== 'deliverables/presented' || event.data.turn !== turn.lastTurn) throw new Error('Native present recorded a different writing turn')
       const recorded = deliveryEvent(event)
       if (recorded === undefined || recorded.path !== path || recorded.description !== description) throw new Error('Native present recorded a different writing-stage document')
-    }
     await this.ctx.sessions.flush(session)
     exec.signal.throwIfAborted()
   }
