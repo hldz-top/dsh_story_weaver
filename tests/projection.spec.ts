@@ -95,6 +95,24 @@ it('keeps an edited projection verbatim and opens a separate current projection'
     .toBe('守塔人找到了失踪日志。')
 })
 
+it('writes current-2 when the separate projection is edited and keeps both edited files', async () => {
+  const { ctx, actor, createNovel, preview } = await setup()
+  const novel = await createNovel('守塔人找到了失踪日志。')
+  const original = successfulPreview(await preview(novel))
+  await writeFile(original.path, '原文编辑。', 'utf8')
+  const current = successfulPreview(await preview(novel))
+  expect(current.path).toMatch(/\.current\.md$/)
+  await writeFile(current.path, '当前稿编辑。', 'utf8')
+  const next = successfulPreview(await preview(novel))
+  expect(next.path).toMatch(/\.current-2\.md$/)
+  expect(await readFile(original.path, 'utf8')).toBe('原文编辑。')
+  expect(await readFile(current.path, 'utf8')).toBe('当前稿编辑。')
+  expect(await readFile(next.path, 'utf8')).toBe('守塔人找到了失踪日志。')
+  expect(successfulPreview(await preview(novel)).path).toBe(next.path)
+  expect(ctx.story.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).text)
+    .toBe('守塔人找到了失踪日志。')
+})
+
 it('replaces an unmodified 0.2.1 preview with specification ids without changing the artifact', async () => {
   const { ctx, cwd, actor, preview } = await setup()
   const novel = await (async () => {

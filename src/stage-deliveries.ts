@@ -158,9 +158,13 @@ export class StageDeliveries {
     if (agent === undefined) throw new Error('Stage delivery requires a Session')
     const session = agent.session
     exec.signal.throwIfAborted()
-    if (this.ctx.sessionProjections.snapshot(session).values[projectionKey] === undefined) throw new Error('Writing-stage delivery projection is unavailable')
-    const previous = session.ownEvents().map(deliveryEvent).find(entry => entry !== undefined && entry.identity.callId === identity.callId
-      && entry.identity.runId === identity.runId && sameSource(entry.identity.source, identity.source))
+    const recorded = this.ctx.sessionProjections.snapshot(session).values[projectionKey]
+    if (recorded === undefined) throw new Error('Writing-stage delivery projection is unavailable')
+    // ownEvents() is the append log, oldest first (Session.snapshotEvents slices this.log).
+    // The first historical receipt would still name the pre-migration path and call present again.
+    // The folded projection applies that log in order and keeps the latest path for this source.
+    const previous = recorded.calls.find(call => call.callId === identity.callId)
+      ?.deliveries.find(entry => entry.runId === identity.runId && sameSource(entry.source, identity.source))
     if (previous !== undefined && previous.path === path && previous.description === description) {
       await this.ctx.sessions.flush(session)
       exec.signal.throwIfAborted()
@@ -168,25 +172,25 @@ export class StageDeliveries {
     }
     if (previous !== undefined && previous.description !== description) throw new Error('Recorded writing-stage delivery differs from the exact preview')
     if (this.ctx.tools.get('present', agent) === undefined) throw new Error('Writing requires the native present tool in this Agent scope')
-      const agents = this.ctx.get('agents')
-      if (agents === undefined) throw new Error('Stage delivery requires the host agents service')
-      const turn = agents.turnBoundaryOf(session)
-      if (turn.openTurnStartSeq === null) throw new Error('Stage delivery requires an open turn')
-      const callId = invocationId(identity)
-      const fromSeq = session.seq
-      const presented = await this.ctx.tools.execute({
-        calls: [{ type: 'tool-call', id: callId, name: 'present', arguments: JSON.stringify({ files: [{ path, description }] }) }],
-        agent, signal: exec.signal,
-      })
-      const result = presented.results.find(item => item.callId === callId)?.result
-      if (result === undefined) throw new Error('Native present returned without its batch result')
-      if (result.isError) throw new Error(`Writing-stage presentation failed: ${result.error.message}`, { cause: result.error })
-      const events = session.snapshotEvents(fromSeq).filter(event => event.type === 'deliverables/presented' && event.data.callId === callId)
-      if (events.length !== 1) throw new Error('Native present returned without its exact committed delivery event')
-      const event = events[0]!
-      if (event.type !== 'deliverables/presented' || event.data.turn !== turn.lastTurn) throw new Error('Native present recorded a different writing turn')
-      const recorded = deliveryEvent(event)
-      if (recorded === undefined || recorded.path !== path || recorded.description !== description) throw new Error('Native present recorded a different writing-stage document')
+    const agents = this.ctx.get('agents')
+    if (agents === undefined) throw new Error('Stage delivery requires the host agents service')
+    const turn = agents.turnBoundaryOf(session)
+    if (turn.openTurnStartSeq === null) throw new Error('Stage delivery requires an open turn')
+    const callId = invocationId(identity)
+    const fromSeq = session.seq
+    const presented = await this.ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: callId, name: 'present', arguments: JSON.stringify({ files: [{ path, description }] }) }],
+      agent, signal: exec.signal,
+    })
+    const result = presented.results.find(item => item.callId === callId)?.result
+    if (result === undefined) throw new Error('Native present returned without its batch result')
+    if (result.isError) throw new Error(`Writing-stage presentation failed: ${result.error.message}`, { cause: result.error })
+    const events = session.snapshotEvents(fromSeq).filter(event => event.type === 'deliverables/presented' && event.data.callId === callId)
+    if (events.length !== 1) throw new Error('Native present returned without its exact committed delivery event')
+    const event = events[0]!
+    if (event.type !== 'deliverables/presented' || event.data.turn !== turn.lastTurn) throw new Error('Native present recorded a different writing turn')
+    const committed = deliveryEvent(event)
+    if (committed === undefined || committed.path !== path || committed.description !== description) throw new Error('Native present recorded a different writing-stage document')
     await this.ctx.sessions.flush(session)
     exec.signal.throwIfAborted()
   }

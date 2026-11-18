@@ -121,6 +121,46 @@ it('keeps a user-edited stage file and presents a separate current projection', 
   if (outcome.status === 'rejected') throw outcome.reason
 })
 
+it('does not present again after the current path is recorded, and keeps both edited preview files', async () => {
+  const fixture = await setup()
+  const { parent, publisher, writingRun: run, novel, service, actor } = fixture
+  const brief = service.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).text
+  const activity = () => {
+    const events = parent.session.ownEvents()
+    return {
+      events: events.length,
+      presented: events.filter(event => event.type === 'deliverables/presented').length,
+      // Nested present is recorded as deliverables/presented (dsh-tool-present tools/result), not as a parent tool/call named present.
+      presentCalls: events.filter(event => event.type === 'tool/call' && event.data.name === 'present').length,
+    }
+  }
+  const outcome = await fixture.run(async exec => {
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    const original = fixture.ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!.calls[0]!.deliveries[0]!.path
+    await writeFile(original, 'User edit.', 'utf8')
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    const current = fixture.ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!.calls[0]!.deliveries[0]!.path
+    expect(current).toMatch(/\.current\.md$/)
+    await writeFile(current, 'Edited current.', 'utf8')
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    const moved = fixture.ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!.calls[0]!.deliveries[0]!.path
+    expect(moved).toMatch(/\.current-2\.md$/)
+    expect(await readFile(original, 'utf8')).toBe('User edit.')
+    expect(await readFile(current, 'utf8')).toBe('Edited current.')
+    expect(await readFile(moved, 'utf8')).toBe(brief)
+    const afterMove = activity()
+    expect(afterMove.presented).toBe(3)
+    expect(afterMove.presentCalls).toBe(0)
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    expect(activity()).toEqual(afterMove)
+    expect(fixture.ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!.calls[0]!.deliveries[0]!.path).toBe(moved)
+    expect(service.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).text).toBe(brief)
+    expect(service.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).sha256).toBe(novel.brief.sha256)
+  })
+  if (outcome.status === 'rejected') throw outcome.reason
+})
+
 it('replaces an unmodified 0.2.1 stage preview with specification ids', async () => {
   const fixture = await setup()
   const { publisher, writingRun: run, novel, service, actor } = fixture
