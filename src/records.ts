@@ -53,19 +53,30 @@ const manuscriptFields = { manuscriptHistory: z.array(manuscriptRecordSchema), m
 const { revisionOf: _lineage, ...legacyManuscriptFields } = manuscriptRecordSchema.shape
 const legacyManuscriptRecordSchema = z.strictObject(legacyManuscriptFields).refine(record => record.artifact.kind === record.target.kind, 'Manuscript target and artifact kind must agree')
 const manuscriptNovelSchema = z.strictObject({ ...settingsNovelSchema.shape, recordVersion: z.literal(4), ...manuscriptFields, manuscriptHistory: z.array(legacyManuscriptRecordSchema) })
-/** Written after a settings layer passes. Absent on novels saved before snapshot reuse. */
+/** Written after a settings layer passes. Absent on novels saved before snapshot reuse. `briefId` is absent on snapshots saved before project specification ids. */
 const settingsSnapshotSchema = z.strictObject({
   briefSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  briefId: z.string().regex(/^[a-f0-9]{8}$/).optional(),
   roots: z.array(z.string().regex(/^[a-z][a-z0-9]*$/)).nonempty(),
   artifactId: artifactIdSchema,
+})
+const specIdentitySchema = z.strictObject({
+  digest: z.string().regex(/^[a-f0-9]{64}$/),
+  id: z.string().regex(/^[a-f0-9]{8}$/),
 })
 const currentNovelSchema = z.strictObject({
   ...settingsNovelSchema.shape, recordVersion: z.literal(5), ...manuscriptFields, settingsHistory: z.array(settingsRecordSchema),
   settingsSnapshots: z.array(settingsSnapshotSchema).optional(),
+  /** Absent on novels saved before project specification ids. Digests and ids are each unique inside the novel. */
+  specIdentities: z.array(specIdentitySchema).optional(),
 })
   .refine(record => new Set(record.settingsHeads.map(head => head.dimensionCode)).size === record.settingsHeads.length, 'Each settings dimension has at most one current head')
   .refine(record => new Set(record.manuscriptHeads.map(head => `${head.kind}:${head.chapterNumber}`)).size === record.manuscriptHeads.length, 'Manuscript head slots must be unique')
   .refine(record => new Set(record.appliedChapters.map(chapter => `${chapter.body.id}:${chapter.continuity.id}`)).size === record.appliedChapters.length, 'Applied chapter pairs must be unique')
+  .refine(record => {
+    const entries = record.specIdentities ?? []
+    return new Set(entries.map(entry => entry.digest)).size === entries.length && new Set(entries.map(entry => entry.id)).size === entries.length
+  }, 'Specification identities must be unique within the novel')
 const emptyManuscript = () => ({ manuscriptHistory: [] as z.infer<typeof manuscriptRecordSchema>[], manuscriptHeads: [] as z.infer<typeof manuscriptHeadSchema>[], appliedChapters: [] as z.infer<typeof appliedChapterSchema>[] })
 const novelSchema = z.union([
   currentNovelSchema,

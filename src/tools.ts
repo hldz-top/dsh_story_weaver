@@ -8,7 +8,7 @@ import { artifactKinds, parseArtifactId, parseNovelId, parseRequestId } from './
 import { parseAttemptId, parseRunId, type AttemptId, type RunId } from './run-store.ts'
 import { findingQuestionIdMessage, researchQuestionIdMessage } from './research.ts'
 import type { WritingService } from './service.ts'
-import { projectArtifact } from './projection.ts'
+import { projectPublishedArtifact } from './projection.ts'
 
 const uuidValue = (prefix: string) => `${prefix}_ plus a lowercase UUID, copied exactly from a previous tool result`
 
@@ -328,7 +328,7 @@ export function registerWritingTools(ctx: Context, service: WritingService, prev
       const novel = service.getNovel(actor, novelId)
       const artifact = service.getArtifact(actor, { novelId, artifactId: parseToolArtifactId(args.artifactId) })
       const imported = artifact.kind === 'settings-dimension' && service.getSettings(actor, novelId).history.some(item => item.artifact.id === artifact.id && item.origin === 'import')
-      return projectArtifact(ctx, exec, actor, novel, artifact, previewDirectory, imported)
+      return projectPublishedArtifact(ctx, exec, actor, novel, artifact, previewDirectory, service, imported)
     },
   })))
 }

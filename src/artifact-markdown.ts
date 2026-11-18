@@ -44,9 +44,56 @@ function sourceLink(url: string): string {
   return `<${new URL(url).href.replaceAll('<', '%3C').replaceAll('>', '%3E')}>`
 }
 
-/** @param artifact - Exact stored version. @param options - imported marks a settings dimension adopted through story_settings_import. @returns Its readable Markdown representation. */
-export function artifactMarkdown(artifact: Artifact, options: { readonly imported?: boolean } = {}): string {
-  return renderArtifact(artifact, readableStyle, options.imported === true)
+/** Options for one readable projection. `specIds` maps a full content digest to its project specification id. */
+export interface ArtifactMarkdownOptions {
+  /** The artifact is a settings dimension adopted through story_settings_import. */
+  readonly imported?: boolean
+  /** Allocated specification ids for this project, keyed by the full content digest. */
+  readonly specIds?: ReadonlyMap<string, string>
+}
+
+/**
+ * User-facing identity of a referenced specification. An allocated id is not a SHA-256, so the label says ID.
+ * Without an allocation the stored 64-character digest remains, and the label stays SHA-256.
+ * @param name - Provenance label without the identity suffix.
+ * @param digest - Full content digest stored on the reference.
+ * @param specIds - Project allocations, when the caller has them.
+ * @returns One provenance line.
+ */
+function referenceIdentity(name: string, digest: string, specIds: ReadonlyMap<string, string> | undefined): string {
+  const id = specIds?.get(digest)
+  if (id !== undefined && /^[a-f0-9]{8}$/.test(id)) return `${name} ID: ${id}`
+  return `${name} SHA-256: ${digest}`
+}
+
+/** @param artifact - Exact stored version. @param options - imported marks a settings dimension adopted through story_settings_import. specIds supplies project specification ids. @returns Its readable Markdown representation. */
+export function artifactMarkdown(artifact: Artifact, options: ArtifactMarkdownOptions = {}): string {
+  return renderArtifact(artifact, readableStyle, options.imported === true, options.specIds)
+}
+
+/**
+ * Content digests of specifications this document references. Research source checksums and the document's own
+ * artifact digest are not specification identities and are omitted.
+ * @param artifact - Exact stored version.
+ * @returns Digests that can be allocated as project specification ids.
+ */
+export function referencedContentDigests(artifact: Artifact): readonly string[] {
+  if (artifact.kind === 'creative-brief' || artifact.kind === 'research-plan' || artifact.kind === 'research-evidence') return []
+  if (artifact.kind === 'settings-dimension') return parseContent(StageOutputSchemas.settings, artifact.text).inputRefs.map(input => input.sha256)
+  if (artifact.kind === 'settings') return parseContent(settingsCollectionSchema, artifact.text).inputRefs.map(input => input.sha256)
+  if (artifact.kind === 'book-outline') return parseContent(StageOutputSchemas['book-outline'], artifact.text).inputRefs.map(input => input.sha256)
+  if (artifact.kind === 'chapter-outline') return parseContent(StageOutputSchemas['chapter-outline'], artifact.text).inputRefs.map(input => input.sha256)
+  if (artifact.kind === 'body') return parseContent(StageOutputSchemas.body, artifact.text).inputRefs.map(input => input.sha256)
+  if (artifact.kind === 'continuity') return parseContent(StageOutputSchemas.continuity, artifact.text).inputRefs.map(input => input.sha256)
+  if (artifact.kind === 'continuity-snapshot') return parseContent(StageOutputSchemas['continuity-snapshot'], artifact.text).inputRefs.map(input => input.sha256)
+  if (artifact.kind === 'review') {
+    let review: ReturnType<typeof parseStoredReview>
+    try { review = parseStoredReview(JSON.parse(artifact.text)) }
+    catch (cause) { throw new WritingError('corrupt-artifact', 'Writing artifact JSON cannot be rendered', { cause }) }
+    return [review.reviewed.sha256, ...review.inputRefs.map(input => input.sha256)]
+  }
+  const kind: never = artifact.kind
+  throw new Error(`Unsupported artifact kind: ${kind}`)
 }
 
 /**
@@ -59,7 +106,7 @@ export function legacyArtifactMarkdown(artifact: Artifact): string {
   return renderArtifact(artifact, legacyStyle)
 }
 
-function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false): string {
+function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false, specIds?: ReadonlyMap<string, string>): string {
   if (artifact.kind === 'creative-brief') return artifact.text
   const sections: string[] = []
   const provenance = [
@@ -74,7 +121,7 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
       sections.push(`## Fact ${index + 1}`, 'Fact ID', style.text(fact.id), 'Statement', style.text(fact.statement))
     }
     for (const [index, input] of settings.inputRefs.entries()) {
-      provenance.push(`Input ${index + 1} artifact: ${input.artifactId}`, `Input ${index + 1} SHA-256: ${input.sha256}`)
+      provenance.push(`Input ${index + 1} artifact: ${input.artifactId}`, referenceIdentity(`Input ${index + 1}`, input.sha256, specIds))
     }
   } else if (artifact.kind === 'review') {
     let review: ReturnType<typeof parseStoredReview>
@@ -97,9 +144,9 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
         ...(issue.poison === undefined ? [] : [`Poison: ${issue.poison}`]),
         'Finding', style.text(issue.message), ...evidenceSections(style, issue.evidence))
     }
-    provenance.push(`Reviewed artifact: ${review.reviewed.artifactId}`, `Reviewed SHA-256: ${review.reviewed.sha256}`)
+    provenance.push(`Reviewed artifact: ${review.reviewed.artifactId}`, referenceIdentity('Reviewed', review.reviewed.sha256, specIds))
     for (const [index, input] of review.inputRefs.entries()) {
-      provenance.push(`Input ${index + 1} artifact: ${input.artifactId}`, `Input ${index + 1} SHA-256: ${input.sha256}`)
+      provenance.push(`Input ${index + 1} artifact: ${input.artifactId}`, referenceIdentity(`Input ${index + 1}`, input.sha256, specIds))
     }
   } else if (artifact.kind === 'settings') {
     const settings = parseContent(settingsCollectionSchema, artifact.text)
@@ -108,7 +155,7 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
       sections.push(`## Dimension ${dimension.dimensionCode}`, style.text(dimension.contentMarkdown))
       for (const fact of dimension.facts) sections.push('Fact ID', style.text(fact.id), 'Statement', style.text(fact.statement))
     }
-    for (const input of settings.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
+    for (const input of settings.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, referenceIdentity('Input', input.sha256, specIds))
   } else if (artifact.kind === 'book-outline') {
     const outline = parseContent(StageOutputSchemas['book-outline'], artifact.text)
     sections.push('# Book outline', style.text(outline.contentMarkdown), '## Ending', style.text(outline.ending))
@@ -117,7 +164,7 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
       sections.push(`## Chapter ${chapter.chapterNumber}`, 'Title', style.text(chapter.title), 'Purpose', style.text(chapter.purpose))
       for (const obligation of chapter.obligations) sections.push('Required event ID', style.text(obligation.id), 'Required event', style.text(obligation.description))
     }
-    for (const input of outline.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
+    for (const input of outline.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, referenceIdentity('Input', input.sha256, specIds))
   } else if (artifact.kind === 'chapter-outline') {
     const outline = parseContent(StageOutputSchemas['chapter-outline'], artifact.text)
     sections.push(`# Chapter ${outline.chapterNumber} outline`, 'Title', style.text(outline.title), '## Through-line', style.text(outline.throughLine))
@@ -125,13 +172,13 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
     for (const scene of outline.scenes) sections.push('## Scene', 'Scene ID', style.text(scene.id), 'Purpose', style.text(scene.purpose), 'Action', style.text(scene.action), 'Required event IDs', style.text(scene.obligationIds.join(', ')))
     for (const obligation of outline.obligations) sections.push('## Required event', 'ID', style.text(obligation.id), 'Description', style.text(obligation.description))
     for (const note of outline.stateNotes ?? []) sections.push('## State note', style.text(note))
-    for (const input of outline.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
+    for (const input of outline.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, referenceIdentity('Input', input.sha256, specIds))
   } else if (artifact.kind === 'body') {
     const body = parseContent(StageOutputSchemas.body, artifact.text)
     const prose = assembleBody(body)
     sections.push(`# Chapter ${body.chapterNumber}`, `Story word count: ${countStoryWords(prose)}`, '## Prose', style.text(prose))
     for (const scene of body.scenes) provenance.push(`Scene: ${scene.sceneId}`)
-    for (const input of body.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
+    for (const input of body.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, referenceIdentity('Input', input.sha256, specIds))
   } else if (artifact.kind === 'continuity') {
     const continuity = parseContent(StageOutputSchemas.continuity, artifact.text)
     sections.push(`# Chapter ${continuity.chapterNumber} continuity`, '## Summary', style.text(continuity.summary))
@@ -142,7 +189,7 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
     for (const event of continuity.timeline) sections.push('## Timeline event', style.text(event.event), ...evidenceSections(style, event.evidence))
     for (const obligation of continuity.obligations) sections.push('## Required event', 'ID', style.text(obligation.id), `Status: ${obligation.status}`, 'Explanation', style.text(obligation.explanation), ...evidenceSections(style, obligation.evidence))
     for (const plant of continuity.plants ?? []) sections.push('## Foreshadowing plant', 'ID', style.text(plant.id), `Status: ${plant.status}`, 'Planted chapter', String(plant.plantedChapter), ...(plant.dueChapter === undefined ? [] : ['Due chapter', String(plant.dueChapter)]), ...(plant.paidChapter === undefined ? [] : ['Paid chapter', String(plant.paidChapter)]), 'Text', style.text(plant.text))
-    for (const input of continuity.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
+    for (const input of continuity.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, referenceIdentity('Input', input.sha256, specIds))
   } else if (artifact.kind === 'continuity-snapshot') {
     const snapshot = parseContent(StageOutputSchemas['continuity-snapshot'], artifact.text)
     sections.push(`# Chapter ${snapshot.chapterNumber} continuity snapshot`)
@@ -150,7 +197,7 @@ function renderArtifact(artifact: Artifact, style: BlockStyle, imported = false)
     for (const note of snapshot.unrecoveredForeshadowing) sections.push('## Unrecovered foreshadowing', style.text(note.note))
     for (const note of snapshot.usedPlotBridges) sections.push('## Used plot bridge', style.text(note.note))
     for (const plant of snapshot.plants ?? []) sections.push('## Foreshadowing plant', 'ID', style.text(plant.id), `Status: ${plant.status}`, 'Planted chapter', String(plant.plantedChapter), ...(plant.dueChapter === undefined ? [] : ['Due chapter', String(plant.dueChapter)]), ...(plant.paidChapter === undefined ? [] : ['Paid chapter', String(plant.paidChapter)]), 'Text', style.text(plant.text))
-    for (const input of snapshot.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, `Input SHA-256: ${input.sha256}`)
+    for (const input of snapshot.inputRefs) provenance.push(`Input artifact: ${input.artifactId}`, referenceIdentity('Input', input.sha256, specIds))
   } else if (artifact.kind === 'research-plan') {
     const plan = parseContent(researchPlanContentSchema, artifact.text)
     sections.push('# Research plan')

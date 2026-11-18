@@ -96,7 +96,7 @@ it('writes three reviewed chapters through native research and stages before com
   for (const item of delivered) {
     if (item.source.kind !== 'artifact') throw new Error('Successful fixture unexpectedly produced rejected output')
     const artifact = fixture.service.getArtifact(fixture.actor, { novelId: fixture.novel.id, artifactId: parseArtifactId(item.source.artifactId) })
-    expect(await readFile(item.path)).toEqual(Buffer.from(artifactMarkdown(artifact), 'utf8'))
+    expect(await readFile(item.path)).toEqual(Buffer.from(artifactMarkdown(artifact, { specIds: fixture.service.specIdentityMap(fixture.actor, fixture.novel.id) }), 'utf8'))
   }
 })
 

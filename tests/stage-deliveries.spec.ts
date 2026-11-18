@@ -1,6 +1,6 @@
 import { once } from 'node:events'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as JsonStorage from '@deepseek-ai/dsh-storage-json'
@@ -9,6 +9,9 @@ import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as ToolPresent from '@deepseek-ai/dsh-tool-present'
 import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import { artifactMarkdown } from '../src/artifact-markdown.ts'
 import { parseRequestId } from '../src/contracts.ts'
 import { openWritingService } from '../src/service.ts'
 import { openRunStore } from '../src/run-store.ts'
@@ -92,7 +95,7 @@ it('deduplicates concurrent requests and reconstruction while preserving distinc
   if (outcome.status === 'rejected') throw outcome.reason
 })
 
-it('refuses user-edited version files without changing authority or producing another delivery', async () => {
+it('keeps a user-edited stage file and presents a separate current projection', async () => {
   const fixture = await setup()
   const { ctx, parent, publisher, writingRun: run, novel, service, actor } = fixture
   const outcome = await fixture.run(async exec => {
@@ -100,11 +103,86 @@ it('refuses user-edited version files without changing authority or producing an
     const initial = ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!
     const path = initial.calls[0]!.deliveries[0]!.path
     await writeFile(path, 'User edit.', 'utf8')
-    await expect(publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)).rejects.toThrow(/Preview differs/)
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
     expect(await readFile(path, 'utf8')).toBe('User edit.')
+    const delivered = ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!
+    const current = delivered.calls[0]!.deliveries[0]!
+    expect(current.path).not.toBe(path)
+    expect(await readFile(current.path, 'utf8')).toBe(service.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).text)
     expect(service.getNovel(actor, novel.id)).toEqual(novel)
-    expect(ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']).toEqual(initial)
-    expect(parent.session.ownEvents().filter(event => event.type === 'deliverables/presented')).toHaveLength(1)
+    expect(service.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).sha256).toBe(novel.brief.sha256)
+    const handle = await ctx.sessionPersistence.open(parent.session.id, 'read')
+    try {
+      const { events } = await handle.read()
+      const replay = ctx.sessionProjections.restore({}, events, SessionLogOffset(0), handle.header, SessionLogOffset(0))
+      expect(replay.snapshot.values['story-stage-deliveries']).toEqual(delivered)
+    } finally { await handle.close() }
+  })
+  if (outcome.status === 'rejected') throw outcome.reason
+})
+
+it('does not present again after the current path is recorded, and keeps both edited preview files', async () => {
+  const fixture = await setup()
+  const { parent, publisher, writingRun: run, novel, service, actor } = fixture
+  const brief = service.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).text
+  const activity = () => {
+    const events = parent.session.ownEvents()
+    return {
+      events: events.length,
+      presented: events.filter(event => event.type === 'deliverables/presented').length,
+      // Nested present is recorded as deliverables/presented (dsh-tool-present tools/result), not as a parent tool/call named present.
+      presentCalls: events.filter(event => event.type === 'tool/call' && event.data.name === 'present').length,
+    }
+  }
+  const outcome = await fixture.run(async exec => {
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    const original = fixture.ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!.calls[0]!.deliveries[0]!.path
+    await writeFile(original, 'User edit.', 'utf8')
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    const current = fixture.ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!.calls[0]!.deliveries[0]!.path
+    expect(current).toMatch(/\.current\.md$/)
+    await writeFile(current, 'Edited current.', 'utf8')
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    const moved = fixture.ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!.calls[0]!.deliveries[0]!.path
+    expect(moved).toMatch(/\.current-2\.md$/)
+    expect(await readFile(original, 'utf8')).toBe('User edit.')
+    expect(await readFile(current, 'utf8')).toBe('Edited current.')
+    expect(await readFile(moved, 'utf8')).toBe(brief)
+    const afterMove = activity()
+    expect(afterMove.presented).toBe(3)
+    expect(afterMove.presentCalls).toBe(0)
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    await publisher.publishArtifact(exec, run.id, novel.id, novel.brief.id)
+    expect(activity()).toEqual(afterMove)
+    expect(fixture.ctx.sessionProjections.snapshot(parent.session).values['story-stage-deliveries']!.calls[0]!.deliveries[0]!.path).toBe(moved)
+    expect(service.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).text).toBe(brief)
+    expect(service.getArtifact(actor, { novelId: novel.id, artifactId: novel.brief.id }).sha256).toBe(novel.brief.sha256)
+  })
+  if (outcome.status === 'rejected') throw outcome.reason
+})
+
+it('replaces an unmodified 0.2.1 stage preview with specification ids', async () => {
+  const fixture = await setup()
+  const { publisher, writingRun: run, novel, service, actor } = fixture
+  const plan = await service.startResearch(actor, { novelId: novel.id, requestId: parseRequestId('stage-research'), briefArtifactId: novel.brief.id,
+    questions: [{ id: 'genre', kind: 'creative', question: 'Choose a genre', reason: 'An authorial decision' }] }, 0)
+  const evidence = await service.completeSelectedResearch(actor, { novelId: novel.id, planId: plan.planId, requestId: parseRequestId('stage-evidence'),
+    findings: [{ questionId: 'genre', callIds: [], selections: [], conclusion: 'Use a fictional mystery', adequate: true }] }, [])
+  if (evidence.result === null) throw new Error('Expected completed research')
+  const inputRefs = [novel.brief, evidence.result].map(ref => ({ artifactId: ref.id, sha256: ref.sha256 }))
+  const output = { version: 1 as const, dimensionCode: 'a1', inputRefs, facts: [{ id: 'genre-main', statement: 'The story is a mystery.' }], contentMarkdown: '# Genre\nMystery.' }
+  const candidate = await service.saveSettingsCandidate(actor, { novelId: novel.id, requestId: parseRequestId('stage-candidate'),
+    dimensionCode: 'a1', researchPlanId: plan.planId, output, childSessionId: brandString<SessionId>('stage-child') })
+  const stored = service.getArtifact(actor, { novelId: novel.id, artifactId: candidate.artifact.id })
+  const file = join(actor.workspace, '.dsh-story', novel.id, `${stored.id}.md`)
+  await mkdir(join(actor.workspace, '.dsh-story', novel.id), { recursive: true })
+  await writeFile(file, artifactMarkdown(stored), 'utf8')
+  const outcome = await fixture.run(async exec => {
+    await publisher.publishArtifact(exec, run.id, novel.id, stored.id)
+    expect(await readFile(file, 'utf8')).toContain('Input 1 ID:')
+    expect(await readFile(file, 'utf8')).not.toContain('Input 1 SHA-256:')
+    expect(await readFile(file, 'utf8')).toContain(`Artifact SHA-256: ${stored.sha256}`)
+    expect(service.getArtifact(actor, { novelId: novel.id, artifactId: stored.id })).toEqual(stored)
   })
   if (outcome.status === 'rejected') throw outcome.reason
 })
